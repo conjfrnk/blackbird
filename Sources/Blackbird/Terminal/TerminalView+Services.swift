@@ -2,34 +2,16 @@ import AppKit
 import Foundation
 import BBCore
 
-/// macOS Services + Look Up + QuickLook integration for `TerminalView`.
-/// Split out of `TerminalView+Find.swift` so the find/search engine there
-/// isn't interleaved with these unrelated responder-chain concerns
-/// (REFACTOR.md Area 3). These overrides expose the current selection to the
-/// Services submenu, Look Up (Ctrl-⌘-D / three-finger tap), and QuickLook;
-/// without them NSResponder returns nil and macOS hides the Services submenu.
-/// `selectedStringForServices` returns the RAW selection (no clipboard scrub)
-/// because these paths go through a service-owned NSPasteboard, never the
-/// general pasteboard.
 extension TerminalView {
 
     // MARK: - macOS Services + Look Up
 
-    /// Expose the current selection to the Services menu and Look Up
-    /// (three-finger tap, Ctrl-⌘-D). Without this override, NSResponder's
-    /// default returns nil for our view and macOS hides the Services
-    /// submenu entirely. Accepts string-type sends; we never accept
-    /// pasteboard-originated changes here (paste still routes through
-    /// `paste(_:)` so the TUI's bracketed-paste / sanitizer stays in play).
+    /// Without this override NSResponder returns nil and macOS hides the Services submenu.
     public override func validRequestor(
         forSendType sendType: NSPasteboard.PasteboardType?,
         returnType: NSPasteboard.PasteboardType?
     ) -> Any? {
-        // A validation predicate: AppKit asks on every right-click / menu open
-        // (once per service), so it must be O(1) and touch neither the core
-        // queue nor the grid. A live selection always names content (a click
-        // without a drag is cleared on mouse-up); `writeSelection` still
-        // refuses if the text turns out blank.
+        // AppKit asks on every menu open, once per service: keep this O(1) and off the core queue.
         if sendType == .string, returnType == nil,
            selection != nil, session != nil, currentSnapshot != nil {
             return self
@@ -37,11 +19,7 @@ extension TerminalView {
         return super.validRequestor(forSendType: sendType, returnType: returnType)
     }
 
-    /// Called by the Services infrastructure when the user picks
-    /// "Services → …" on a selection; writes the selection text onto the
-    /// supplied pasteboard so the chosen service can read it.
-    /// Part of the informal `NSServicesMenuRequestor` protocol — not an
-    /// `NSResponder` override, so no `override` keyword.
+    /// Part of the informal `NSServicesMenuRequestor` protocol, not an `NSResponder` override.
     @objc public func writeSelection(
         to pboard: NSPasteboard,
         types: [NSPasteboard.PasteboardType]
@@ -54,38 +32,17 @@ extension TerminalView {
         return true
     }
 
-    /// The hovered OSC 8 href that a preview surface may display: resolved
-    /// against the snapshot on screen and gated by `OSC8URLPolicy`. Nil when
-    /// nothing clickable is under the pointer or the href fails policy.
-    /// Single entry point so no preview path can re-derive it from the
-    /// per-snapshot `hoveredLinkID` and skip the gate.
+    /// The only source of a hovered href for preview surfaces. Link ids are assigned per snapshot,
+    /// so re-resolving `hoveredLinkID` can name a different URL and skips the `OSC8URLPolicy` gate.
     func hoveredLinkURLForPreview() -> URL? {
         hoverCoordinator.hoveredLinkURL()
     }
 
-    /// Three-finger tap / Force Touch on the trackpad triggers
-    /// `quickLook(with:)` on the responder chain. Preview the current
-    /// selection (or the hovered OSC-8 link URL when no selection) in an
-    /// NSPopover anchored under the pointer — Ghostty / Safari / Xcode
-    /// idiom. Falls back to `super` when nothing useful is under the
-    /// pointer so macOS can still offer dictionary lookup / media preview
-    /// for other responder hits.
     public override func quickLook(with event: NSEvent) {
-        // Priority: selection wins (user picked it explicitly) > hovered
-        // OSC-8 URL (already highlighted). Nothing actionable → defer
-        // to AppKit's default behaviour (dictionary / None).
         let text: String? = {
             if let sel = selectedStringForServices(), !sel.isEmpty {
                 return TerminalView.lookUpPreviewText(sel)
             }
-            // The hovered href, already policy-checked and resolved against the
-            // snapshot that is on screen. Previously this re-resolved
-            // `hoveredLinkID` against `currentSnapshot` — but link ids are
-            // assigned per snapshot, so a stale id could name a *different*
-            // URL, and that URL reached `NSTextField` having passed neither
-            // `OSC8URLPolicy` nor the credential-redaction / control-character
-            // scrub the dwell tooltip applies. Both holes close by asking the
-            // coordinator for the href it actually resolved.
             if let url = hoveredLinkURLForPreview() {
                 return HoverCoordinator.displayString(forHref: url.absoluteString)
             }
@@ -96,12 +53,7 @@ extension TerminalView {
             return
         }
 
-        // Pointer position for the popover anchor. event.locationInWindow
-        // is in window space; convert to view space for the popover's
-        // positioning rect.
         let pointInView = convert(event.locationInWindow, from: nil)
-        // Anchor a 1-pt rect at the pointer so the popover arrows find
-        // a precise spot. AppKit expands as needed to place the popover.
         let anchor = NSRect(origin: pointInView, size: NSSize(width: 1, height: 1))
 
         let label = NSTextField(labelWithString: text)
@@ -133,14 +85,8 @@ extension TerminalView {
         popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
     }
 
-    /// The part of a selection the Look Up popover can actually show.
-    /// `NSTextField.maximumNumberOfLines` is not honoured for text containing
-    /// hard newlines, so handing the label the whole selection typesets every
-    /// selected line synchronously (~1.4 s for ⌘A over 100k lines of
-    /// scrollback) and sizes the popover to the selection instead of a
-    /// 6-line preview. Scans from the head only, so the cost is O(preview)
-    /// however large `text` is. The character cap also covers a soft-wrapped
-    /// logical line, which `textRange` joins into one huge line.
+    /// `NSTextField.maximumNumberOfLines` is not honoured for text with hard newlines: the label
+    /// would typeset the whole selection synchronously, so truncate before handing it over.
     static func lookUpPreviewText(
         _ text: String, maxLines: Int = 6, maxCharacters: Int = 2_000
     ) -> String {
@@ -159,12 +105,7 @@ extension TerminalView {
         return text
     }
 
-    /// Selection → String without the clipboard scrubbing step. Services
-    /// and Look Up get the raw text: the downstream app may legitimately
-    /// want formatting characters the clipboard-sanitizer would strip,
-    /// and any bidi overrides won't reach Safari/Mail via this path (it
-    /// goes through an NSPasteboard the service owns, then a UI chosen
-    /// by the user — we never copy onto the general pasteboard here).
+    /// Raw, without the clipboard scrub: it goes to a service-owned pasteboard, never the general one.
     func selectedStringForServices() -> String? {
         guard let sel = selection, let session, let snap = currentSnapshot else {
             return nil

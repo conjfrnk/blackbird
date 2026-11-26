@@ -1,20 +1,7 @@
 import Foundation
 import BBCore
 
-/// Maps keyboard input into the byte sequences the shell expects.
-///
-/// Encodes two protocols:
-///   * **Legacy** (default): bare ASCII, Return=CR, Tab=HT, Backspace=DEL,
-///     Ctrl+printable=C0 byte, Option-as-Meta (ESC+), xterm `CSI 1;M <final>`
-///     for modified arrows / F-keys, CSI Z for Shift+Tab.
-///   * **Kitty progressive enhancement** (active when the TUI has pushed
-///     flag 1 via `ESC[>1u` and `mode` contains `.disambiguateEscCodes`):
-///     modified Enter/Esc/Tab/Backspace become `CSI <cp>;<mod>u`, and
-///     Ctrl+letter combinations that alias C0 control codes (Ctrl+i, Ctrl+m,
-///     Ctrl+[, Ctrl+h) also switch to CSI u so the TUI can tell them apart
-///     from the unmodified Tab/Enter/Esc/Backspace keys they collide with.
-///
-/// Shift+Enter in Claude Code depends on the kitty path.
+/// Maps keyboard input to PTY bytes: legacy xterm encoding, or the kitty keyboard protocol once a program pushes flags.
 public final class KeyEncoder {
 
     public struct Modifiers: OptionSet, Sendable {
@@ -31,96 +18,46 @@ public final class KeyEncoder {
         case home, end, pageUp, pageDown
         case delete, insert
         case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
-        // F13-F20 exist on full-size and many third-party keyboards. AppKit
-        // reports them as Unicode private-use scalars, so without an explicit
-        // mapping they fell through to `encode(chars:)` and its
-        // `Data(chars.utf8)` fallback typed the raw PUA bytes into the shell.
         case f13, f14, f15, f16, f17, f18, f19, f20
-        // Keypad keys — only routed through encodeSpecial when the TUI
-        // has enabled application-keypad mode (DECPAM, `appKeypad`).
-        // Without the mode bit the legacy bytes (plain digits, plain
-        // operators) are correct, so we let those chars take the normal
-        // `encode(chars:)` path. Audit key-encoder F9.
         case kp0, kp1, kp2, kp3, kp4, kp5, kp6, kp7, kp8, kp9
         case kpEnter, kpPlus, kpMinus, kpMultiply, kpDivide
         case kpDecimal, kpEquals
     }
 
-    /// Kitty-protocol event-type sub-parameter (`CSI <cp>;<mod>:<event>u`).
-    /// Only surfaces in the CSI-u output when `reportEventTypes` is set;
-    /// the legacy path ignores it entirely.
+    /// Kitty event-type sub-parameter (`CSI <cp>;<mod>:<event>u`).
     public enum EventType: Int {
         case press   = 1
         case `repeat` = 2
         case release = 3
     }
 
-    /// If true, Option modifier produces ESC+char (traditional Meta behavior).
-    /// If false, Option produces the character the OS assigned (e.g., Option-e -> accent).
-    /// Resolved from `Preferences.shared.optionKey` at construction; the
-    /// encoder is rebuilt by `TerminalView.syncEncoderFromPreferences()`
-    /// when the user toggles "Option Key" in Settings.
     public let optionIsMeta: Bool
 
     public init(optionIsMeta: Bool = true) {
         self.optionIsMeta = optionIsMeta
     }
 
-    /// Apply the Native-Option (audit H7) rule to `mods`: when the Option key
-    /// is "Native" (`optionIsMeta == false`), Option is invisible to the shell
-    /// for printables — Option-e produces 'é', Option-Arrow emits plain ESC[A,
-    /// etc. — so it's stripped from the effective modifier set. EXCEPTION: when
-    /// `.control` is also held there's no dead-key / OS-printable to compete
-    /// with, and the user clearly wants the full chord (Emacs / readline
-    /// Meta+Ctrl); stripping Option there would silently degrade Ctrl+Opt+key
-    /// to bare Ctrl+key (modifyOtherKeys mod=5 instead of mod=7), losing the
-    /// meta bit. Returns `mods` unchanged when Option should stay visible
-    /// (`optionIsMeta`, or Control present), else `mods` minus `.option`.
-    ///
-    /// One definition shared by `encode` (over `nonCmdMods`) and
-    /// `encodeSpecial` (over `modifiers`).
+    /// Native Option is invisible to the shell, except with Control held: stripping it there would degrade
+    /// Ctrl+Opt+key to bare Ctrl+key (mod=5 instead of mod=7).
     private func applyNativeOptionRule(_ mods: Modifiers) -> Modifiers {
         if optionIsMeta { return mods }
         if mods.contains(.control) { return mods }
         return mods.subtracting(.option)
     }
 
-    /// Encode a character sequence plus modifiers into bytes.
-    ///
-    /// - Parameter mode: terminal mode bits from the current snapshot.
-    ///   When `mode.contains(.disambiguateEscCodes)` the kitty progressive
-    ///   enhancement path is active; otherwise we emit legacy bytes.
-    /// - Parameter eventType: press / repeat / release. When mode contains
-    ///   `.reportEventTypes`, CSI-u output carries the event type as a
-    ///   sub-parameter of the modifier field. In all other cases:
-    ///   `.press` / `.repeat` encode identically to the default
-    ///   behaviour; `.release` returns empty `Data` because the key-down
-    ///   code path is the only one that emits bytes to the PTY.
     public func encode(
         chars: String,
         modifiers: Modifiers,
         mode: BBTermMode = [],
         eventType: EventType = .press
     ) -> Data {
-        // Release events are reported ONLY when Kitty flag 2 is active
-        // AND the key would have gone through the CSI-u path. Everything
-        // else drops the release — legacy TUIs get confused by post-key
-        // traffic they didn't ask for.
-        // Non-press events (release, repeat) only leave the encoder
-        // when the TUI has opted into `reportEventTypes` (Kitty flag 2).
-        // Every other protocol path expects press-only traffic; the CSI u
-        // / CSI 27 / legacy shapes have no way to distinguish repeat from
-        // press otherwise.
+        // Release / repeat leave the encoder only under kitty flag 2 (`reportEventTypes`).
         if eventType != .press && !mode.contains(.reportEventTypes) {
             return Data()
         }
         guard !chars.isEmpty else { return Data() }
 
-        // ⌘-prefixed keys belong to the app layer (menu shortcuts, window
-        // management) and must never turn into PTY bytes — otherwise ⌘C
-        // could end up sending a literal 'c' to the shell. TerminalView
-        // filters these at the event boundary; defence-in-depth here means
-        // a future caller exercising the encoder directly still won't leak.
+        // ⌘ chords belong to the app layer and must never become PTY bytes.
         if modifiers.contains(.command) { return Data() }
 
         let kitty = mode.contains(.disambiguateEscCodes)
@@ -128,16 +65,9 @@ public final class KeyEncoder {
         let alternateKeys = mode.contains(.reportAlternateKeys)
         let associatedText = mode.contains(.reportAssociatedText)
         let nonCmdMods = modifiers.subtracting(.command)
-        // In Native-Option mode the shell should not see Option for
-        // *printable* keystrokes; the H7 rule (with the Ctrl-held exception)
-        // lives in `applyNativeOptionRule`. Stripping `.option` keeps
-        // `hasMods` and the CSI u modifier param agreeing that Option is
-        // invisible.
         let effectiveMods = applyNativeOptionRule(nonCmdMods)
         let hasMods = !effectiveMods.isEmpty
 
-        // Kitty disambiguation (Enter / Esc / Tab / Backspace + a modifier) →
-        // `CSI <cp>;<mod>u` so the TUI can tell Shift+Enter from Enter, etc.
         if let bytes = tryKittyDisambiguation(
             chars: chars, kitty: kitty, hasMods: hasMods,
             effectiveMods: effectiveMods, eventType: eventType, associatedText: associatedText
@@ -145,7 +75,6 @@ public final class KeyEncoder {
             return bytes
         }
 
-        // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u.
         if let bytes = tryKittyAllKeys(
             chars: chars, modifiers: modifiers, effectiveMods: effectiveMods,
             allKeys: allKeys, alternateKeys: alternateKeys,
@@ -154,34 +83,21 @@ public final class KeyEncoder {
             return bytes
         }
 
-        // xterm `modifyOtherKeys` — `CSI 27 ; <mod> ; <cp> ~`.
-        //
-        // Precedence: Kitty flags win when active (matches the WezTerm /
-        // Ghostty / tmux consensus even though xterm's own spec leaves
-        // the interaction undefined). A TUI that pushed any Kitty bit is
-        // telling us it prefers the Kitty protocol, so modifyOtherKeys
-        // stays suppressed.
-        //
-        // Ctrl+letter cases arriving here come from TerminalView's
-        // keyDown fast-path deferring to the encoder once it sees
-        // `.modifyOtherKeys` in the current mode; they carry the letter
-        // in `chars` (not the C0 byte) so CSI 27 emission uses the
-        // letter's codepoint as expected by Emacs / tmux / nvim with
-        // `extended-keys on` (F-S3-002).
+        // xterm modifyOtherKeys (`CSI 27 ; <mod> ; <cp> ~`); any active kitty flag suppresses it.
+        // Ctrl+letter arrives here as the letter, not the C0 byte, so CSI 27 carries the letter's codepoint.
         let kittyAnyActive = kitty || allKeys || alternateKeys || associatedText
             || mode.contains(.reportEventTypes)
         if !kittyAnyActive,
            mode.contains(.modifyOtherKeys),
            hasMods,
            let scalar = chars.unicodeScalars.first {
-            // CSI 27 carries one codepoint — multi-scalar input falls back to UTF-8 to avoid silent truncation.
+            // CSI 27 carries one codepoint; multi-scalar input falls back to UTF-8.
             if chars.unicodeScalars.count > 1 {
                 return Data(chars.utf8)
             }
             return csi27(codepoint: scalar.value, modifiers: effectiveMods)
         }
 
-        // Ctrl+printable: only the first character is transformed.
         if let bytes = tryControlPrintable(
             chars: chars, modifiers: modifiers, effectiveMods: effectiveMods,
             kitty: kitty, allKeys: allKeys, eventType: eventType
@@ -189,14 +105,8 @@ public final class KeyEncoder {
             return bytes
         }
 
-        // Option as Meta under flag 1: alt+key / shift+alt+key are CSI u (see
-        // the Ctrl branch in `tryControlPrintable` for the spec quote). `ESC a`
-        // for Meta-a is exactly the Alt-vs-Esc ambiguity the flag removes;
-        // nvim, helix, fish 4 and Claude Code all push flag 1 and would
-        // otherwise fall back to ESC-timeout heuristics. Handled BEFORE the
-        // release drop below: an escape-code press has a paired release form
-        // (`CSI <cp>;<mod>:3 u`), so flag 2 must report it like it does for
-        // Ctrl+key.
+        // Flag 1 reports alt+key / shift+alt+key as CSI u. Must precede the release drop below: the press
+        // has a paired release form (`CSI <cp>;<mod>:3 u`).
         if kitty, optionIsMeta, modifiers.contains(.option),
            chars.unicodeScalars.count == 1,
            let scalar = chars.unicodeScalars.first,
@@ -205,22 +115,15 @@ public final class KeyEncoder {
             return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
         }
 
-        // Release events past here would end up emitting a legacy byte
-        // sequence (CSI Z, ESC+UTF-8, or plain UTF-8) with no paired
-        // release form. Drop so release traffic matches press traffic.
+        // The legacy sequences below have no paired release form.
         if eventType == .release {
             return Data()
         }
 
-        // Shift+Tab → CSI Z (reverse tab, "backtab"). Completion widgets and
-        // the readline/zsh reverse-menu selection all expect this specific
-        // sequence when kitty mode is NOT active. AppKit delivers Shift+Tab
-        // as chars "\t" with .shift set.
         if !kitty, modifiers.contains(.shift), chars == "\t" {
             return Data([0x1B, 0x5B, 0x5A])    // ESC [ Z
         }
 
-        // Option as Meta: prepend ESC.
         if optionIsMeta && modifiers.contains(.option) {
             var out = Data([0x1B])
             out.append(contentsOf: Array(chars.utf8))
@@ -230,19 +133,7 @@ public final class KeyEncoder {
         return Data(chars.utf8)
     }
 
-    /// Ctrl+printable encoding — only the first scalar is transformed. Returns
-    /// the bytes to emit, or `nil` to fall through to the legacy paths in
-    /// `encode`. Order is precedence (preserved from the inline chain it
-    /// replaces):
-    ///   1. Kitty flag 1/8 collider (Ctrl+{i,m,[,h,?} aliasing Tab/Enter/Esc/
-    ///      Backspace/DEL) → CSI u with the lowercase collider codepoint.
-    ///   2. Kitty flag 1/8 lossy gap (Ctrl+digit/`.`/`/`/`;`… with no C0
-    ///      mapping) → CSI u with the unshifted base (F-S3).
-    ///   3. release → empty (no paired release form in legacy).
-    ///   4. a real C0 byte → that byte, or ESC+byte in Option-as-Meta
-    ///      (Emacs/readline M-C-* chord, audit H7).
-    /// `nil` only when there's no `.control` modifier, or a Ctrl+printable with
-    /// no C0 mapping in a non-kitty mode (the caller's legacy fall-through).
+    /// Branch order is precedence: kitty collider, kitty CSI u, release drop, C0 byte.
     private func tryControlPrintable(
         chars: String,
         modifiers: Modifiers,
@@ -254,35 +145,13 @@ public final class KeyEncoder {
         guard modifiers.contains(.control), let scalar = chars.unicodeScalars.first else {
             return nil
         }
-        // Kitty disambiguation: Ctrl+{i,m,[,h,?} legacy-alias Tab/Enter/Esc/
-        // Backspace/DEL. Under flag 1 OR flag 8 any modifier combination
-        // including these collider letters emits CSI u so the TUI can tell them
-        // apart from the unmodified C0 byte they alias. The codepoint is
-        // normalized to the lowercase collider so Shift reports via the mod
-        // param. Other Ctrl+letter combos in the flag-1-only case stay as their
-        // C0 byte so shells' SIGINT / SIGQUIT / word-motion bindings keep working.
+        // Ctrl+{i,m,[,h,?} alias Tab / Enter / Esc / Backspace / DEL. Under flag 1 or 8 they emit CSI u with
+        // the lowercase codepoint, so Shift reports via the mod param.
         if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
             return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
         }
-        // F-S3: under Kitty flag 1 / 8, a Ctrl+printable with NO C0 mapping
-        // (Ctrl+digit, Ctrl+. , Ctrl+/ , Ctrl+; , …) is LOSSY in legacy — the
-        // Ctrl bit can't be encoded, so emit CSI u so the modifier survives.
-        // The codepoint is the UNSHIFTED base (Shift reports via the mod param):
-        // map a US-layout shifted symbol back to its base (Ctrl+> = Ctrl+Shift+.
-        // → '.'), else the scalar already IS the base. (flag 8 alone routes
-        // these through the reportAllKeys branch; this closes the flag-1-only
-        // gap.) Non-US layouts miss the shifted-symbol base map — same
-        // UCKeyTranslate caveat as flag 4.
-        //
-        // v0.8.1: the `controlByte(for:) == nil` gate is gone. Flag 1's
-        // spec reads "report the Esc, alt+key, ctrl+key, ctrl+alt+key,
-        // shift+alt+key keys using CSI u sequences instead of legacy ones",
-        // so EVERY Ctrl+printable — Ctrl+c included — is CSI u once a TUI
-        // has pushed kitty; kitty, Ghostty, WezTerm and foot all send it and
-        // the TUI asked for it. Keeping the C0 byte for letters was the
-        // KNOWN_ISSUES "scope correction" misreading the spec. The key
-        // codepoint is the unshifted lower-case key; Shift rides in the
-        // modifier bits. Legacy C0 still flows with no kitty flag active.
+        // Flag 1 reports every ctrl+key as CSI u (Ctrl+c included) with the unshifted base codepoint; Shift
+        // rides in the modifier bits. The shifted-symbol base map is US-layout only.
         if (kitty || allKeys),
            scalar.value >= 0x20, scalar.value != 0x7F {
             let base = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
@@ -292,14 +161,7 @@ public final class KeyEncoder {
             return Data()
         }
         if let ctrlByte = controlByte(for: scalar) {
-            // Ctrl+Option+letter in Meta mode is the Emacs/readline M-C-* chord
-            // (forward-sexp, beginning-of-defun, …). The bare C0 byte drops the
-            // Meta bit, silently degrading M-C-f to plain ^F. Prepend ESC so the
-            // shell sees ESC + C0 — matching how arrows report mod=7 for
-            // Ctrl+Option (audit H7) and Terminal.app / iTerm2's Option-as-Meta.
-            // Only in Meta mode: Native-Option has no Meta bit, and the kitty /
-            // modifyOtherKeys branches already frame the chord with the full
-            // modifier param.
+            // Ctrl+Option+letter in Meta mode is the M-C-* chord: ESC + C0, so the Meta bit survives.
             if optionIsMeta && modifiers.contains(.option) {
                 return Data([0x1B, ctrlByte])
             }
@@ -308,13 +170,6 @@ public final class KeyEncoder {
         return nil
     }
 
-    /// Kitty disambiguation: Enter / Esc / Tab / Backspace with any effective
-    /// modifier emit `CSI <cp>;<mod>u` so the TUI can distinguish Shift+Enter
-    /// from plain Enter, Option+Esc from plain Esc (which previously leaked as
-    /// two raw ESCs), etc. Returns nil when this isn't a kitty disambiguation
-    /// key (fall through). Flag 16's associated text stays empty for these keys
-    /// (they produce no visible text), and flag 4 adds nothing (Shift+Enter is
-    /// still Enter, just with the mod bit), so the on-wire shape is unchanged.
     private func tryKittyDisambiguation(
         chars: String,
         kitty: Bool,
@@ -326,11 +181,7 @@ public final class KeyEncoder {
         guard kitty, let cp = kittyDisambiguationCodepoint(for: chars) else {
             return nil
         }
-        // Spec: "The only exceptions are the Enter, Tab and Backspace keys
-        // which still generate the same bytes as in legacy mode" — so an
-        // UNMODIFIED Enter/Tab/Backspace stays legacy, but a plain Esc is
-        // `CSI 27 u` under flag 1. Emitting bare 0x1B left the TUI with the
-        // ESC-vs-Alt timeout ambiguity the flag exists to remove.
+        // Kitty spec: unmodified Enter / Tab / Backspace keep their legacy bytes, but a plain Esc is `CSI 27 u`.
         if !hasMods && cp != 27 {
             return nil
         }
@@ -342,13 +193,8 @@ public final class KeyEncoder {
         )
     }
 
-    /// Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u including
-    /// plain unmodified keys — breaks the default shell contract by design, only
-    /// TUIs that asked for it see it. Returns nil when flag 8 is off, OR for a
-    /// single Ctrl+collider scalar (which the Ctrl+printable collider branch
-    /// handles instead, with lowercase-normalized codepoints) — both fall
-    /// through. Multi-scalar IME-committed input (NFD `à`, keycaps, VS-16-paired
-    /// emoji) falls back to plain UTF-8 so no scalar past the first is dropped.
+    /// Flag 8: every printable emits CSI u, unmodified keys included. A Ctrl+collider scalar is left to
+    /// `tryControlPrintable`; multi-scalar input falls back to UTF-8 so no scalar is dropped.
     private func tryKittyAllKeys(
         chars: String,
         modifiers: Modifiers,
@@ -366,13 +212,7 @@ public final class KeyEncoder {
               ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) else {
             return nil
         }
-        // Kitty's "all keys as CSI u" uses the lowercase of a letter as the base
-        // codepoint; Shift is reported via the mod param. Non-letter scalars use
-        // the scalar value directly.
         let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
-        // Flag 4: surface the shifted form (uppercase of the base letter) when
-        // the user is actually shifting. `alt=0` since macOS doesn't expose a
-        // true alternate layout per key.
         let shifted: UInt32? = {
             guard alternateKeys, modifiers.contains(.shift),
                   let shiftedCp = shiftedCodepointForLetter(scalar) else {
@@ -389,9 +229,6 @@ public final class KeyEncoder {
         )
     }
 
-    /// Kitty progressive-enhancement maps one of four "ambiguous" keys to its
-    /// protocol codepoint. Any modifier on these keys must emit `CSI <cp>;<mod>u`.
-    /// Returns nil for other inputs — they take the legacy path.
     private func kittyDisambiguationCodepoint(for chars: String) -> UInt32? {
         switch chars {
         case "\r":     return 13   // Enter
@@ -402,38 +239,19 @@ public final class KeyEncoder {
         }
     }
 
-    /// For Ctrl+{i, m, [, h} (the four C0 colliders), return the kitty-protocol
-    /// codepoint normalized to the lowercase form so Shift is reported through
-    /// the modifier param rather than by flipping between 'i' (105) and 'I' (73).
-    /// '[' has no case. Returns nil for any non-collider.
     private func ctrlColliderCodepoint(for scalar: UnicodeScalar) -> UInt32? {
         switch scalar {
         case "i", "I": return 105   // Ctrl+I → Tab (0x09)
         case "m", "M": return 109   // Ctrl+M → CR (0x0D)
         case "h", "H": return 104   // Ctrl+H → BS (0x08)
         case "[":      return 91    // Ctrl+[ → ESC (0x1B)
-        case "?":      return 63    // Ctrl+? → DEL (0x7F) — same byte as Backspace
+        case "?":      return 63 // Ctrl+? → DEL (0x7F)
         default:       return nil
         }
     }
 
-    /// Codepoint to emit under Kitty flag 8 (`reportAllKeysAsEsc`) for a
-    /// given scalar + shift state. Collapses the received (shifted)
-    /// form to its *unshifted* base so Shift comes through the
-    /// modifier field rather than by swapping the base key:
-    ///
-    ///   - Uppercase ASCII letter → lowercase.
-    ///   - US-layout shifted symbol (`@`, `!`, `_`, `+`, etc.) →
-    ///     unshifted counterpart (`2`, `1`, `-`, `=`, etc.) when
-    ///     `shifted == true`. Without the Shift-held gate we'd
-    ///     clobber cases where a user typed the shifted form via a
-    ///     different route (Option combinations, macro replay) on a
-    ///     layout where the symbol is unshifted.
-    ///   - Anything else → pass through unchanged.
-    ///
-    /// Per-layout coverage is US-only; this table won't help German
-    /// QWERTZ (Shift+2 → `"`) or Dvorak. Full layout fidelity needs
-    /// Carbon's `UCKeyTranslate`, tracked separately.
+    /// Collapses the received form to its unshifted base so Shift reports through the modifier field.
+    /// The symbol map is US-layout only and applies only while Shift is held.
     private func kittyAllKeysCodepoint(
         for scalar: UnicodeScalar,
         shifted: Bool
@@ -447,14 +265,6 @@ public final class KeyEncoder {
         return scalar.value
     }
 
-    /// US-layout reverse map: given a shifted symbol the user just
-    /// pressed (e.g. `@`), return the unshifted key codepoint (`2`).
-    /// Returns nil for characters that either aren't ASCII symbols or
-    /// aren't on the shift-row of a US layout. Letters are handled
-    /// separately via the `'A'..'Z'` range check above.
-    ///
-    /// The `fileprivate static` makes the table a fixed compile-time
-    /// cost, reachable from tests without re-declaring.
     fileprivate static func usLayoutUnshiftedSymbol(_ scalar: UnicodeScalar) -> UInt32? {
         switch scalar.value {
         case 0x21: return 0x31   // ! ← 1
@@ -482,81 +292,28 @@ public final class KeyEncoder {
         }
     }
 
-    /// Flag 4 (`reportAlternateKeys`) shifted-form codepoint for the
-    /// scalar the user just pressed. The scalar arrives post-Shift
-    /// from `NSEvent.charactersIgnoringModifiers`, so:
-    ///
-    ///   - ASCII letters: `'A'..'Z'` is already the shifted form
-    ///     (return as-is); `'a'..'z'` upcases.
-    ///   - US-layout shifted symbols (`@`, `!`, etc.): scalar IS the
-    ///     shifted form, so return it directly.
-    ///   - Anything else: nil — the shifted form isn't derivable
-    ///     without a keyboard-layout lookup we don't do yet.
-    ///
-    /// Non-US layouts still miss. Full layout fidelity requires
-    /// `UCKeyTranslate`; tracked as follow-up.
+    /// The scalar arrives post-Shift from `charactersIgnoringModifiers`; nil when a layout lookup would be needed.
     private func shiftedCodepointForLetter(_ scalar: UnicodeScalar) -> UInt32? {
         if scalar.value >= 0x41 && scalar.value <= 0x5A { return scalar.value }
         if scalar.value >= 0x61 && scalar.value <= 0x7A { return scalar.value - 0x20 }
-        // Shifted ASCII symbol: the scalar itself IS the shifted form.
-        // `usLayoutUnshiftedSymbol` returns non-nil iff the scalar is a
-        // known US-layout shift-row glyph; reuse that membership test
-        // to decide whether to emit a shifted slot.
         if Self.usLayoutUnshiftedSymbol(scalar) != nil {
             return scalar.value
         }
         return nil
     }
 
-    /// Flag 16 (`reportAssociatedText`) text payload for a key.
-    /// Control characters (ESC, Tab, CR, DEL) don't have meaningful
-    /// visible text — the CSI-u codepoint already carries the key
-    /// identity and a redundant text repeat would just bloat the
-    /// stream. For visible characters we emit the actual UTF-32
-    /// codepoints from `chars`, which may differ from `codepoint`
-    /// after dead-key or IME composition.
-    ///
-    /// Returns empty when the text equals the base codepoint (saves
-    /// on-wire bytes for the common "no IME, no dead key" case, which
-    /// any conforming parser resolves by treating "text absent" as
-    /// "text = base").
+    /// Flag 16 text: empty for control characters and when it equals the base codepoint (absent means base).
     private func textCodepoints(_ chars: String, codepoint: UInt32) -> [UInt32] {
         let values = chars.unicodeScalars.map { $0.value }
-        // Control chars: no associated text. Covers \r, \t, \u{1B}, \u{7F}.
         if values.count == 1, values[0] < 0x20 || values[0] == 0x7F {
             return []
         }
-        // Redundant: single scalar matching the base codepoint means
-        // the parser can already infer text = base.
         if values == [codepoint] { return [] }
         return values
     }
 
-    /// `CSI <codepoint>[:<alt>:<shifted>] ; <modParam>[:<eventType>][;<text>...] u`.
-    ///
-    /// Collapses the modifier field when modParam == 1 AND eventType ==
-    /// .press AND there is no alt/shifted/text payload — the kitty spec
-    /// says the entire `;M` can be omitted in that case. When
-    /// eventType is non-press, flag 4 provides a `shiftedCodepoint`, or
-    /// flag 16 provides `associatedText`, the modifier field is always
-    /// emitted so later sub-parameters parse correctly.
-    ///
-    /// `shiftedCodepoint` lights the Kitty flag 4 (`reportAlternateKeys`)
-    /// output — we emit `base:shifted` (the spec's key-code field is
-    /// `unicode-key : shifted-key : base-layout-key`, so the shifted key
-    /// is the second sub-field). The third base-layout field is omitted
-    /// because macOS's `NSEvent` doesn't expose a keyboard-layout
-    /// alternate, and the spec drops an absent trailing field. That's the
-    /// smallest useful quantum of the spec: TUIs that care about
-    /// shifted-vs-base disambiguation (most commonly tmux, kakoune) get
-    /// it. Only set by callers that have actually derived a distinct
-    /// shifted form (e.g. Shift+A → base=97 shifted=65); control chars
-    /// have no shifted form and pass `nil`.
-    ///
-    /// `associatedText` lights Kitty flag 16 (`reportAssociatedText`).
-    /// Carries the UTF-32 codepoints the key would actually produce —
-    /// same as the base codepoint for most keys, but differs for dead
-    /// keys / IME / compose. Each codepoint is appended as `;N`.
+    /// `CSI <codepoint>[:<shifted>] ; <modParam>[:<eventType>][;<text>...] u`.
+    /// `;<modParam>` is omitted only when it is 1, the event is a press, and there is no shifted / text payload.
     private func csiU(
         codepoint: UInt32,
         shiftedCodepoint: UInt32? = nil,
@@ -567,21 +324,8 @@ public final class KeyEncoder {
         let mod = modifierParam(modifiers)
         var bytes: [UInt8] = [0x1B, 0x5B]                 // ESC [
         bytes.append(contentsOf: Array(String(codepoint).utf8))
-        // Flag 4 alternate-keys payload. The Kitty key-code field is
-        // `unicode-key-code : shifted-key : base-layout-key`
-        // (https://sw.kovidgoyal.net/kitty/keyboard-protocol/, "Report
-        // alternate keys"): the SHIFTED key is the *second* sub-field and
-        // the base-layout (alternate-layout) key is the *third*. macOS
-        // doesn't expose a per-key base-layout codepoint, so we emit only
-        // `:<shifted>` and omit the third field — the spec says an absent
-        // trailing sub-field is simply left out (and an absent middle
-        // field is empty, never a literal `0`).
-        //
-        // Pre-fix this emitted `:0:<shifted>`, which a spec-compliant TUI
-        // reads as shifted-key = U+0000 (NUL) with the real shifted value
-        // misplaced into the base-layout slot — i.e. the wrong fields. The
-        // earlier code comment misread the spec ("0 for the alternate
-        // slot"); the order is shifted-then-base-layout, not the reverse.
+        // The kitty key-code field is `unicode-key : shifted-key : base-layout-key`. macOS exposes no base-layout
+        // key, so only `:<shifted>` is emitted; an absent trailing sub-field is left out, never written as 0.
         if let shifted = shiftedCodepoint {
             bytes.append(0x3A)                            // :
             bytes.append(contentsOf: Array(String(shifted).utf8))
@@ -598,9 +342,6 @@ public final class KeyEncoder {
                 bytes.append(contentsOf: Array(String(eventType.rawValue).utf8))
             }
         }
-        // Flag 16 associated-text payload: one `;<codepoint>` per text
-        // character. Empty array emits nothing — keeps the plain
-        // "CSI 13;2u" shape for unmodified / no-text keys.
         for cp in associatedText {
             bytes.append(0x3B)                            // ;
             bytes.append(contentsOf: Array(String(cp).utf8))
@@ -609,18 +350,7 @@ public final class KeyEncoder {
         return Data(bytes)
     }
 
-    /// Encode a special key (arrow, function key, etc.) with modifiers.
-    ///
-    /// - Parameter applicationCursorKeys: When true and no modifiers are set,
-    ///   arrow and Home/End keys use SS3 (`ESC O …`) sequences instead of CSI.
-    ///   This is xterm's DECCKM mode, enabled by the shell via `ESC [ ? 1 h`.
-    ///   vim, nvim, less, and most full-screen TUIs set this.
-    /// CSI-parameter shape `(lead, terminator)` for the special keys that have
-    /// one — i.e. those encoded as `CSI <lead> [; <mod>[:<event>]] <terminator>`
-    /// (arrows/Home/End/F1/F2/F4 use a final letter terminator; nav + F3 +
-    /// F5–F12 use `~`). Used to encode Kitty flag-2 release/repeat events without
-    /// duplicating the press switch's selection logic, so press encoding stays
-    /// byte-identical. Keypad (DECPAM / SS3) keys have no such form → nil.
+    /// `(lead, terminator)` for keys encoded as `CSI <lead> [; <mod>[:<event>]] <terminator>`; nil for keypad keys.
     private static func csiParamShape(for key: SpecialKey) -> (lead: String, term: UInt8)? {
         switch key {
         case .up:       return ("1", 0x41)   // A
@@ -631,11 +361,8 @@ public final class KeyEncoder {
         case .end:      return ("1", 0x46)   // F
         case .f1:       return ("1", 0x50)   // P
         case .f2:       return ("1", 0x51)   // Q
-        // F3 is the one F1–F4 key that is NOT `CSI 1 ; <mod> R`: that form is
-        // byte-identical to a cursor-position report (`CSI <row> ; <col> R`),
-        // so kitty's protocol and the bundled xterm-kitty terminfo
-        // (kf15/kf27/kf39/kf51/kf63) use `CSI 13 ; <mod> ~`. Unmodified F3
-        // stays SS3 R (see `csiParamPress`).
+        // Not `CSI 1 ; <mod> R`: that is byte-identical to a cursor-position report, so kitty and the
+        // xterm-kitty terminfo use `CSI 13 ; <mod> ~`. Unmodified F3 stays SS3 R.
         case .f3:       return ("13", 0x7E)
         case .f4:       return ("1", 0x53)   // S
         case .pageUp:   return ("5", 0x7E)   // ~
@@ -650,9 +377,7 @@ public final class KeyEncoder {
         case .f10:      return ("21", 0x7E)
         case .f11:      return ("23", 0x7E)
         case .f12:      return ("24", 0x7E)
-        // VT220 / xterm numbering. The gaps at 27 and 30 are real, not typos:
-        // those parameter values belong to other DEC keys. kitty and iTerm2
-        // use the same table.
+        // VT220 / xterm numbering; the gaps at 27 and 30 are real.
         case .f13:      return ("25", 0x7E)
         case .f14:      return ("26", 0x7E)
         case .f15:      return ("28", 0x7E)
@@ -661,21 +386,12 @@ public final class KeyEncoder {
         case .f18:      return ("32", 0x7E)
         case .f19:      return ("33", 0x7E)
         case .f20:      return ("34", 0x7E)
-        default:        return nil           // keypad (DECPAM/SS3) — no mod/event field
+        default:        return nil
         }
     }
 
-    /// Press-event bytes for a CSI-parameter special key, derived from the
-    /// single `csiParamShape` `(lead, term)` table so press encoding can never
-    /// drift from the Kitty flag-2 release/repeat path. Replaces four nested
-    /// per-category switches that re-encoded the same bytes by hand (and
-    /// carried unreachable `default:` arms) — REFACTOR.md Part IV KeyEncoder
-    /// "duplicated SpecialKey→byte table".
-    ///
-    /// The modified form is uniform — `CSI <lead> ; <mod> <term>`. The
-    /// unmodified base differs by category: arrows/Home/End drop the lead and
-    /// honour DECCKM (`SS3 <term>` vs `CSI <term>`); F1–F4 always use SS3;
-    /// nav (PgUp/PgDn/Del/Ins) and F5–F12 keep the lead (`CSI <lead> <term>`).
+    /// Modified: `CSI <lead> ; <mod> <term>`. Unmodified: arrows / Home / End drop the lead and honour DECCKM
+    /// (`SS3 <term>` vs `CSI <term>`), F1-F4 always use SS3, nav and F5+ keep the lead.
     private static func csiParamPress(
         _ key: SpecialKey,
         shape: (lead: String, term: UInt8),
@@ -684,25 +400,20 @@ public final class KeyEncoder {
         applicationCursorKeys: Bool
     ) -> Data {
         if hasMods {
-            // CSI <lead> ; <mod> <term>
             return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([0x3B])
                 + Data(String(modBits).utf8) + Data([shape.term])
         }
         switch key {
         case .up, .down, .right, .left, .home, .end:
-            // DECCKM: SS3 (ESC O <term>) under application-cursor-keys, else CSI.
             return applicationCursorKeys
                 ? Data([0x1B, 0x4F, shape.term])
                 : Data([0x1B, 0x5B, shape.term])
         case .f1, .f2, .f4:
-            // SS3 <term> (ESC O P/Q/S) — always, regardless of DECCKM.
             return Data([0x1B, 0x4F, shape.term])
         case .f3:
-            // SS3 R. Not `shape.term`: F3's CSI shape is `13 ~` (see
-            // `csiParamShape`), so its SS3 final is spelled out.
+            // Not `shape.term`: F3's CSI shape is `13 ~`, so its SS3 final (R) is spelled out.
             return Data([0x1B, 0x4F, 0x52])
         default:
-            // Nav + F5–F12 keep the numeric lead: CSI <lead> <term>.
             return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([shape.term])
         }
     }
@@ -715,44 +426,22 @@ public final class KeyEncoder {
         mode: BBTermMode = [],
         eventType: EventType = .press
     ) -> Data {
-        // Modifier-encoded keys use CSI with a trailing modifier parameter.
-        // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
-        // Bitmask: shift=1, alt=2, ctrl=4, meta=8.
-        //
-        // `optionIsMeta=false` means the user picked "Native" for the Option
-        // key: Option produces macOS-native glyphs for printables and is
-        // invisible to the shell otherwise — Option+Arrow emits plain ESC[A
-        // rather than alt-modified ESC[1;3A. The H7 rule (with the Ctrl-held
-        // exception that keeps Meta+Ctrl chords intact) lives in
-        // `applyNativeOptionRule`.
         let effectiveMods = applyNativeOptionRule(modifiers)
         let modBits = modifierParam(effectiveMods)
         let hasMods = modBits > 1
 
-        // F-S3-005: Kitty flag 2 (reportEventTypes) release / repeat events for
-        // the CSI-parameter special keys (arrows, nav, F-keys): `CSI <lead> ;
-        // <mod>:<event> <terminator>`. PRESS is left to the legacy switch below
-        // (byte-identical — kitty omits the `:1` press sub-param), so nothing
-        // changes when this isn't a release/repeat. Without flag 2 a non-press
-        // event emits nothing (legacy TUIs must never see post-keystroke
-        // traffic — matches the printable release path). The mod field is
-        // forced present (even unmodified) because the `:event` sub-param needs
-        // a parameter to attach to. Keypad keys have no such form
-        // (`csiParamShape` returns nil), so repeats AND releases fall through
-        // to `encodeKeypadKey`: a held key keeps auto-repeating, and a keypad
-        // key that went down as CSI u (flag 8, or a Ctrl / Option(Meta) chord
-        // under flag 1) gets its paired `:3` release from `encode(chars:)`,
-        // which stays silent for a press that was plain text.
+        // Flag 2 release / repeat for CSI-parameter keys: `CSI <lead> ; <mod>:<event> <terminator>`. The mod field
+        // is forced present so `:<event>` has a parameter to attach to. Keypad keys fall through to `encodeKeypadKey`.
         if eventType != .press {
             guard mode.contains(.reportEventTypes) else { return Data() }
             if let shape = Self.csiParamShape(for: key) {
                 var bytes: [UInt8] = [0x1B, 0x5B]                            // ESC [
-                bytes.append(contentsOf: Array(shape.lead.utf8))            // <lead>
+                bytes.append(contentsOf: Array(shape.lead.utf8))
                 bytes.append(0x3B)                                          // ;
-                bytes.append(contentsOf: Array(String(max(modBits, 1)).utf8)) // <mod>
+                bytes.append(contentsOf: Array(String(max(modBits, 1)).utf8))
                 bytes.append(0x3A)                                          // :
-                bytes.append(contentsOf: Array(String(eventType.rawValue).utf8)) // <event>
-                bytes.append(shape.term)                                   // <final> / ~
+                bytes.append(contentsOf: Array(String(eventType.rawValue).utf8))
+                bytes.append(shape.term)
                 return Data(bytes)
             }
         }
@@ -763,11 +452,6 @@ public final class KeyEncoder {
              .f1, .f2, .f3, .f4,
              .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12,
              .f13, .f14, .f15, .f16, .f17, .f18, .f19, .f20:
-            // Single source of truth: the `(lead, term)` bytes come from
-            // `csiParamShape` — the same table the flag-2 release/repeat path
-            // above uses — so press encoding can never drift from it. `shape`
-            // is non-nil for every key in this case list (only keypad keys map
-            // to nil, and they are the separate case below).
             guard let shape = Self.csiParamShape(for: key) else { return Data() }
             return Self.csiParamPress(
                 key, shape: shape, modBits: modBits,
@@ -782,20 +466,8 @@ public final class KeyEncoder {
         }
     }
 
-    /// Keypad (DECPAM) encoding. When `applicationKeypad` is on (the TUI sent
-    /// `ESC =`), emit `SS3 <final>` per xterm's keypad map:
-    ///   0…9 → ESC O p…y;  + → ESC O k;  − → ESC O m;  * → ESC O j;
-    ///   / → ESC O o;  . → ESC O n;  = → ESC O X;  Enter → ESC O M.
-    /// Otherwise (DECPAM off, or the program pushed kitty flag 1 / 8, which wins
-    /// over DECPAM like it does over modifyOtherKeys) a keypad key is just its
-    /// plain character, so route it through `encode(chars:)` — the same path a
-    /// top-row digit takes — instead of emitting a bare byte that silently drops
-    /// modifiers. That makes Option-as-Meta (ESC prefix), Kitty disambiguation /
-    /// flag-8, and xterm modifyOtherKeys framing all apply to keypad keys too
-    /// (audit S3S-002).
-    /// With no modifiers and no protocol mode the result is the same bare legacy
-    /// byte as before (kp5 → 0x35, kpEnter → CR 0x0D), so the fast path is
-    /// unchanged.
+    /// DECPAM on: xterm's `SS3 <final>` keypad map. Otherwise the key is its plain character, routed through
+    /// `encode(chars:)` so modifier and protocol framing still apply.
     private func encodeKeypadKey(
         _ key: SpecialKey,
         applicationKeypad: Bool,
@@ -825,17 +497,12 @@ public final class KeyEncoder {
             default: return 0x70
             }
         }()
-        // Flag 1 (disambiguate) / flag 8 (report all keys) ask for keys as
-        // kitty escape codes, which includes the keypad; DECPAM's legacy SS3
-        // table is for programs that did not opt in. Flags 2 / 4 / 16 only
-        // decorate keys already sent that way, so they leave DECPAM alone.
+        // Kitty flags 1 and 8 take the keypad over from DECPAM; flags 2 / 4 / 16 only decorate and leave it alone.
         let kittyOwnsKeypad = mode.contains(.disambiguateEscCodes)
             || mode.contains(.reportAllKeysAsEsc)
         if applicationKeypad && !kittyOwnsKeypad {
-            // SS3 has no event field, so a release has nothing to say; sending
-            // it would replay the press bytes. A repeat re-sends SS3 on purpose.
+            // SS3 has no event field: a release would replay the press bytes.
             if eventType == .release { return Data() }
-            // SS3 <final> — ESC O <final>
             return Data([0x1B, 0x4F, final])
         }
         let legacyChar: String = {
@@ -845,7 +512,7 @@ public final class KeyEncoder {
             case .kp4: return "4";  case .kp5: return "5"
             case .kp6: return "6";  case .kp7: return "7"
             case .kp8: return "8";  case .kp9: return "9"
-            case .kpEnter:    return "\r"  // CR (0x0D)
+            case .kpEnter:    return "\r"
             case .kpPlus:     return "+"
             case .kpMinus:    return "-"
             case .kpMultiply: return "*"
@@ -859,13 +526,7 @@ public final class KeyEncoder {
         return encode(chars: legacyChar, modifiers: modifiers, mode: mode, eventType: eventType)
     }
 
-    /// xterm `modifyOtherKeys` emit — `CSI 27 ; <mod> ; <cp> ~`. Uses
-    /// the same 1+bits modifier encoding as CSI u; the tilde final
-    /// byte distinguishes from CSI u's `u`. Emacs, tmux `extended-keys
-    /// on`, neovim auto-request, and the Julia/IPython REPLs all read
-    /// this shape. `formatOtherKeys=1` would use `u` instead — not
-    /// implemented; Emacs defaults to `~` so every real consumer is
-    /// covered.
+    /// xterm modifyOtherKeys: `CSI 27 ; <mod> ; <cp> ~`. `formatOtherKeys=1` (final `u`) is not implemented.
     private func csi27(codepoint: UInt32, modifiers: Modifiers) -> Data {
         let mod = modifierParam(modifiers)
         var bytes: [UInt8] = [0x1B, 0x5B]    // ESC [
@@ -878,13 +539,12 @@ public final class KeyEncoder {
         return Data(bytes)
     }
 
-    /// xterm-style modifier parameter: 1 + (shift|alt|ctrl|meta bits).
+    /// xterm modifier parameter: 1 + bitmask (shift=1, alt=2, ctrl=4).
     private func modifierParam(_ m: Modifiers) -> Int {
         var bits = 0
         if m.contains(.shift) { bits |= 1 }
         if m.contains(.option) { bits |= 2 }   // alt
         if m.contains(.control) { bits |= 4 }
-        // Ignore .command — never reaches the encoder (TerminalView filters it).
         return 1 + bits
     }
 
@@ -897,14 +557,9 @@ public final class KeyEncoder {
         case 0x61...0x7A: return UInt8(v - 0x60)       // a..z    -> 0x01..0x1A
         case 0x20:        return 0x00                  // Ctrl-Space -> NUL
         case 0x3F:        return 0x7F                  // Ctrl-?     -> DEL
-        // AppKit hands Ctrl+Backspace over as DEL (it control-translates
-        // letters but not the Delete key), so without this the chord is
-        // byte-identical to plain Backspace. xterm and kitty's legacy table
-        // swap it to BS so `bindkey '^H' backward-kill-word` can fire.
+        // AppKit delivers Ctrl+Backspace as DEL; xterm and kitty's legacy table map it to BS.
         case 0x7F:        return 0x08                  // Ctrl-Backspace -> BS
-        // xterm's legacy digit/symbol chords (v0.8.1; these typed the bare
-        // character before). Ctrl-1 and Ctrl-9/0 have no C0 mapping in
-        // xterm either and stay bare.
+        // xterm's legacy digit / symbol chords. Ctrl-1, Ctrl-9 and Ctrl-0 have no C0 mapping.
         case 0x32:        return 0x00                  // Ctrl-2 -> NUL
         case 0x33:        return 0x1B                  // Ctrl-3 -> ESC
         case 0x34:        return 0x1C                  // Ctrl-4 -> FS

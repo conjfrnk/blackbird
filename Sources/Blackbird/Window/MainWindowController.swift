@@ -5,37 +5,18 @@ import os
 import QuartzCore
 
 extension Notification.Name {
-    /// Fired whenever any MainWindowController observes its own window's
-    /// title change, so sibling tab pills in the same group can redraw
-    /// their list of tabs to reflect the new title.
     static let blackbirdTabTitleChanged = Notification.Name("dev.conjfrnk.blackbird.tabTitleChanged")
 }
 
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
 
-    /// When AppDelegate.closeWindow batch-closes every tab, it already asked
-    /// the user once. Flip this for the sweep so each individual tab's
-    /// windowShouldClose doesn't re-prompt for "process is still running".
-    /// Always reset immediately after the batch via a `defer`.
-    ///
-    /// `private(set)` + a named setter keeps the flag process-wide (the
-    /// batch-close semantics are unchanged — same values at the same times)
-    /// while removing the cross-type WRITE: AppDelegate now flips it via
-    /// `setCloseConfirmBypass(_:)` instead of assigning the static directly.
     private(set) static var bypassCloseConfirm: Bool = false
 
-    /// Set the process-wide close-confirm bypass. The only write path for
-    /// `bypassCloseConfirm`; AppDelegate's ⌘⇧W batch-close sweep flips it true
-    /// for the sweep and resets it false immediately after (via `defer`).
     static func setCloseConfirmBypass(_ v: Bool) {
         bypassCloseConfirm = v
     }
 
-    /// Whether ⌘⇧W's batch close should suppress the per-tab "process is still
-    /// running" confirmation. True ONLY for a multi-tab sweep — the
-    /// "Close N tabs?" alert already took consent. A single-tab ⌘⇧W must keep
-    /// the per-tab confirm so it matches plain ⌘W; setting the bypass there
-    /// killed a running process with no confirmation at all. (F-S6-002)
+    /// Only a multi-tab sweep bypasses; a single-tab ⌘⇧W keeps the per-tab confirm, like ⌘W.
     static func shouldBypassPerTabConfirm(tabCount: Int) -> Bool {
         tabCount > 1
     }
@@ -43,173 +24,60 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
-    /// Custom titlebar pill-strip VC. `internal` (not private) so
-    /// `TabGroupObserver` installs/reads it across the file boundary; stays on
-    /// the controller because the first-responder restore + inline-rename
-    /// concerns (both controller-resident) also reference it.
     var titlebarTabBar: TitlebarTabBarViewController?
-    /// Window-title KVO + same-group title-broadcast token. `TabGroupObserver`
-    /// manages these (`installTabTitleObservers` / `teardownTitleObservers`)
-    /// while the controller is alive, but the FIELDS stay here: `deinit`
-    /// invalidates them inline, and an `unowned controller` read during the
-    /// controller's own deinit would trap. `internal` so the observer can
-    /// write them across the file boundary.
+    /// These live here, not on `TabGroupObserver`: `deinit` invalidates them, and an `unowned controller` read there would trap.
     var titleObserver: NSKeyValueObservation?
     var titleBroadcastObserver: NSObjectProtocol?
 
-    /// Tab-group observation collaborator: titlebar pill-strip install,
-    /// `NSWindowTabGroup` KVO, native-strip hiding, and `refreshTabBar`
-    /// reconciliation. `lazy` so it can take `controller: self` after
-    /// `super.init`.
     lazy var tabObserver = TabGroupObserver(controller: self)
 
-    /// Session creation/wiring/deferred-teardown collaborator. `lazy` so it can
-    /// take `controller: self` after `super.init`.
     lazy var sessionLifecycle = SessionLifecycle(controller: self)
 
-    /// Called when the window is about to close. AppDelegate uses this to
-    /// remove the controller from its tracking array.
     var onClose: (() -> Void)?
 
-    /// Directory this controller's shell should start in. Nil = default
-    /// (user's home via getpwuid). Set by `App.newWindow` / `newWindowForTab`
-    /// to inherit the previous tab's cwd. `internal` (not private) so
-    /// `SessionLifecycle.makeSession` reads it across the file boundary.
     let initialWorkingDirectory: String?
 
-    /// True while `super.showWindow` is running — used to suppress
-    /// `saveCurrentFrame` for the cascade-induced `windowDidMove` that
-    /// `NSWindowController.shouldCascadeWindows = true` (the default)
-    /// fires during the first `showWindow`. Without this gate, opening
-    /// a ⌘N window writes the cascaded constructor-default 800×480
-    /// frame to the autosave key and clobbers the user's previously
-    /// saved size — the inverse of the close-time-clobber the
-    /// dropped `windowWillClose` save protected against. Caught in
-    /// the 2026-05-14 code-reviewer pass on the cross-window save fix.
-    // `internal` (not private) so `WindowFramePersistence.saveCurrentFrame()`
-    // can gate on it across the file boundary.
     var isPerformingShowWindow = false
 
-    /// True while THIS controller's window frame is being set by the tab-group
-    /// frame fan-out (`applyTabGroupFrame`). Its `windowDidResize` is then our
-    /// own programmatic echo and must not be treated as a user resize:
-    ///
-    ///   - it must not reach the shared frame autosave. `WindowFramePersistence
-    ///     .isUserDrivenFrameChange` classifies a sibling's echo as user-driven
-    ///     (siblings share the front window's rect, so the pointer is inside
-    ///     it), and a sibling never armed `fullScreenEntrySuppressedUntil` —
-    ///     so an unguarded fan-out during a fullscreen transition would have
-    ///     N-1 siblings persist the fullscreen frame to the single shared
-    ///     `"BlackbirdMainWindow"` key. That is exactly RCA finding A3.
-    ///   - it must not rebuild the tab strip N times per fan-out (O(N²) work
-    ///     for a strip nobody is looking at; every member already refreshes on
-    ///     selection change). The one thing the receiver does do is re-lay out
-    ///     its OWN strip width, in `applyTabGroupFrame` itself — a cheap
-    ///     per-receiver pass, not a rebuild — because this same guard makes it
-    ///     deaf to the resize that would otherwise do it.
-    ///   - it must not fan out again from the receiving side.
+    /// True while `applyTabGroupFrame` sets this window's frame. The resulting resize/move callbacks are
+    /// our own echo: they must not save the frame, rebuild the strip, or fan out again.
     private var isApplyingTabGroupFrame = false
 
-    /// Trailing-edge debounce for the sibling frame push on the resize paths
-    /// that never fire `windowDidEndLiveResize`: the modifier-right-drag resize
-    /// gesture (which drives `setFrame` directly with `inLiveResize == false`)
-    /// and the fullscreen enter/exit animation (many frame changes across many
-    /// runloop turns). Without it, those would fan out per animation frame.
+    /// Debounce for resize paths that never fire `windowDidEndLiveResize`: the modifier-right-drag and the fullscreen animation.
     private var pendingSiblingFrameSync: DispatchWorkItem?
 
-    /// Persists the window frame on move/resize (the only writer: the window
-    /// registers no AppKit autosave name — see `makeConfiguredWindow`), with
-    /// the S5-006 screen-reconfig settle suppression. The move/resize
-    /// delegate methods + the screen-params handler forward here.
     lazy var framePersistence = WindowFramePersistence(controller: self)
 
-    /// One-shot guard for re-applying the theme (and thus the CGS background
-    /// blur) after the window has a live `windowNumber`. The first theme
-    /// apply happens in init, before the window is ordered in, when
-    /// `setBackgroundBlurRadius` is a no-op. `showWindow` re-applies for the
-    /// ⌘N / first-window path, but ⌘T tabs join via `addTabbedWindow` and
-    /// never call `showWindow`, so their translucent background stayed
-    /// un-frosted until an unrelated theme refresh. `windowDidBecomeKey`
-    /// re-applies once for those; the flag keeps it from re-theming on every
-    /// subsequent focus gain.
+    /// The CGS background blur is a no-op until the window has a live `windowNumber`, so the theme is re-applied once after order-in.
     private var didReapplyThemeAfterOrderIn = false
 
-    /// Set once `windowWillClose` begins genuine teardown. `deferredAutoClose`
-    /// keys on this (not `isVisible`) so a window that's merely miniaturized —
-    /// also `isVisible == false` — is still auto-closed when its shell exits,
-    /// instead of lingering as a permanent Dock zombie (F-S6-001).
-    /// `internal` (not private) so `SessionLifecycle.deferredAutoCloseIfNeeded`
-    /// reads it across the file boundary; the field stays here because
-    /// `windowWillClose` writes it.
     var isClosing = false
 
-    /// User-defaults key every Blackbird main window persists its frame
-    /// under. Hoisted to one place so the explicit save / restore drivers
-    /// below and the `setFrameUsingName` restore in `init` can never drift
-    /// apart — the string IS the storage contract (AppKit prepends
-    /// `"NSWindow Frame "` and stores the result in `standardUserDefaults`).
     static let frameAutosaveName: NSWindow.FrameAutosaveName = "BlackbirdMainWindow"
 
-    /// Constructor-default content rect (800×480). Shared by the window's
-    /// initial `contentRect`, the non-autosave cascade size, and the
-    /// `TerminalView`'s initial frame — these were three uses of one local
-    /// `rect` before `init` was decomposed; one constant keeps them in lockstep.
     private static let defaultContentRect = NSRect(x: 0, y: 0, width: 800, height: 480)
 
-    /// `os.Logger` for tab-bar-affordance diagnostics — currently just
-    /// `toggleTabBar`'s bypass canary. Same subsystem/category as
-    /// `TabGroupObserver`'s `tabsLogger` and `TerminalWindow`'s logger, so
-    /// `log stream --predicate 'category == "tabs"'` catches every
-    /// tab-related canary in one place.
     private static let tabsLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "tabs")
 
     init(initialWorkingDirectory: String? = nil, autosaveFrame: Bool = true) {
         self.initialWorkingDirectory = initialWorkingDirectory
-        // The setup below runs in a LOAD-BEARING order. `makeConfiguredWindow`
-        // does all the pre-`super.init` window construction (style mask,
-        // restorable opt-out, saved-frame restore, tabbing config,
-        // title visibility — in that exact sequence). After `super.init` the
-        // instance-level steps follow in the same order they always did:
-        // delegate, screen-params observer, titlebar tab bar, terminal-view
-        // wiring, first responder, session start.
+        // The setup order below is load-bearing.
         let window = Self.makeConfiguredWindow(autosaveFrame: autosaveFrame)
         super.init(window: window)
         window.delegate = self
         installScreenParametersObserver()
         installTerminationObserver()
         tabObserver.installTitlebarTabBar()
-        // No Metal device: `wireTerminalView` left a diagnostic title and
-        // `terminalView` nil; bail exactly as the original guard did.
         guard let view = wireTerminalView(in: window) else { return }
-        // Keyboard input routes to the TerminalView.
         window.makeFirstResponder(view)
         startSession(inView: view)
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
 
-    /// Build and configure the window the controller wraps. Every step here
-    /// runs BEFORE `super.init`, so this is `static` (no instance yet). The
-    /// sequence — style/restorable, saved-frame restore (or cascade), THEN
-    /// tabbing config, THEN title visibility — is load-bearing
-    /// (see the inline ORDER NOTE on the tabbing assignment).
     private static func makeConfiguredWindow(autosaveFrame: Bool) -> TerminalWindow {
-        // `.fullSizeContentView` extends the content view (the Metal view) all
-        // the way under the titlebar. Combined with `titlebarAppearsTransparent`
-        // (set by TerminalView when translucent), the Metal clearColor fills the
-        // whole window — titlebar + body — with one continuous tinted blur. The
-        // traffic-light buttons overlay on top as normal. Without this flag the
-        // titlebar gets its own material layer, visually seamed against the
-        // body below.
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         let rect = Self.defaultContentRect
-        // `TerminalWindow` (an NSWindow subclass) overrides selectNextTab /
-        // selectPreviousTab so ⌘⇧] / ⌘⇧[ cycle through the user-visible
-        // (pill) order rather than AppKit's `tabGroup.windows` arrival
-        // order. After a drag-reorder those two orders diverge — without
-        // the subclass the cycle keys would jump in arrival order and
-        // skip the user's permutation. Settings keeps using plain
-        // NSWindow; it doesn't tab.
         let window = TerminalWindow(
             contentRect: rect,
             styleMask: style,
@@ -218,52 +86,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         )
         window.title = "Blackbird"
         window.isReleasedWhenClosed = false
-        // Opt OUT of NSWindowRestoration explicitly. Blackbird doesn't
-        // implement `encodeRestorableState`/`restoreState` — shell sessions
-        // aren't truly restorable (the child process and its cwd go away
-        // with the PTY), and the `required init?(coder:)` below
-        // fatal-errors, so a restoration attempt would crash on wake.
-        // Setting `isRestorable = false` stops AppKit from emitting the
-        // "Restorable-but-no-state" Console warning on every quit, and
-        // matches the `applicationSupportsSecureRestorableState(true)`
-        // answer in AppDelegate which tells the OS "we have nothing to
-        // restore, and that's intentional." Audit main-window F23.
+        // Sessions are not restorable and `init?(coder:)` traps, so opt out of window restoration.
         window.isRestorable = false
-        // Persistence is explicit-only, and the autosave name is deliberately
-        // NOT registered with `setFrameAutosaveName`. A registered window is
-        // also autosaved by AppKit itself on every move/resize (even in this
-        // tabbing config), and that implicit write bypasses every gate in
-        // `WindowFramePersistence` — so the relocation AppKit performs when
-        // a display is unplugged overwrote the user's saved multi-display
-        // frame. Instead the resize / move delegate hooks drive
-        // `saveCurrentFrame` (see `windowDidResize` / `windowDidMove` below),
-        // which writes with `saveFrame(usingName:)`; the restore below reads
-        // with `setFrameUsingName`. Neither needs the name registered, and
-        // saves are captured even when the user does all their resizing on a
-        // window other than the original — the 2026-05-12 dogfood report that
-        // motivated the cross-window save. Only the first window of a
-        // session APPLIES the saved frame at init — later ⌘T / ⌘N windows
-        // keep AppKit's default cascade so they don't stack exactly on top
-        // of the restored window.
+        // The autosave name is deliberately not registered with `setFrameAutosaveName`: AppKit would
+        // then autosave on every move/resize itself, bypassing every gate in `WindowFramePersistence`.
         if autosaveFrame {
-            // `setFrameUsingName` *applies* the saved frame (stored under
-            // `"NSWindow Frame <name>"` in standardUserDefaults) to this
-            // window NOW, synchronously. Without this apply,
-            // `window.frame` below still reflects the constructor's
-            // default rect on a freshly-init'd NSWindowController-
-            // backed window, the off-screen-nudge runs against the
-            // default frame (which always overlaps the primary
-            // screen), the nudge becomes a no-op, and bug #22 quietly
-            // regresses for users whose saved frame referenced a
-            // now-missing display. Driving the apply ourselves keeps
-            // the nudge meaningful.
-            //
-            // It returns false when nothing is saved (every new install). The
-            // constructor's (0, 0) origin then stands and the window opens
-            // flush to the bottom edge of the screen — the nudge below judges
-            // that frame reachable and leaves it alone, and `showWindow`'s
-            // cascade does not move a first window. Centre it instead, like
-            // Settings. A restored frame is never re-centred.
+            // Apply the saved frame now so the nudge below judges the real frame. It returns false
+            // when nothing is saved; centre then, or the window opens flush to the screen's bottom edge.
             if !window.setFrameUsingName(Self.frameAutosaveName) {
                 window.center()
             }
@@ -275,59 +104,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 window.setFrame(nudged, display: false)
             }
         } else {
-            // Standalone ⌘N windows take the SAVED frame's size (origin is
-            // left to `showWindow`'s cascade so they don't stack exactly).
-            // They used to take the 800×480 constructor default, and the
-            // first user drag then persisted that default over the user's
-            // real frame via `windowDidMove` — next launch opened at
-            // 800×480. Seeding from the saved size closes that path and
-            // removes the "⌘N windows are tiny" complaint with it.
             if window.setFrameUsingName(Self.frameAutosaveName) {
-                // Same reachability + size clamp as the restore branch: a
-                // frame saved on a 5K display must not open a ⌘N window
-                // larger than a laptop screen (the v0.3.2 bug class).
-                // `showWindow`'s cascade then places the origin.
                 let nudged = nudgeFrameOntoVisibleScreen(window.frame, against: NSScreen.screens)
                 if nudged != window.frame {
                     window.setFrame(nudged, display: false)
                 }
             } else {
-                // Nothing saved yet: centre for the same reason as the
-                // restore branch above (otherwise it opens at y == 0).
                 window.setContentSize(rect.size)
                 window.center()
             }
         }
-        // Group all terminal windows into a shared tab bar. .preferred means
-        // AppKit keeps them in one tabGroup; we'll render the tab pills
-        // ourselves (titlebar-integrated) and suppress the default strip.
-        //
-        // ORDER NOTE: this assignment intentionally happens AFTER the
-        // autosave restore block above. On a fresh launch the window is
-        // not yet a member of any tab group (it joins one only when a
-        // sibling window with a matching `tabbingIdentifier` appears),
-        // so the restored frame from `setFrameUsingName` is not at risk
-        // of being overwritten by tab-group layout. Setting `.preferred`
-        // before the restore would needlessly invite AppKit to apply
-        // tabbing-related layout to a window whose frame hasn't been
-        // resolved yet — the test
-        // `test_saveFrameUsingName_underTabbingPreferred_persistsResize`
-        // pins that the explicit save still works in this config, but
-        // the restore-then-tabbing order avoids any ambiguity.
+        // Set after the frame restore so tab-group layout never applies to an unresolved frame.
         window.tabbingMode = .preferred
         window.tabbingIdentifier = "dev.conjfrnk.blackbird.terminal"
-        // Single-tab default: show the window title normally. Multi-tab
-        // switches to hidden + custom pill strip; see refreshTabBar.
         window.titleVisibility = .visible
         return window
     }
 
-    /// Observe display reconfigurations so the frame autosave can distinguish
-    /// AppKit's relocation moves from user drags (see
-    /// `screenParametersDidChange` / `saveCurrentFrame`). Audit S5-006.
     private func installScreenParametersObserver() {
-        // Selector-based observers auto-unregister on dealloc (macOS 10.11+);
-        // no explicit removeObserver needed.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersDidChange(_:)),
@@ -336,12 +130,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         )
     }
 
-    /// Flush a still-pending deferred frame save at quit: its 0.3 s timer
-    /// cannot outlive the process, so a non-user-driven frame change made just
-    /// before Cmd-Q would otherwise be lost. `AppDelegate.applicationWillTerminate`
-    /// flushes its tracked controllers explicitly too (before it releases
-    /// them, which would drop this observer along with them); this covers any
-    /// controller it does not track.
     private func installTerminationObserver() {
         NotificationCenter.default.addObserver(
             self,
@@ -355,17 +143,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         framePersistence.flushPendingSave()
     }
 
-    /// Resolve the Metal device, build the `TerminalView`, install it as the
-    /// content view, and set the minimum content size. Returns the view, or
-    /// `nil` when no Metal device is available — in which case it leaves a
-    /// diagnostic window title and `terminalView` nil so `init` can early-return
-    /// exactly as the original guard did (and `makeForTesting` skips).
     private func wireTerminalView(in window: NSWindow) -> TerminalView? {
-        // `preferredMetalDevice` falls back to the system default when
-        // no integrated GPU is available (Apple Silicon, Mac Pro with
-        // dual-discrete configs). On Intel laptops it picks the Iris /
-        // UHD over the Radeon Pro — matches Ghostty, avoids Alacritty's
-        // known behavior of always using the dGPU.
         guard let device = preferredMetalDevice() else {
             window.title = "Blackbird — no Metal device available"
             return nil
@@ -375,58 +153,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         window.contentView = view
         terminalView = view
 
-        // Prevent the user from shrinking the window below a usable minimum.
-        // 20 cols × 4 rows is plenty for interactive use; stops layout
-        // degenerating into a single column where the shell becomes unusable.
-        // With `.fullSizeContentView`, the content view includes the titlebar
-        // area — so reserve the real titlebar height (NOT a hard-coded
-        // constant: `titlebarOnlyTopInset` is the same live, style-mask-
-        // derived value the renderer uses to place the grid, so this stays
-        // correct across macOS versions that change the titlebar's actual
-        // height — e.g. 32pt on macOS 26 "Tahoe" vs the 28pt this used to
-        // hard-code, which under-reserved the 4-row minimum by 4pt) + the
-        // bottom inset on top of the 4-row grid.
+        // With `.fullSizeContentView` the content view includes the titlebar, whose height differs across macOS versions.
         let m = view.metrics
         window.contentMinSize = NSSize(
             width: m.cellWidth * 20 + 2 * TerminalView.horizontalContentInsetPoints,
             height: m.cellHeight * 4 + view.titlebarOnlyTopInset + TerminalView.bottomContentInsetPoints
         )
-        // Pixel-precise resize: no contentResizeIncrements here. In-between
-        // frames stay smooth because the renderer draws text at absolute
-        // point positions against the LIVE viewport (there is no "viewport
-        // stretch" — an older comment here claimed one that the code never
-        // had), and propagateResize's lastPropagatedSize dedup means SIGWINCH
-        // fires once per cell-boundary cross. Sub-cell leftover at the right
-        // is absorbed by the horizontalContentInsetPoints inset.
         return view
     }
 
     override func showWindow(_ sender: Any?) {
-        // `NSWindowController.shouldCascadeWindows` defaults to true,
-        // which makes `super.showWindow` call `setFrameTopLeftPoint` to
-        // offset the window from any sibling. That call fires
-        // `windowDidMove` synchronously — the delegate hook below now
-        // runs `saveCurrentFrame`, which would write the cascaded
-        // 800×480 ⌘N default frame to the autosave key and clobber
-        // the user's previously saved frame. Gate via a transient flag
-        // for the duration of the super call so the cascade-induced
-        // move doesn't reach defaults; user-driven moves after show
-        // see the flag cleared. (2026-05-14 review of 333abf9.)
+        // `super.showWindow` cascades via `setFrameTopLeftPoint`, which fires `windowDidMove`
+        // synchronously; the flag keeps that move out of the saved frame.
         isPerformingShowWindow = true
         super.showWindow(sender)
         isPerformingShowWindow = false
-        // Private CGS blur API needs a live windowNumber; windowNumber is
-        // only assigned once the window is ordered in. The first theme
-        // apply happens during init (before super), so the blur call then
-        // was a no-op. Re-run the palette push now that the window is
-        // visible so the blur actually lights up on first show.
-        //
-        // `super.showWindow` above can SYNCHRONOUSLY fire
-        // `windowDidBecomeKey` (the ⌘N / first-window path), which already
-        // does this exact one-shot re-apply once `didReapplyThemeAfterOrderIn`
-        // is false — see that method. Only do it again here if that path
-        // didn't already run; otherwise every ⌘N doubles the apply (A5,
-        // RCA docs/rca-tab-behaviors-2026-07-01.md).
+        // `super.showWindow` can synchronously fire `windowDidBecomeKey`, which does the same one-shot re-apply.
         guard !didReapplyThemeAfterOrderIn else { return }
         didReapplyThemeAfterOrderIn = true
         DispatchQueue.main.async { [weak self] in
@@ -435,12 +177,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
     }
 
-    /// Block AppKit's creation-time auto-merge (system "Prefer Tabs: Always")
-    /// for a fresh ⌘N window by setting `.disallowed` synchronously, then
-    /// revert to `.preferred` on the next runloop tick — after the auto-merge
-    /// window has passed — so the window can still RECEIVE tabs later
-    /// (drag-merge / "Merge All Windows"). Leaving it `.disallowed` permanently
-    /// made ⌘N windows un-mergeable for life. (F-S6-003)
+    /// Blocks AppKit's creation-time auto-merge ("Prefer Tabs: Always"), then reverts next turn so the window can still receive tabs.
     func disallowTabbingForCreationInstant() {
         window?.tabbingMode = .disallowed
         DispatchQueue.main.async { [weak self] in
@@ -449,17 +186,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     #if DEBUG
-    /// Test seam: when non-nil, `startSession` uses this instead of spawning a
-    /// real shell (no PTY, no fork). Set + cleared by `makeForTesting`.
     static var sessionFactoryForTests: (() -> TerminalSession)?
 
-    /// Build a real `MainWindowController` backed by a stub (headless, no-PTY)
-    /// session for window-lifecycle tests (F-S6). Exercises the production init
-    /// path — window, autosave, tab bar, Metal view, exit-close sink — but
-    /// never spawns a shell, so it doesn't destabilise the xctest host the way
-    /// real zsh sessions do. Returns nil when no Metal device is available
-    /// (e.g. a CI virtual display): the controller then has no `TerminalView`
-    /// and no session was wired, so the caller should `XCTSkip`.
     static func makeForTesting(stubSession: TerminalSession) -> MainWindowController? {
         sessionFactoryForTests = { stubSession }
         defer { sessionFactoryForTests = nil }
@@ -473,13 +201,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     // MARK: - Session lifecycle
 
-    /// Start (or restart) the shell session in `view`. Owns assignment of the
-    /// `session` field (touched by `deinit`/`windowWillClose`, so it stays on
-    /// the controller) and the `exitCancellable` binding; delegates session
-    /// creation, the proxy-icon binding, and the failure-recovery alert to
-    /// `SessionLifecycle`. `internal` so `SessionLifecycle`'s "Retry" sheet
-    /// handler can re-invoke it. `bypassShellPreference` skips Settings → Shell
-    /// for this one start (the custom-shell startup-failure fallback below).
     func startSession(inView view: TerminalView, bypassShellPreference: Bool = false) {
         let preference = bypassShellPreference ? nil : Preferences.shared.shellPath
         let resolved = ShellResolver.resolve(
@@ -494,11 +215,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             Self.tabsLogger.error("Settings → Shell names '\(Preferences.shared.shellPath, privacy: .public)', which is not an executable file; using \(resolved.path, privacy: .public)")
         }
         let shell = resolved.path
-        // Seed a useful default title (shell basename) so tabs aren't all
-        // "Blackbird" before the shell emits OSC 0/2. The TerminalView
-        // subscriber will replace this the moment the shell sets its own,
-        // and returns to it (`defaultTitle`) when a rename or program title
-        // is cleared.
         let defaultTitle = (shell as NSString).lastPathComponent
         window?.title = defaultTitle
         view.defaultTitle = defaultTitle
@@ -509,10 +225,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             )
             view.session = s
             self.session = s
-            // Registration is keyed by `owner: self` inside ThemeManager and
-            // the owner is held weakly — when this controller deinits, the
-            // entry auto-evicts on the next apply pass. No explicit
-            // unregister needed on teardown. (main-window F1)
             ThemeManager.shared.register(
                 owner: self,
                 sessionProvider: { [weak self] in self?.session },
@@ -521,37 +233,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             bindSessionAutoClose(s, in: view, customShell: usesCustomShell ? shell : nil)
             sessionLifecycle.bindSessionProxyIcon(s)
         } catch {
-            // Shell spawn failed (bad $SHELL, exec permission denied, etc.).
-            // Leave the window up with a diagnostic title and present an
-            // alert offering either "Retry" (another `startSession` pass)
-            // or "Close" so the user isn't stranded with a zombie window
-            // they can only ⌘W out of. (main-window F9)
             window?.title = "Blackbird — failed to start shell: \(error)"
             sessionLifecycle.presentShellStartFailureAlert(error: error, inView: view)
         }
     }
 
-    /// Close the window when the shell exits (typed `exit`, SIGHUP, etc.);
-    /// `applicationShouldTerminateAfterLastWindowClosed` then quits the app.
-    /// Auto-close is deferred when an alert / sheet is in flight: a modal's
-    /// `runModal()` pumps a private runloop mode so this sink's dispatch queues
-    /// but won't drain until the modal returns. If the shell dies during that
-    /// deliberation and the user picks Cancel, firing `performClose` anyway
-    /// would override the choice — `deferredAutoCloseIfNeeded` re-queues on the
-    /// next tick so the modal's result handler runs first. (main-window F4)
-    /// The `exitCancellable` field stays on the controller (cancelled in
-    /// `windowWillClose`); the auto-close logic lives in `SessionLifecycle`.
-    ///
-    /// `customShell` is the Settings → Shell program this session runs, nil for
-    /// the login-shell default. Any exit, whatever its status, within
-    /// `startupFailureWindow` of spawn is that program failing to start
-    /// (execv failure, dyld error, `/usr/bin/false`, a wrapper script that
-    /// ends in `exit 0` without exec'ing a shell), not the user typing `exit`.
-    /// Auto-closing would quit the app on every launch (last window) with no
-    /// way to reach Settings, so the tab restarts once on the login shell
-    /// instead; the fallback session binds with `customShell: nil` and closes
-    /// normally if it dies too. The only cost is a user typing `exit` in a
-    /// brand-new custom-shell tab inside the window, who gets a login-shell tab.
+    /// Any exit of a Settings → Shell program within `startupFailureWindow` of spawn is a failed start.
+    /// Auto-closing would quit the app on every launch, so the tab restarts once on the login shell.
     private func bindSessionAutoClose(_ s: TerminalSession, in view: TerminalView, customShell: String?) {
         let spawnedAt = s.spawnedAt
         exitCancellable = s.$exitCode
@@ -559,16 +247,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak view] code in
                 guard let self else { return }
-                // A core failure ends the child too, but the exit is ours, not
-                // the shell's: the sheet's Close Tab / Keep Open choice owns
-                // whether the window goes away. Auto-closing here would turn
-                // Keep Open into a close the moment the sheet is dismissed.
+                // After a core failure the sheet's Close Tab / Keep Open choice owns the window.
                 guard self.session?.coreFailureMessage == nil else { return }
                 let uptime = CACurrentMediaTime() - spawnedAt
                 if let customShell, let view, uptime < Self.startupFailureWindow {
                     Self.tabsLogger.error("Settings → Shell '\(customShell, privacy: .public)' exited with status \(code) \(Int(uptime * 1000)) ms after launch; falling back to the login shell")
-                    // Hop first: startSession replaces `exitCancellable`, which
-                    // must not be released from inside its own sink.
+                    // Hop first: startSession replaces `exitCancellable`, which must not be released inside its own sink.
                     DispatchQueue.main.async { [weak self, weak view] in
                         guard let self, let view, !self.isClosing else { return }
                         self.startSession(inView: view, bypassShellPreference: true)
@@ -579,9 +263,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             }
     }
 
-    /// How soon after spawn an exit of the Settings → Shell program counts as
-    /// a failed start. Measured failures take 15-300 ms; a user typing `exit`
-    /// in a custom shell takes longer than this.
     private static let startupFailureWindow: TimeInterval = 2.0
 
     func terminateSessions() {
@@ -593,16 +274,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard closeConfirmed() else { return false }
-        // Consent is final, but AppKit has not yet pulled the window out of its
-        // tab group: it does that (and promotes its own pick) before posting
-        // `willClose`, so `windowWillClose` is too late to steer selection.
         selectVisualNeighborIfClosingSelectedTab()
         return true
     }
 
-    /// The "Close this tab?" confirm; `false` means the user cancelled.
     private func closeConfirmed() -> Bool {
-        // AppDelegate's ⌘⇧W handler already got consent for the whole batch.
         if Self.bypassCloseConfirm { return true }
         guard Preferences.shared.confirmClose else { return true }
         guard let s = session, s.hasForegroundChild() else { return true }
@@ -616,43 +292,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     func windowWillClose(_ notification: Notification) {
-        // No UNCONDITIONAL close-time save: the resize / move delegate
-        // hooks already capture the live frame on every user-driven
-        // change, so close is purely redundant in the happy path — and
-        // *harmful* for an untouched ⌘N window whose frame is the
-        // constructor default (800×480). Saving on close would overwrite
-        // the user's previously-persisted size with that default, which
-        // was the 2026-05-12 dogfood-reported regression vector when we
-        // removed the per-window save gate. Only a deferred save that is
-        // already pending (a real, not-yet-committed frame change) is
-        // flushed — its 0.3 s timer would otherwise die with the window.
+        // No unconditional save on close: an untouched ⌘N window would overwrite the saved frame with its default.
         framePersistence.flushPendingSave()
-        // Genuine teardown begins. Mark it so a queued deferredAutoClose can't
-        // act on a closing window, and cancel the shell-exit sink BEFORE
-        // terminateSessions (which publishes exitCode and would otherwise
-        // re-enter deferredAutoCloseIfNeeded mid-teardown). (F-S6-001 / F4)
+        // Cancel the sink before `terminateSessions`, which publishes exitCode and would re-enter the auto-close.
         isClosing = true
         exitCancellable?.cancel()
         exitCancellable = nil
-        // Break the strip → window cycle (see `TabStripView.detachTabs`).
         titlebarTabBar?.clearTabs()
         terminateSessions()
         onClose?()
     }
 
-    /// When the group's SELECTED (front) tab is closing, pre-select its
-    /// VISUAL neighbour (TabOrderCoordinator order) so focus lands on the
-    /// strip-adjacent pill rather than whatever AppKit auto-promotes in
-    /// arrival order — which, after a drag-reorder, can be a visually
-    /// non-adjacent tab. Non-selected closes don't move selection.
-    ///
-    /// Runs from `windowShouldClose`, after the "process still running"
-    /// confirm has been answered: selecting the neighbour before that point
-    /// left the user on the wrong tab after Cancel. It cannot wait for
-    /// `windowWillClose`: by then AppKit has already detached the window into
-    /// a one-window group of its own, so there is no neighbour left to pick.
-    /// Every `performClose` entry point (hover ×, ⌘W, the strip's Delete key,
-    /// the context menu, a shell exit's auto-close) funnels through here.
+    /// Must run from `windowShouldClose`, after the confirm: by `windowWillClose` AppKit has
+    /// detached the window into a one-window group, so there is no neighbour left to pick.
     private func selectVisualNeighborIfClosingSelectedTab() {
         guard let w = window, let group = w.tabGroup, group.selectedWindow === w else { return }
         let order = TabOrderCoordinator.shared.orderedTabs(for: group)
@@ -662,46 +314,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         group.selectedWindow = order[nIdx]
     }
 
-    /// Persist the live window frame under our autosave key. Called from
-    /// `windowDidResize` and `windowDidMove`. Every Blackbird main window
-    /// participates — the last writer wins, so the saved frame always
-    /// reflects the user's most recent resize / move regardless of which
-    /// window made it. Idempotent: writing the same frame twice has no
-    /// effect.
-    ///
-    /// Two gates suppress saves that would corrupt the persisted frame:
-    ///   1. `isPerformingShowWindow` — skips the cascade-induced
-    ///      `windowDidMove` that fires during `super.showWindow` (see
-    ///      the override below for the full diagnosis).
-    ///   2. `.fullScreen` styleMask — entering native fullscreen drives
-    ///      the frame to screen-size and fires `windowDidResize`; saving
-    ///      that frame would have the next launch open the window at
-    ///      screen-size *without* fullscreen mode, burying traffic
-    ///      lights and overlapping the menu bar. Save only the
-    ///      windowed-mode frame.
-    /// Installed in init; arms the S5-006 suppression window. Selector target
-    /// for NSApplication.didChangeScreenParametersNotification (the controller
-    /// stays the notification target; the suppression state lives in
-    /// `framePersistence`).
     @objc private func screenParametersDidChange(_ note: Notification) {
         framePersistence.armScreenReconfigSuppression()
     }
 
-    /// Forward window-focus gains to the TUI as a `CSI I` escape when it
-    /// has enabled mode 1004 (`\e[?1004h`). TUIs like Vim use this to
-    /// trigger `:checktime` so external file changes are picked up when
-    /// the user Cmd-Tabs back to the terminal; tmux uses it to propagate
-    /// focus to its inner panes so clients can update title / status.
-    /// The session gates internally so no bytes emit when the mode is off.
-    ///
-    /// Also refreshes the pill strip: dragging a tab out of a group fires
-    /// no KVO on the detached side (its old group is gone), and no resize
-    /// either — but the detached window becomes key almost immediately.
-    /// Piggybacking on this callback keeps chrome consistent without
-    /// sprinkling extra notifications.
-    /// A bell or program notification arrived while this tab was not the
-    /// one the user was looking at. The pill shows a dot until the tab is
-    /// next selected (which makes its window key).
     private(set) var hasUnseenAttention = false
 
     func markUnseenAttention() {
@@ -716,11 +332,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         broadcastAttentionChange()
     }
 
-    /// The core panicked: the session has already been torn down (its
-    /// child ended). Say so and offer Close Tab or Keep Open — before v0.8.1
-    /// the only signal was a title prefix the pill truncated to
-    /// "[fatal] core pa…" while keystrokes kept reaching a child nobody could
-    /// see.
     func presentCoreFailure(_ message: String) {
         guard let window else { return }
         let alert = NSAlert()
@@ -731,17 +342,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         alert.addButton(withTitle: "Keep Open")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
-            // The sheet is still attached inside this handler, so a direct
-            // `performClose` is a no-op; wait for it to detach, then close.
-            // The session is already terminated, so no close-confirm applies.
+            // The sheet is still attached inside this handler, so a direct `performClose` is a no-op.
             self?.sessionLifecycle.deferredAutoCloseIfNeeded()
         }
     }
 
-    /// Sibling strips refresh through `.blackbirdTabTitleChanged` (the
-    /// observer skips the sender's own window), so repaint our own strip
-    /// directly — no `refreshTabBar`, which can re-post the notification
-    /// through the title KVO and double-fire it.
+    /// Repaints our own strip directly: `refreshTabBar` could re-post the notification through the title KVO.
     private func broadcastAttentionChange() {
         guard let window else { return }
         NotificationCenter.default.post(name: .blackbirdTabTitleChanged, object: window)
@@ -751,57 +357,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func windowDidBecomeKey(_ notification: Notification) {
         clearUnseenAttention()
         session?.focusChanged(true)
+        // Dragging a tab out fires no KVO and no resize on the detached side, but it becomes key.
         tabObserver.refreshTabBarIfStateChanged()
-        // Catch the native tab bar as early as possible on freshly-
-        // opened tab windows. The install path defers its first
-        // `hideNativeTabStrip` via `DispatchQueue.main.async` because
-        // `tabGroup` is nil pre-show; by the time this window becomes
-        // key, it has joined the group and AppKit has installed the
-        // native tab bar view — and we're still running on main, before
-        // the next runloop tick that would have hidden it. Hiding here
-        // removes the new-tab flash without depending on the scheduled
-        // async to fire first.
         tabObserver.hideNativeTabStrip()
-        // ⌘T tabs join via addTabbedWindow and never call showWindow, so the
-        // post-order-in blur re-apply that showWindow does never runs for
-        // them — their translucent background stays un-frosted. Re-apply once
-        // now that windowNumber is live (the window is key). One-shot so we
-        // don't re-theme every focus gain.
+        // ⌘T tabs join via `addTabbedWindow` and never call `showWindow`.
         if !didReapplyThemeAfterOrderIn {
             didReapplyThemeAfterOrderIn = true
             ThemeManager.shared.refresh(owner: self)
         }
-        // When AppKit promotes a sibling tab on close (⌘W or `exit`
-        // typed in the shell), the survivor's first responder doesn't
-        // always carry through the transition — the user sees
-        // keystrokes hit nothing (NSBeep) until they click the window.
-        // Drive the responder back to the TerminalView ourselves on
-        // every key transition. The helper preserves an already-
-        // sensible first responder (the TerminalView itself, or a
-        // descendant like the FindBar's text field), so this is
-        // idempotent on the common case and respects an active find.
         restoreTerminalFirstResponderIfNeeded()
     }
 
-    /// Set the TerminalView back as the window's first responder when
-    /// the current first responder isn't already a sensible target.
-    /// Two subtrees own first-responder state we must NOT trample:
-    ///
-    ///   - `terminalView` itself and its descendants — the FindBar lives
-    ///     inside it, so an in-progress find's text field is preserved.
-    ///   - `titlebarTabBar?.view` and its descendants — the inline tab
-    ///     rename `NSTextField` lives here. A user who's mid-rename and
-    ///     ⌘-Tabs to another app and back would otherwise have their
-    ///     edit silently destroyed when this fires on `windowDidBecomeKey`.
-    ///
-    /// All other states — nil, the window itself, an unrelated view, a
-    /// non-`NSView` responder — trigger a restore.
-    ///
-    /// Internal so the `selectedWindow` KVO observer can call this on the
-    /// destination controller after a tab swap. Tab-group-internal swaps
-    /// (mouse-pill click; some `selectNextTab` paths) don't reliably fire
-    /// `windowDidBecomeKey` on the new tab, so the KVO is the unified hook
-    /// that catches every selection change.
+    /// Leaves a first responder inside `terminalView` (the find bar) or the tab strip (the inline rename field) alone.
     func restoreTerminalFirstResponderIfNeeded() {
         guard let win = window, let view = terminalView else { return }
         let protectedRoots: [NSView] = [view, titlebarTabBar?.view].compactMap { $0 }
@@ -812,90 +379,46 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         win.makeFirstResponder(view)
     }
 
-    /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
-    /// Only fires when the key-window transition is between Blackbird
-    /// windows or between Blackbird and another app — spaces / dock
-    /// changes that don't take key away leave the mode state alone.
     func windowDidResignKey(_ notification: Notification) {
         session?.focusChanged(false)
     }
 
-    /// Main-window transitions fire on a different schedule than key-window
-    /// transitions (e.g., a background window can become main when its app
-    /// gains focus). Refresh here too so detached-window chrome settles in
-    /// every path — cheaper than tracking every edge individually.
     func windowDidBecomeMain(_ notification: Notification) {
         tabObserver.refreshTabBarIfStateChanged()
     }
 
     // MARK: - Titlebar-integrated tab bar
 
-    /// Refresh the custom tab pill strip. Thin forwarder to `TabGroupObserver`
-    /// so `AppDelegate.refreshAllTabBars` keeps calling `controller.refreshTabBar()`.
     func refreshTabBar() {
         tabObserver.refreshTabBar()
     }
 
     deinit {
-        // deinit can't call a non-final method safely across all Swift
-        // versions, and we don't need main-actor isolation here — invoke
-        // the cleanup inline so the release-path doesn't retain the
-        // notification token past `self`. (main-window F2, F17)
         titleObserver?.invalidate()
         if let tok = titleBroadcastObserver {
             NotificationCenter.default.removeObserver(tok)
         }
-        // L-7 / NEW-02: idempotently terminate the session. The
-        // primary teardown path is `windowWillClose →
-        // terminateSessions()`, which runs on main BEFORE the strong
-        // ref drops. But abnormal deallocation paths (alloc/release
-        // without ever showing the window, future refactors that
-        // bypass `performClose`) would otherwise leave `session`
-        // alive, hitting the M-4 deinit-on-coreQueue scenario as the
-        // last strong-ref-holder. `terminate()` is idempotent against
-        // its own `isTerminated` flag — calling here when
-        // `terminateSessions()` already ran is a no-op.
+        // Idempotent; covers deallocation paths that never reach `windowWillClose`.
         session?.terminate()
     }
 
     func windowDidResize(_ notification: Notification) {
-        // Our own fan-out echo — not a user resize. See
-        // `isApplyingTabGroupFrame` for the two things this guard prevents.
-        // Ignoring it also skips the strip relayout below, so
-        // `applyTabGroupFrame` does that itself (a window-server relocation of
-        // a background tab pushes onto the visible tab).
         guard !isTabGroupFrameEcho() else { return }
-        // Pills divide the available titlebar width equally, so resize
-        // needs to re-lay them out. Mid-drag only the width can have changed,
-        // so take the cheap path and leave the full refresh (native-strip
-        // re-hide, group-identity re-check, KVO re-install) to the settle.
+        // Mid-drag only the width can have changed; the full refresh runs at the settle.
         if isResizingInteractively {
             tabObserver.relayoutTabStripForWidth()
         } else {
             tabObserver.refreshTabBar()
         }
-        // The window registers no AppKit autosave name (see
-        // `makeConfiguredWindow`), so drive the save ourselves. Idempotent.
-        // ALL windows save — the saved frame on disk tracks the user's most
-        // recent resize regardless of which window owned it.
-        //
-        // Skipped during a live drag: `saveFrame(usingName:)` is a synchronous
-        // `UserDefaults` write, and every write fans out through SwiftUI's
-        // global `UserDefaults` bridge into `Preferences.objectWillChange`.
-        // Paying that per drag frame bought nothing — `windowDidEndLiveResize`
-        // saves the frame the user actually chose, and `windowDidMove` still
-        // covers title-bar drags.
+        // Not during a live drag: `saveFrame(usingName:)` is a synchronous `UserDefaults` write per frame.
         if !isResizingInteractively {
             framePersistence.saveCurrentFrame()
         }
         scheduleSiblingFrameSync()
     }
 
-    /// Whether the live resize now in flight began with the left button held.
-    /// Captured at its start because the end callback can no longer tell: AppKit
-    /// clears `inLiveResize` and the button is already up by then. A display
-    /// change's relocation is bracketed as a live resize too — with no button
-    /// held — so the bracket alone must not count as proof of a user gesture.
+    /// Captured at the start: by the end callback AppKit has cleared `inLiveResize` and the button is up.
+    /// A display change's relocation is also bracketed as a live resize, with no button held.
     private var liveResizeBeganWithButtonDown = false
 
     func windowWillStartLiveResize(_ notification: Notification) {
@@ -907,36 +430,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         liveResizeBeganWithButtonDown = false
     }
 
-    /// End of a resize gesture, from either driver: AppKit's edge/corner drag
-    /// (`windowDidEndLiveResize`) or Blackbird's own modifier-right-drag, which
-    /// never fires that callback because it sets the frame directly.
-    ///
-    /// Everything the per-frame path deliberately skipped happens here, once:
-    /// the full tab-strip refresh, the frame save, and the push to the group's
-    /// background tabs (no debounce — this IS the settle point).
-    ///
-    /// - Parameter userDriven: whether the gesture is known to be the user's.
-    ///   The right-drag caller is by construction; `windowDidEndLiveResize`
-    ///   passes whether the live resize began with the button down.
+    /// Also the end of the modifier-right-drag, which sets the frame directly and never fires `windowDidEndLiveResize`.
     func settleAfterResizeGesture(userDriven: Bool = true) {
         tabObserver.refreshTabBar()
-        // `knownUserDriven`: AppKit clears `inLiveResize` before posting the
-        // end callback and the button is already up, so the usual live
-        // signals both read false and the S5-006 screen-reconfig settle
-        // window would otherwise drop the only save of the entire drag.
+        // `knownUserDriven`: the live signals already read false, so the screen-reconfig settle window would drop this save.
         framePersistence.saveCurrentFrame(knownUserDriven: userDriven)
         pendingSiblingFrameSync?.cancel()
         pendingSiblingFrameSync = nil
         syncFrameToSiblingTabs()
     }
 
-    // MARK: - Tab-group frame fan-out (issue #29)
+    // MARK: - Tab-group frame fan-out
 
-    /// Schedule a trailing sibling-frame push for resize paths that don't end
-    /// in `windowDidEndLiveResize`. Skipped outright during a live drag: that
-    /// path settles through `windowDidEndLiveResize`, and a background tab is
-    /// invisible, so fanning out mid-drag would buy nothing visually while
-    /// costing N `setFrame`s (and N drawable reallocations) per pause.
     private func scheduleSiblingFrameSync() {
         guard !isResizingInteractively else { return }
         pendingSiblingFrameSync?.cancel()
@@ -948,13 +453,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    /// Push this window's frame onto the other tabs in its group so their
-    /// terminals reflow (and their shells get `SIGWINCH`) now, instead of when
-    /// the user next cycles to them.
-    ///
-    /// Internal rather than private: `TerminalWindow.mergeAllWindows` calls it,
-    /// because a merge changes no window's frame and so never reaches any of
-    /// the resize settle points that call this.
+    /// Also called by `TerminalWindow.mergeAllWindows`: a merge changes no frame, so no resize settle point runs.
     func syncFrameToSiblingTabs() {
         guard !isApplyingTabGroupFrame,
               let window,
@@ -964,40 +463,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             if let controller = sibling.windowController as? MainWindowController {
                 controller.applyTabGroupFrame(frame)
             } else {
-                // A member with no controller of ours (none in the shipping
-                // app) still must not keep a stale frame and PTY winsize.
                 sibling.setFrame(frame, display: false)
             }
         }
     }
 
-    /// Receiver side of the fan-out. `setFrame(_:display:false)` on a merged,
-    /// ordered-out tab member is accepted, does **not** order the window in,
-    /// and is self-healing: if the pushed frame were ever wrong, AppKit
-    /// re-asserts the group's canonical frame at selection time (all three
-    /// verified with standalone AppKit probes).
-    ///
-    /// The receiver re-lays out its OWN pill strip afterwards, because the
-    /// echo guard makes it deaf to the `windowDidResize` that would normally
-    /// do it. That matters for the VISIBLE tab: after a display
-    /// reconfiguration the window server relocates every window of the group,
-    /// background tabs included, and a background tab's relocation fans out
-    /// onto the visible sibling through here. Without the relayout its strip
-    /// kept the pre-push width (window 1686 -> 1512 left the strip at 1609,
-    /// not 1435; first pill under the traffic lights) until a tab switch.
-    ///
-    /// Internal rather than private: the sender is a *different* instance of
-    /// this class.
+    /// `setFrame(_:display: false)` on an ordered-out tab member does not order it in.
     func applyTabGroupFrame(_ frame: NSRect) {
         guard let window, window.frame != frame else { return }
         isApplyingTabGroupFrame = true
         defer { isApplyingTabGroupFrame = false }
-        // A background tab draws nothing, so it needs none of the synchronous
-        // resize path's "never a frame at the old grid size" guarantee — and
-        // `coreQueue.sync` there would make main wait out that session's whole
-        // parse backlog, once per tab, at the instant of mouse-up. (After a
-        // display relocation the receiver can be the visible tab; it takes the
-        // same non-blocking path.)
+        // Non-blocking: the synchronous path's `coreQueue.sync` would make main wait out each session's parse backlog.
         if let view = terminalView {
             view.withNonBlockingResizeDelivery {
                 window.setFrame(frame, display: false)
@@ -1005,79 +481,39 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         } else {
             window.setFrame(frame, display: false)
         }
-        // Width-only path: no native-strip re-hide walk (it logs an ERROR per
-        // background tab) and no frame save. Posts no resize notification.
+        // The echo guard makes this window deaf to its own `windowDidResize`, so the strip is re-laid out here.
         tabObserver.relayoutTabStripForWidth()
     }
 
-    /// True while the user is dragging this window's size — either through
-    /// AppKit's own edge/corner handles (`inLiveResize`) or through Blackbird's
-    /// modifier-right-drag gesture, which drives `setFrame` directly and so
-    /// leaves `inLiveResize` FALSE for the entire gesture. Every "is this a
-    /// live drag?" decision has to consider both, or the app's own resize
-    /// gesture pays the settle-time costs on every pointer sample.
+    /// The modifier-right-drag drives `setFrame` directly and leaves `inLiveResize` false, so both drivers are checked.
     private var isResizingInteractively: Bool {
         if window?.inLiveResize ?? false { return true }
-        // The custom gesture's own flag is cleared by `rightMouseUp`. If that
-        // event is ever lost (a modal steals it, the app deactivates
-        // mid-drag), a latched flag would silently disable frame persistence,
-        // the tab-strip refresh and the fan-out for the rest of the window's
-        // life. Cross-check that the right button is genuinely still down.
+        // If `rightMouseUp` is lost the gesture flag latches; cross-check that the right button is still down.
         guard terminalView?.windowResizeController.isResizing ?? false else { return false }
         return (NSEvent.pressedMouseButtons & 0b10) != 0
     }
 
-    /// True when a frame-change callback on this window is the echo of a
-    /// fan-out push rather than a user (or AppKit) resize.
-    ///
-    /// Timing-based, on purpose. A value-based backstop ("is the frame equal to
-    /// the last one we pushed?") was tried and removed: `NSWindow.setFrame`
-    /// posts its notifications synchronously — verified with standalone AppKit
-    /// probes against a merged, ordered-out tab member, the least likely
-    /// configuration to be on that path — so the flag alone is exact, whereas
-    /// the value check silently swallowed real user resizes that happened to
-    /// reproduce a previously-pushed rect. Window-tiling utilities and
-    /// fullscreen exit reproduce exact rects constantly.
+    /// `NSWindow.setFrame` posts its notifications synchronously, so the flag alone is exact. A
+    /// frame-equality check would swallow real resizes that reproduce a previously pushed rect.
     private func isTabGroupFrameEcho() -> Bool {
         isApplyingTabGroupFrame
     }
 
     func windowDidMove(_ notification: Notification) {
-        // The fan-out pushes a full NSRect, so a push whose ORIGIN differs
-        // posts a move notification too — and this callback saves the frame
-        // with none of `windowDidResize`'s guards. Unguarded, a fullscreen
-        // fan-out would have every sibling persist the fullscreen origin to
-        // the single shared autosave key: RCA finding A3, arriving through the
-        // move door instead of the resize one.
+        // A fan-out push whose origin differs posts a move notification too.
         guard !isTabGroupFrameEcho() else { return }
-        // A macOS window is bottom-left anchored, so dragging the bottom, left
-        // or either bottom corner changes the ORIGIN on every frame of a
-        // resize — meaning this callback, not just `windowDidResize`, is on the
-        // per-frame path. Skip the save for the same reason: one settle-time
-        // save (from `windowDidEndLiveResize` / the resize gesture's end)
-        // instead of a synchronous `UserDefaults` write per pointer sample.
+        // Windows are bottom-left anchored: a bottom or left edge drag changes the origin on every frame of a resize.
         guard !isResizingInteractively else { return }
-        // Same rationale as `windowDidResize`: there is no implicit
-        // save-on-move, so drive it explicitly. Without this, the user's
-        // "drag the window to a new corner of the screen, type `exit`"
-        // workflow loses the new position on relaunch.
         framePersistence.saveCurrentFrame()
     }
 
-    /// Arms the fullscreen-entry save suppression (A3, RCA
-    /// docs/rca-tab-behaviors-2026-07-01.md) — see
-    /// `WindowFramePersistence.armFullScreenEntrySuppression`'s doc comment
-    /// for why the plain `.fullScreen` styleMask check in `saveCurrentFrame`
-    /// isn't sufficient on its own.
     func windowWillEnterFullScreen(_ notification: Notification) {
         framePersistence.armFullScreenEntrySuppression()
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         framePersistence.resolveFullScreenEntrySuppression()
-        // Fullscreen animates the frame across many runloop turns with
-        // `inLiveResize == false`, so `scheduleSiblingFrameSync` skipped none
-        // of them but also never saw a settle point. This is it.
+        // Fullscreen animates the frame with `inLiveResize == false`; this is its settle point.
         syncFrameToSiblingTabs()
     }
 
@@ -1085,70 +521,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         syncFrameToSiblingTabs()
     }
 
-    /// The transition can also fail outright (rare, but AppKit does define
-    /// this delegate hook) — resolve the suppression the same way so a
-    /// failed attempt doesn't leave saves suppressed for the rest of the
-    /// window's life.
+    /// A failed transition must resolve the suppression too, or saves stay suppressed for the window's life.
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
         framePersistence.resolveFullScreenEntrySuppression()
     }
 
     // MARK: - Tab bar affordances
 
-    /// Intercept AppKit's toggleTabBar responder action — the one fired by
-    /// ⇧⌘T, the View menu's "Show Tab Bar", and the window titlebar's
-    /// right-click menu — and permanently no-op it.
-    ///
-    /// Deliberately NEVER forwards to `window.toggleTabBar(_:)`, for two
-    /// independent reasons:
-    ///   1. It's functionally pointless in Blackbird's architecture: the
-    ///      custom pill strip (`TitlebarTabBar.swift`) fully replaces the
-    ///      native tab bar's purpose and is always shown for ≥2 tabs — there
-    ///      is no "hide the tabs to reclaim space" affordance to offer, since
-    ///      the pills ARE the window chrome, not an optional convenience the
-    ///      way Terminal.app/iTerm2 treat their native strips.
-    ///   2. It's actively risky: `window.toggleTabBar(_:)` collapsing/
-    ///      restoring AppKit's native 36pt tab-bar band interacts with
-    ///      `NativeTabStripHider`'s aggressive suppression (which zeroes
-    ///      that band's hosting ancestor's frame — RCA
-    ///      docs/rca-tab-behaviors-2026-07-01.md Bug 1) in ways that were
-    ///      never exercised before that fix landed, and this exact
-    ///      `toggleTabBar` API already has a documented history of
-    ///      triggering beachball hangs in this codebase when touched inside
-    ///      related transactions (KNOWN_ISSUES "Tab-merge titlebar flash on
-    ///      ⌘T": two prior attempts to call `toggleTabBar` during the merge
-    ///      transaction were reverted after hanging). Never calling it at
-    ///      all is the safe, conservative choice — RCA finding A2 ("Hide Tab
-    ///      Bar desyncs band and pills").
+    /// Never forwards to `window.toggleTabBar(_:)`: collapsing the native tab-bar band conflicts with
+    /// `NativeTabStripHider`'s frame zeroing, and that call has hung when made inside a tab-merge transaction.
     @objc func toggleTabBar(_ sender: Any?) {
-        // `validateMenuItem` disables every documented invocation path
-        // (⇧⌘T, View menu, titlebar right-click), so reaching the ACTION
-        // BODY means something bypassed menu validation entirely — direct
-        // `NSApp.sendAction`, AppleScript's default Cocoa scripting, or a
-        // future caller. Matching the H-9 pattern elsewhere in this
-        // codebase (App.swift's `selectTab`/`closeWindow`, which log an
-        // "ignoring" notice on the same class of bypass): log rather than
-        // silently doing nothing, so a bypassed keystroke that "does
-        // nothing" has a diagnostic trail instead of looking like the app
-        // hung. NOT gated on `#if DEBUG` for the same Release-
-        // diagnosability reason as those siblings. (silent-failure review,
-        // RCA docs/rca-tab-behaviors-2026-07-01.md batch)
         Self.tabsLogger.notice("toggleTabBar: reached the action body via a path that bypassed validateMenuItem (always disabled) — permanent no-op, ignoring")
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(toggleTabBar(_:)) {
-            // Always disabled — see `toggleTabBar`'s doc comment. Grayed
-            // out rather than silently inert-when-clicked (this codebase
-            // avoids silent no-ops where a clear disabled state is cheap).
             return false
         }
         if menuItem.action == #selector(renameActiveTab(_:)) {
-            // Only enabled when there's a live session to rename.
             return session != nil
         }
         if menuItem.action == #selector(resetActiveTabTitle(_:)) {
-            // "Reset to Auto" only makes sense when an override is active.
             return session?.titleState.titleOverride != nil
         }
         return true
@@ -1160,10 +553,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         beginRenameActiveTab()
     }
 
-    /// Entry point for ⌃⌘R and the `Rename…` context menu. Multi-tab
-    /// windows open the inline pill editor (new — see Task 8); single-tab
-    /// windows have no pill strip, so the legacy modal alert remains the
-    /// only sensible surface there.
     func beginRenameActiveTab() {
         guard let window, let session else { return }
         let tabCount = window.tabGroup?.windows.count ?? 1
@@ -1174,9 +563,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
     }
 
-    /// Legacy modal rename path, kept for single-tab windows. The empty
-    /// string means "clear override and revert to auto"; Cancel leaves
-    /// state untouched.
     private func presentRenameAlert(for session: TerminalSession) {
         let alert = NSAlert()
         alert.messageText = "Rename tab"
@@ -1185,11 +571,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         alert.addButton(withTitle: "Cancel")
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        // Pre-fill with the current effective title so the user can lightly
-        // edit it rather than retyping from scratch. `displayTitle` is now
-        // optional (returns nil when no override AND no OSC title yet) — fall
-        // back to `window.title` so the alert shows the shell-basename seed
-        // that's actually on screen instead of an empty field.
         field.stringValue = session.titleState.displayTitle ?? (window?.title ?? "")
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -1200,9 +581,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         session.titleState.titleOverride = new.isEmpty ? nil : new
     }
 
-    /// Receives the result of an inline pill rename. `trimmedTitle` is
-    /// already whitespace-trimmed by `TabStripView.commitEdit`; empty
-    /// string → clear override (revert to OSC / auto title).
     func applyInlineRename(_ trimmedTitle: String) {
         session?.titleState.titleOverride = trimmedTitle.isEmpty ? nil : trimmedTitle
     }
@@ -1214,25 +592,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
 // MARK: - First-responder restore decision
 
-/// Pure decision function for `restoreTerminalFirstResponderIfNeeded`.
-/// Returns `true` when the caller SHOULD override the first responder,
-/// `false` when the current responder is already in a sensible place —
-/// any view that's a descendant of (or identical to) one of the
-/// `protectedRoots`.
-///
-/// Multiple roots support the case where focus can legitimately live
-/// in either of two unrelated subtrees: the TerminalView (covers the
-/// FindBar text field — a TerminalView subview) and the titlebar tab
-/// strip (covers the inline rename text field — a titlebar accessory,
-/// NOT under TerminalView). Either deserves to keep focus through a
-/// `windowDidBecomeKey` callback.
-///
-/// Pure: takes `NSResponder?` and `[NSView]` rather than reaching into
-/// a window so unit tests can drive every case (nil, a member of one
-/// root's subtree, a sibling under a non-protected parent, a non-NSView
-/// responder, multi-root preservation) without instantiating an NSWindow
-/// or a MainWindowController. Internal (not private) so the test target
-/// can reach it via `@testable import Blackbird`.
 internal func shouldRestoreFirstResponder(
     currentFirstResponder: NSResponder?,
     preserveDescendantsOf protectedRoots: [NSView]
@@ -1243,17 +602,9 @@ internal func shouldRestoreFirstResponder(
 
 // MARK: - Off-screen frame nudging
 
-/// Minimum on-screen overlap (in points, in BOTH dimensions) we require
-/// before considering an autosaved window frame "reachable" by the user.
-/// 100×100 was picked to ensure the traffic-light cluster (≈75pt wide)
-/// plus a little of the title bar are always grabbable — anything tighter
-/// risks a window the user can't drag back. (Bug #22)
+/// Points, in both dimensions: enough that the traffic-light cluster (≈75 pt wide) stays grabbable.
 private let minimumOnScreenOverlap: CGFloat = 100
 
-/// Production overload: thin shim that extracts `visibleFrame` from each
-/// `NSScreen` and forwards to the pure rect-only helper. Keeps the call
-/// site in `MainWindowController.init` readable and the testable core
-/// free of any AppKit screen-enumeration coupling.
 func nudgeFrameOntoVisibleScreen(
     _ frame: NSRect,
     against screens: [NSScreen]
@@ -1264,71 +615,18 @@ func nudgeFrameOntoVisibleScreen(
     )
 }
 
-/// Pure helper used by `MainWindowController.init` to validate the frame
-/// AppKit just restored via `setFrameUsingName`. If the saved frame
-/// lands mostly off every connected screen — typical after the user
-/// unplugs an external display the window was last positioned on — we
-/// recenter on the first ("main") screen instead of letting AppKit show
-/// an invisible window. (Bug #22)
-///
-/// Pure: takes `[NSRect]` rather than `[NSScreen]` so unit tests can
-/// drive it with synthetic visibleFrames without the NSScreen
-/// instantiation problem (NSScreen has no public initializer).
-///
-/// - Parameter frame: the window frame to validate, in global screen
-///   coordinates (origin bottom-left, AppKit convention).
-/// - Parameter visibleFrames: each screen's `visibleFrame`. Pass
-///   `NSScreen.screens.map(\.visibleFrame)` in production. Order
-///   matters: the first entry large enough to host a window (≥
-///   `minimumOnScreenOverlap` in both dimensions) is the recenter
-///   target when the input is off-screen.
-/// - Returns: `frame` unchanged when it overlaps at least one of the
-///   `visibleFrames` by `minimumOnScreenOverlap` in BOTH dimensions —
-///   checked per-screen, NOT against the union bounding box, so a frame
-///   stranded in the gap between non-adjacent displays is correctly
-///   treated as off-screen. Otherwise a frame centered on the first
-///   usable screen's visibleFrame, its size clamped to that screen so the whole
-///   window (title bar included) is reachable even when the saved frame
-///   came from a larger, now-disconnected display. Empty `visibleFrames`
-///   (truly headless / disconnected display) returns `frame` unchanged
-///   because there's no reasonable target to recenter onto.
+/// `frame` is in global screen coordinates (origin bottom-left). The first `visibleFrames` entry large enough
+/// to host a window is the recenter target.
 func nudgeFrameOntoVisibleScreen(
     _ frame: NSRect,
     visibleFrames: [NSRect]
 ) -> NSRect {
-    // Recenter target: the first screen actually large enough to host a
-    // grabbable window. A degenerate / sub-`minimumOnScreenOverlap`
-    // visibleFrame (a placeholder, or a screen reported mid-reconfiguration at
-    // launch — exactly when this validator runs) can otherwise sort first and
-    // make the recenter below emit a zero-size, unreachable frame. With no
-    // usable screen, return `frame` unchanged and let AppKit place the window.
     guard let primary = visibleFrames.first(where: {
         $0.width >= minimumOnScreenOverlap && $0.height >= minimumOnScreenOverlap
     }) else { return frame }
-    // Reachable iff the frame overlaps SOME ACTUAL screen by at least
-    // `minimumOnScreenOverlap` in BOTH dimensions. Test each screen
-    // individually — NOT the union of all visibleFrames. The union is a
-    // bounding box that spans the empty gaps between non-adjacent displays
-    // (and the dead corner of an L-shaped / diagonal arrangement); a window
-    // restored into such a gap overlaps the bounding box yet sits on no real
-    // screen, so a union test calls it "reachable" and leaves it invisible.
-    // (multi-display restore regression: the original code unioned first.)
-    // Audit S5-007: the overlap requirement is capped by the frame's OWN
-    // dimensions. The intersection can never exceed the frame, so a
-    // legitimately small window — a 4-row terminal at font size 9 is
-    // ~82-90pt tall, under the 100pt requirement — could NEVER qualify
-    // as reachable no matter how fully on-screen it sat, and its saved
-    // position was discarded and recentered on every launch, violating
-    // the return-unchanged contract above. Requiring min(100, frame dim)
-    // keeps the Bug #22 intent (the traffic-light cluster must be
-    // grabbable) for normal windows while letting a window smaller than
-    // the threshold qualify by being entirely visible in that dimension.
-    // max(_, 1) guards the degenerate case (review follow-up): a
-    // zero-size frame would make the requirement 0, and the .null
-    // intersection of disjoint rects reads as 0×0 — so a 0×0 frame
-    // ANYWHERE, including far off every screen, would have passed as
-    // "reachable" and stayed invisible, the exact Bug #22 class this
-    // validator exists to prevent.
+    // Test each screen individually, not the union: its bounding box spans the gaps between non-adjacent displays.
+    // The requirement is capped by the frame's own size so a small window can qualify; `max(_, 1)`
+    // stops a zero-size frame passing through the 0×0 `.null` intersection of disjoint rects.
     let requiredW = min(minimumOnScreenOverlap, max(frame.width, 1))
     let requiredH = min(minimumOnScreenOverlap, max(frame.height, 1))
     let reachable = visibleFrames.contains { screen in
@@ -1337,15 +635,7 @@ func nudgeFrameOntoVisibleScreen(
             && overlap.height >= requiredH
     }
     if reachable { return frame }
-    // Not reachable: recenter on the primary screen. Clamp the size to the
-    // primary's visibleFrame FIRST — a window saved at the size of a larger,
-    // now-unplugged display would otherwise be recentered at that oversized
-    // height with its title bar (and the traffic-light cluster) above the top
-    // edge, unreachable, leaving the user unable to drag it. Shrinking to fit
-    // guarantees the whole window lands on the primary. The saved frame in
-    // defaults is untouched (this runs before the window delegate is
-    // installed, so no save fires), so re-attaching the larger display
-    // restores the original size on the next launch.
+    // Clamp to the primary first, or a frame saved on a larger display is recentered with its title bar off the top edge.
     let width  = min(frame.width,  primary.width)
     let height = min(frame.height, primary.height)
     let centeredX = primary.minX + (primary.width  - width)  / 2

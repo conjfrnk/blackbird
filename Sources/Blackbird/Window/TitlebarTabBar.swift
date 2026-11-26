@@ -1,16 +1,7 @@
 import AppKit
 import os
 
-/// Custom tab bar that sits inside the titlebar row — same row as the
-/// traffic-light buttons, Safari / iTerm2 style. Built on top of AppKit's
-/// native `NSWindowTabGroup` so windows are still real tabs (AppKit
-/// handles merging, selection, keyboard routing); we just hide the default
-/// strip-below-titlebar via view-walk and draw our own pills.
-///
-/// Single-tab windows hide the accessory entirely and show the normal
-/// window title. The custom pill strip only appears when ≥2 tabs exist,
-/// and then splits the titlebar width equally across the open tabs so
-/// 2 tabs = halves, 3 tabs = thirds, etc.
+/// Custom tab bar inside the titlebar row, built on the native `NSWindowTabGroup`; the native strip is hidden.
 final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 
     private let stripView = TabStripView(frame: .zero)
@@ -19,10 +10,7 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     init(window: NSWindow) {
         self.hostWindow = window
         super.init(nibName: nil, bundle: nil)
-        // `.right` anchors the accessory to the right side of the
-        // titlebar; we size its view wide enough to eat the full space
-        // left of the edge (minus room for the traffic lights). `.bottom`
-        // would put it below the titlebar — exactly what we're avoiding.
+        // `.bottom` would put the accessory below the titlebar.
         layoutAttribute = .right
         view = stripView
         stripView.onSelectWindow = { [weak self] w in
@@ -30,55 +18,30 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
             w.makeKeyAndOrderFront(nil)
         }
         stripView.onCloseWindow = { w in
-            // Visual-neighbour selection for a closing SELECTED tab lives in
-            // `MainWindowController.windowShouldClose` (after the confirm, while
-            // the window is still in its group). It used to run HERE, before
-            // `performClose`, so a "Close this tab?" → Cancel left the user
-            // parked on a different tab than the one they had tried to close.
+            // Neighbour selection for a closing SELECTED tab lives in
+            // `MainWindowController.windowShouldClose`, after the confirm, not here.
             w.performClose(nil)
         }
         stripView.onAddTab = {
-            // Typed selector: a rename of `AppDelegate.newWindowForTab(_:)`
-            // now fails to compile instead of silently killing the `+`.
             if !NSApp.sendAction(#selector(AppDelegate.newWindowForTab(_:)), to: nil, from: nil) {
                 TitlebarTabBarViewController.tabBarLogger.error("newWindowForTab: found no responder; the + button did nothing")
             }
         }
-        // Inline-rename commit: the strip has already trimmed the input
-        // and converted "" → nil; just hand the value to the window's
-        // MainWindowController (which owns the session + override
-        // policy). This bypasses the responder chain — we already know
-        // the exact window being renamed.
         stripView.onCommitRename = { window, newOverride in
             guard let controller = window.windowController as? MainWindowController else { return }
             controller.applyInlineRename(newOverride)
         }
     }
 
-    /// Enter inline rename mode for `window`'s pill, if any. Called by
-    /// `MainWindowController.beginRenameActiveTab` and the `Rename…`
-    /// context menu item when the window is part of a multi-tab group.
-    /// Single-tab windows fall back to the modal path on the controller.
     func beginInlineRename(for window: NSWindow) {
         guard let group = window.tabGroup else { return }
-        // Pill index must come from the coordinator's VISUAL order
-        // (what the strip painted), not `group.windows`'s arrival
-        // order. After a drag-reorder the two diverge — using arrival
-        // order here would route the edit field onto a sibling pill,
-        // and the commit would `onCommitRename(wrongWindow, ...)`
-        // silently. The two-orderings-must-agree-at-every-positional-
-        // lookup invariant is the whole point of `TabOrderCoordinator`.
+        // Pill index comes from the coordinator's VISUAL order, not `group.windows`' arrival
+        // order: the two diverge after a drag-reorder.
         let tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
         guard let idx = tabs.firstIndex(of: window) else { return }
         stripView.beginEditing(pillIndex: idx)
     }
 
-    /// Publish and tear down any in-flight inline rename. Safe to call
-    /// when no edit is in progress (the strip short-circuits internally).
-    /// `MainWindowController.refreshTabBar` invokes this before hiding
-    /// the accessory on the multi-tab → single-tab transition so the
-    /// editing field doesn't survive as a stale subview of the hidden
-    /// strip. (main-window F8)
     func commitAnyInFlightEdit() {
         stripView.commitEditIfNeeded()
     }
@@ -87,69 +50,32 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 
     static let tabBarLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "tabs")
 
-    /// See `TabStripView.detachTabs`. Idempotent.
     func clearTabs() {
         stripView.detachTabs()
     }
 
-    /// Re-read the tab group and re-lay pills. Caller is responsible for
-    /// toggling `view.isHidden` based on tab count before calling this —
-    /// single-tab windows skip the custom strip entirely.
-    ///
-    /// `availableWidth` is the caller's pre-computed titlebar budget for
-    /// this accessory: total window width minus the trailing space for
-    /// the traffic lights. The strip owns zero layout math of its own —
-    /// `MainWindowController` is the single authority for reservation
-    /// arithmetic.
+    /// The caller toggles `view.isHidden` by tab count before calling this.
     func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
-        // Visual order is owned by `TabOrderCoordinator`, not by AppKit's
-        // `tabGroup.windows`. After a drag-reorder the two diverge; the
-        // pill strip is the user's source of truth, so the strip — and
-        // every position-based consumer (⌘1-9, ⌘⇧] / ⌘⇧[) — reads from
-        // the coordinator. Selection stays identity-based.
+        // Visual order is owned by `TabOrderCoordinator`, not AppKit's `tabGroup.windows`.
         let tabs = TabOrderCoordinator.shared.orderedTabs(of: window)
         let selected = window.tabGroup?.selectedWindow ?? window
-        // `stripView` IS the accessory's view and `update` sizes it (size
-        // only — its origin belongs to AppKit and the pill placement
-        // measures against it), so no separate setFrameSize here.
+        // `update` sizes the strip (size only: its origin belongs to AppKit).
         stripView.update(tabs: tabs, selected: selected, width: availableWidth)
     }
 }
 
-/// Equal-width pill strip (down to `minPillWidth`, then paging with the
-/// selection) with a trailing `+` button. Each pill shows its window title
-/// and, on hover, its full title as a tooltip; hovering also reveals an `×`
-/// close button on the left of the pill. Designed to live inside an
-/// `NSTitlebarAccessoryViewController`.
+/// Pill strip with a trailing `+` button, living inside an `NSTitlebarAccessoryViewController`.
 final class TabStripView: NSView, NSViewToolTipOwner {
 
-    /// Full titlebar-row height. The grid's top inset is computed from
-    /// the style-mask-derived titlebar height (not `safeAreaInsets`), so
-    /// making the pills tall to fill the titlebar doesn't push the prompt
-    /// down on multi-tab windows.
     static let height: CGFloat = 28
 
     var onSelectWindow: ((NSWindow) -> Void)?
     var onCloseWindow:  ((NSWindow) -> Void)?
     var onAddTab:       (() -> Void)?
-    /// Called when the user commits an inline rename. `newOverride` is the
-    /// trimmed value; `""` means "clear the override and revert to auto".
-    /// The strip does not call this on cancel (Escape or external
-    /// teardown).
+    /// `""` means "clear the override". Not called on cancel.
     var onCommitRename: ((NSWindow, String) -> Void)?
 
-    /// Hand-off for "drag a pill with the configured window-move modifier
-    /// (default ⌘) to move the window". With the trailing drag gutter removed
-    /// (pills + `+` now fill the titlebar), this is the primary way to move a
-    /// multi-tab window; single-tab windows skip the strip and keep a bare,
-    /// draggable titlebar. Default performs
-    /// a native AppKit window drag; injectable so a headless test can spy on the hand-off without
-    /// a live `NSWindow`/`performDrag(with:)`. Lazy because the default
-    /// captures `self`. The no-window branch logs rather than dropping the
-    /// gesture silently — the strip is a permanently-attached titlebar
-    /// accessory, so a nil window here means a future refactor broke that
-    /// invariant (review S-2; matches the `dragLogger` discipline below).
     lazy var requestWindowDrag: (NSEvent) -> Void = { [weak self] event in
         guard let window = self?.window else {
             Self.dragLogger.notice("windowMove hand-off skipped: tab strip has no window — gesture dropped")
@@ -158,90 +84,37 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         window.performDrag(with: event)
     }
 
-    // `tabs` / `pillFrames` are `fileprivate` (not `private`) so the hoisted
-    // `TabDragController` + `TabRenameController` in this file can read the
-    // strip's live layout without a parallel copy. The strip remains the
-    // single writer (`update` / `layoutPills`).
+    // The strip is the single writer of its layout state (`update` / `layoutPills`).
     fileprivate var tabs: [NSWindow] = []
-    // `selectedTab` / `addButtonFrame` are `fileprivate` so the hoisted
-    // `TabStripAccessibility` collaborator can build pill/add elements from the
-    // strip's live layout. The strip remains the single writer.
     fileprivate weak var selectedTab: NSWindow?
     private var totalWidth: CGFloat = 0
-    /// One frame per tab. While the row pages, the frames of tabs outside
-    /// `visiblePillRange` sit at virtual positions off the page (later ones
-    /// parked past the strip's trailing edge); nothing but a visible pill is
-    /// ever painted, hit-tested, or exposed to accessibility.
+    /// While the row pages, frames of tabs outside `visiblePillRange` sit at virtual positions off
+    /// the page; only a visible pill is ever painted, hit-tested, or exposed to accessibility.
     fileprivate var pillFrames: [CGRect] = []
     fileprivate var addButtonFrame: CGRect = .zero
-    /// Indices of the pills currently on screen: every pill unless the row is
-    /// paging (see `TabStripLayout.pillRow`).
     fileprivate var visiblePillRange: Range<Int> = 0 ..< 0
-    /// The page-button slots flanking the visible pills while the row pages;
-    /// `.zero` when the whole row fits. A slot is reserved on both sides of
-    /// every page (so the pills never shift between pages) but only drawn when
-    /// there is a page to go to.
+    /// `.zero` when the whole row fits. A slot is reserved on both sides of every page, drawn or not.
     fileprivate var leadingPageFrame: CGRect = .zero
     fileprivate var trailingPageFrame: CGRect = .zero
 
-    /// Which way a page button turns the row.
     enum PageDirection: Equatable {
         case earlier
         case later
     }
 
     // MARK: - Hoisted collaborators
-    //
-    // The drag-to-reorder state machine and the inline-rename engine are
-    // hoisted into dedicated collaborators (REFACTOR.md Area 5: "eight
-    // concerns become named collaborators"). Each holds an `unowned` back-
-    // reference to the strip and reaches into its `fileprivate` layout /
-    // hover / callback surface; the strip strong-references the controller,
-    // so the back-ref is valid for the controller's whole life. The strip's
-    // NSResponder overrides (`mouseDragged` / `mouseUp`) FORWARD to the drag
-    // controller — neither collaborator is itself an NSResponder. `lazy`
-    // because each initializer captures `self`.
+    // Each holds an `unowned` back-reference to the strip, which strong-references it.
     private lazy var tabDragController = TabDragController(view: self)
     private lazy var tabRenameController = TabRenameController(view: self)
-    /// VoiceOver accessibility — the per-pill + add-button NSAccessibilityElement
-    /// tree (cached for stable VO identity) + the title-changed value-changed
-    /// posts. The NSAccessibility protocol overrides stay on the strip (AppKit
-    /// calls them there) and forward here.
     private lazy var tabAccessibility = TabStripAccessibility(view: self)
 
-    /// The intent of a pill drag once it has moved far enough to commit.
-    /// Kept as a three-case enum (not a `Bool`) because `.pending` — the
-    /// below-threshold / non-finite "not yet" state — is a real third outcome
-    /// the move-vs-reorder distinction can't express; don't flatten it away
-    /// even though `.reorder`/`.windowMove` now track `hasMoveModifier` 1:1.
+    /// `.pending` is a real third outcome; do not flatten this to a `Bool`.
     enum DragIntent: Equatable {
-        /// Hasn't moved past `threshold` yet — keep waiting.
         case pending
-        /// Plain drag — reorder the tabs.
         case reorder
-        /// Modifier-bearing drag — move the window instead.
         case windowMove
     }
 
-    /// Classify a pill drag once it has moved past `threshold`. Direction no
-    /// longer selects the outcome: a plain drag reorders; a drag carrying the
-    /// configured window-move modifier moves the window, in EITHER axis (the
-    /// same gesture grammar as the terminal body — see `TerminalView.mouseDown`).
-    ///
-    /// This replaces the old direction heuristic (`classifyDrag`), which moved
-    /// the window on an un-modified steep-vertical pull. That overloaded the
-    /// pill with a sixth, unaffordanced meaning, made a horizontal window move
-    /// impossible without a modifier, let a brisk reorder escalate into an
-    /// irreversible window grab, and collided with the cross-app "drag a tab
-    /// down to tear it off" idiom (critique 2026-06-07, issues 1–7).
-    ///
-    /// - non-finite `dx`/`dy` → `.pending` (ignore a degenerate AppKit sample,
-    ///   regardless of the modifier — the guard precedes it)
-    /// - `max(|dx|,|dy|) < threshold` → `.pending` (hasn't committed yet)
-    /// - `hasMoveModifier` → `.windowMove`
-    /// - otherwise → `.reorder`
-    ///
-    /// Pure + static so the whole decision is unit-testable without AppKit.
     static func classifyPillDrag(dx: CGFloat, dy: CGFloat,
                                  threshold: CGFloat,
                                  hasMoveModifier: Bool) -> DragIntent {
@@ -250,50 +123,23 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return hasMoveModifier ? .windowMove : .reorder
     }
 
-    // Inline-edit state (`editingPill` / `editField`) lives on
-    // `TabRenameController`; the strip queries it through that collaborator.
-
-    // Hover state is `fileprivate` so `TabDragController` can snap it off when
-    // a reorder drag starts (stale hover indices would linger under the moving
-    // pill). The strip stays the only reader for paint.
-    /// Which pill is the cursor over, if any.
     fileprivate var hoveredPill: Int? = nil
-    /// Is the cursor specifically over the close target inside the hovered
-    /// pill (i.e. the small `×` hotspot at the pill's leading edge).
     fileprivate var hoveredClose = false
-    /// Cursor over the trailing `+` button.
     fileprivate var hoveredAdd = false
     private var trackingArea: NSTrackingArea?
-    /// Rects last registered as tooltip areas, so `layoutPills` (which runs on
-    /// every title change and live-resize tick) only re-registers on a change.
     private var toolTipRects: [CGRect] = []
 
-    /// Pill index currently holding keyboard focus, or `nil` when the
-    /// strip itself is first responder with no specific pill focused.
-    /// Drives the focus ring rendered in `draw(_:)` and the
-    /// `moveLeft:`/`moveRight:`/`performClick:` key handlers. Audit
-    /// titlebar-tabs F4.
     private var focusedPill: Int? = nil
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = .clear
-        // Suppress AppKit's default blue system focus ring around the whole
-        // strip when a pill is clicked. The keyboard-driven focus
-        // indicator (titlebar-tabs F4) is custom-drawn in `draw(_:)`
-        // gated on `focusedPill`, which is only set by the arrow-key
-        // handlers below — click routes through `mouseDown` and doesn't
-        // touch `focusedPill`, so there's no legitimate focus to signal
-        // via the system ring when the user mouse-clicks a pill. Keeping
-        // the system ring off at all times means clicks are clean and
-        // keyboard users still see the explicit pill ring drawn in
-        // draw(_:). User-reported 2026-04-23.
+        // The system focus ring stays off; the keyboard focus indicator is drawn in `draw(_:)`, gated on `focusedPill`.
         focusRingType = .none
         updateTrackingAreas()
-        // AppKit places (and later moves) the accessory by setting this view's
-        // frame; a pure move dirties nothing, so ask for a redraw and let
-        // `viewWillDraw` re-align the pills to the traffic lights.
+        // AppKit places and moves the accessory by setting this view's frame; a pure move dirties
+        // nothing, so ask for a redraw and let `viewWillDraw` re-align the pills.
         postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(
             self, selector: #selector(frameDidChange(_:)),
@@ -311,37 +157,19 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
     override var isFlipped: Bool { true }
 
-    /// Pass-through hit testing: only claim mouse events that fall on a pill,
-    /// the `+` button, or an active inline-rename field. Any remaining empty
-    /// region of the strip (the thin trailing inset, sub-pixel gaps between
-    /// pills) belongs to AppKit's titlebar so standard titlebar gestures still
-    /// pass through. The strip now fills the bar with pills + `+`, so little
-    /// bare region is left and a window move uses a modifier-drag on a pill;
-    /// the pass-through still matters because without it the strip's full frame
-    /// would swallow clicks landing in that empty area — `mouseDown` would
-    /// return silently and nothing else got a chance to handle the event.
+    /// Pass-through: any region not claimed here belongs to AppKit's titlebar.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Subviews (the inline-edit text field) get first crack — defer to the
-        // default chain so the field editor still receives clicks routed at it.
         if let sub = super.hitTest(point), sub !== self { return sub }
         let local = convert(point, from: superview)
         if NSPointInRect(local, addButtonFrame) { return self }
-        // Both page-button slots are claimed even when the button isn't drawn
-        // (nothing to page to): a second click of a quick double-click on one
+        // Both page-button slots are claimed even when undrawn: the second click of a double-click
         // must not fall through to the titlebar and zoom the window.
         if pageDirection(at: local) != nil { return self }
         return pillIndex(at: local) != nil ? self : nil
     }
 
-    /// Drop every window reference the strip holds. `tabs` is a STRONG
-    /// `[NSWindow]` that includes the strip's own host, so an un-cleared
-    /// strip closes the cycle `NSWindow → titlebarAccessoryViewControllers
-    /// → view → tabs → NSWindow` and every window that was ever in a
-    /// multi-tab group leaked after close (with its TerminalView, MTKView,
-    /// MetalRenderer and glyph atlases). Called from the host controller's
-    /// `windowWillClose` and from the ≤1-tab refresh branch, which hides
-    /// the strip without an `update` and would otherwise keep the departed
-    /// sibling alive until the next multi-tab relayout.
+    /// `tabs` is a STRONG `[NSWindow]` that includes the strip's own host; uncleared, it closes the cycle
+    /// `NSWindow → titlebarAccessoryViewControllers → view → tabs → NSWindow`.
     func detachTabs() {
         commitEditIfNeeded()
         tabs = []
@@ -357,43 +185,18 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     }
 
     func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat) {
-        // An in-flight edit targets a specific pill index in the OLD tab
-        // list. Commit only when the LIST SHAPE changes (count or identity),
-        // not on a bare width change — otherwise every live-resize tick at
-        // 120 Hz discards the user's mid-type rename silently. Width-only
-        // updates just re-lay the pill frames and reposition the existing
-        // field below. (main-window F6)
+        // Commit an in-flight edit only when the list SHAPE changes, not on a bare width change:
+        // live resize would otherwise discard a mid-type rename.
         let listShapeChanged = self.tabs.count != tabs.count
             || !zip(self.tabs, tabs).allSatisfy { $0 === $1 }
         if tabRenameController.isEditing, listShapeChanged {
             tabRenameController.commitEdit()
         }
-        // If a gesture is in flight — an armed press OR an active reorder —
-        // and the underlying tab list shape changed beneath it (sibling
-        // closed, new tab opened, post-commit reorder), the captured index no
-        // longer matches the strip. Cancel cleanly rather than trying to
-        // reconcile: a stale `.dragging` would commit a reorder against the
-        // wrong slot, and a stale `.armed` would fire a wrong selection on the
-        // trailing mouseUp (selection is deferred to mouseUp now). Skipped on
-        // the post-commit refresh because the commit path returned
-        // `dragPhase = .idle` in `mouseUp` before the notification fired.
         if listShapeChanged {
+            // The gesture's captured index no longer matches the strip.
             tabDragController.cancelForListShapeChange()
-            // A PILL-targeted mark refers to the OLD pill list; a reshuffle
-            // underneath a half-finished double-click would let the second
-            // click open rename on whatever tab inherited that slot. Drop it
-            // rather than remap — worst case the user double-clicks again.
-            //
-            // A `+`-targeted mark is NOT dropped, and the distinction is
-            // load-bearing rather than a nicety. `+` has no index that can go
-            // stale: it is the same button before and after. And clicking it
-            // ALWAYS causes a list-shape change — the new tab — which reaches
-            // every strip in the group, including the freshly-created one
-            // whose very first `update(tabs:)` goes from [] to the full list.
-            // Clearing unconditionally would therefore wipe the mark between
-            // the two halves of every `+` double-click, so the second click
-            // would renumber to 1 and open a SECOND tab: exactly the RCA P2
-            // regression this shared mark exists to prevent.
+            // A pill-targeted mark refers to the OLD pill list. A `+`-targeted mark must survive: clicking `+`
+            // always changes the list shape, and dropping it would let a `+` double-click open two tabs.
             if case .pill = Self.lastMouseDown?.target {
                 Self.lastMouseDown = nil
             }
@@ -403,39 +206,19 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         self.totalWidth = width
         setFrameSize(NSSize(width: width, height: Self.height))
         layoutPills()
-        // Pill frames just changed — re-arm hover from the CURRENT cursor
-        // position so a stationary-cursor relayout can't leave the close-×
-        // painted on a pill other than the one actually under the cursor.
-        // See `applyHoverAtCurrentCursorLocation`'s doc comment (P1).
+        // Pill frames changed, possibly under a stationary cursor.
         applyHoverAtCurrentCursorLocation()
-        // Post VoiceOver value-changed when a title changed but the list shape
-        // didn't (a bare repaint lets VO re-read the pill via accessibilityLabel;
-        // list-shape changes go through AppKit's container-children invalidation),
-        // and refresh the stored title snapshot. Audit titlebar-tabs F5.
         tabAccessibility.refreshTitlesAndPost(tabs: tabs, listShapeChanged: listShapeChanged)
-        // Width-only update: move the edit field to track the pill's new
-        // x/width so the caret doesn't drift off-pill (no-op when no edit is
-        // in flight). Geometry mirrors `beginEditing`'s field-rect computation.
         tabRenameController.repositionFieldForWidthChange()
         needsDisplay = true
     }
 
-    /// Commit the in-flight edit if one is active. No-op otherwise. Used
-    /// by `MainWindowController.refreshTabBar` on the multi-tab →
-    /// single-tab transition so the field doesn't survive as a subview
-    /// of a hidden strip and re-appear on the next grow-back.
-    /// (main-window F8)
     func commitEditIfNeeded() {
         tabRenameController.commitIfNeeded()
     }
 
     // MARK: - Accessibility
-    //
-    // Each pill + the `+` button are drawn shapes, not real views, so
-    // NSAccessibility sees nothing by default. VoiceOver skips over the
-    // tab strip entirely. Expose per-pill NSAccessibilityElement buttons
-    // keyed to window titles, plus a "New Tab" button, so rotor and VO
-    // navigation reach them. Audit titlebar-tabs F3.
+    // Pills and the `+` button are drawn shapes, not views, so they are exposed as NSAccessibilityElements.
 
     override func isAccessibilityElement() -> Bool { false }
 
@@ -443,16 +226,10 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
     override func accessibilityLabel() -> String? { "Tabs" }
 
-    // The NSAccessibility protocol overrides stay on the NSView (AppKit calls
-    // them here); the element tree + caching live in `TabStripAccessibility`.
     override func accessibilityChildren() -> [Any]? {
         tabAccessibility.children()
     }
 
-    /// Indices whose title changed between two title snapshots (positionally).
-    /// Pure + static so the VoiceOver value-changed diff is unit-testable. Stays
-    /// on `TabStripView` (tests pin it as `TabStripView.changedTitleIndices`);
-    /// `TabStripAccessibility` calls it.
     static func changedTitleIndices(previous: [String], current: [String]) -> [Int] {
         (0 ..< min(previous.count, current.count)).filter { previous[$0] != current[$0] }
     }
@@ -460,25 +237,16 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
     private static let trailingInset: CGFloat = 4
-    /// Narrowest a pill may get before the row pages instead. Equal division
-    /// left each title region under 20 pt at 20-30 tabs (blank titles) and the
-    /// rename field a sliver. 80 pt keeps ~8 characters in the title region.
+    /// Narrowest a pill may get before the row pages instead.
     private static let minPillWidth: CGFloat = 80
-    /// Width of each page-button slot flanking a paging row.
     private static let pageSlotWidth: CGFloat = 14
     fileprivate static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
     private static let pillHeight: CGFloat = 24
 
-    /// Pill origin used when there is no traffic light to align to (strip not
-    /// yet in a window, full screen, headless tests): flush with the strip's
-    /// bottom edge, which matched the lights on the pre-macOS-27 titlebar
-    /// where the strip started at the window top.
+    /// Used when there is no traffic light to align to (no window, full screen).
     private static let fallbackPillY: CGFloat = TabStripView.height - TabStripView.pillHeight
 
-    /// Midline of the window's close button in this strip's coordinates, or
-    /// `nil` when it isn't a meaningful target (no window, hidden or detached
-    /// button, full screen where the lights leave the titlebar).
     private func trafficLightMidY() -> CGFloat? {
         guard let window,
               !window.styleMask.contains(.fullScreen),
@@ -495,13 +263,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
                                    fallback: Self.fallbackPillY)
     }
 
-    /// AppKit positions the accessory (and moves it on resize, tab-group and
-    /// full-screen changes) after `update(tabs:)` has run, so the lights'
-    /// midline is only knowable once the strip is placed. Re-place the pills
-    /// when the row they sit on no longer matches the lights; one `convert`
-    /// per draw otherwise. Everything positioned off `pillFrames` follows:
-    /// the inline-rename field is moved explicitly, hover re-armed, and the
-    /// whole strip repainted so a partial dirty rect can't leave two heights.
+    /// AppKit positions the accessory after `update(tabs:)` has run, so the traffic-light midline is
+    /// knowable only once the strip is placed; re-place the pills when their row no longer matches it.
     override func viewWillDraw() {
         super.viewWillDraw()
         guard let placed = pillFrames.first?.minY,
@@ -513,48 +276,25 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     }
 
     private func layoutPills() {
-        // Pill frames are about to change → any cached accessibility elements
-        // (which embed a frame) are stale; rebuild lazily on next access.
         tabAccessibility.invalidateCache()
         pillFrames.removeAll(keepingCapacity: true)
-        // Pill geometry: the strip is 28 pt tall and the pills 24 pt. Their
-        // midline is aligned to the live traffic-light midline rather than a
-        // fixed offset: AppKit centres the accessory in a titlebar band whose
-        // height varies by OS, and the lights don't move with it (macOS 27:
-        // strip 4 pt lower, lights unchanged, so the old fixed `y = 4` sat
-        // 4 pt low). `fallbackPillY` (the value that matched the lights on
-        // the older layout) applies until the strip is in a window.
+        // The pill midline follows the live traffic-light midline, not a fixed offset: AppKit centres the
+        // accessory in a titlebar band whose height varies by OS, and the lights do not move with it.
         let h = Self.pillHeight
         let y = currentPillY()
         let addW = Self.addButtonWidth
         let gap = Self.pillSpacing
         let trail = Self.trailingInset
         let n = max(1, tabs.count)
-        // Pills + `+` button divide the full strip width (less the trailing
-        // inset). No window-draggable gutter is reserved: filling the bar to
-        // the trailing edge is a deliberate product choice, accepting the loss
-        // of the no-modifier "drag empty titlebar to move the window"
-        // affordance. The window still moves via a modifier-drag on a pill
-        // (see `classifyPillDrag` → `.windowMove`), and single-tab windows skip
-        // the strip entirely so their titlebar stays bare and draggable.
         let available = max(0, totalWidth - trail - addW - gap)
-        // Equal split, but never below `minPillWidth`: past that the row pages
-        // (whole pills between two page buttons, the page holding the selected
-        // tab) instead of shrinking the pills into blank stubs. See
-        // `TabStripLayout.pillRow` for why paging rather than scrolling.
         let selectedIndex = tabs.firstIndex(where: { (t: NSWindow) -> Bool in t === selectedTab })
         let row = TabStripLayout.pillRow(available: available,
                                          count: n,
                                          selectedIndex: selectedIndex,
                                          minPillWidth: Self.minPillWidth,
                                          edgeSlotWidth: Self.pageSlotWidth)
-        // Pills outside the page keep virtual frames at the same pitch: the
-        // earlier ones continue leftward from the first visible pill (their
-        // midpoints are always left of the strip), and the later ones are
-        // parked at or beyond the strip's trailing edge, so none of them can
-        // sit over the trailing page slot or the `+` and be mistaken for a
-        // pill on screen. The first visible pill starts after the leading
-        // page slot.
+        // Pills outside the page keep virtual frames at the same pitch; the later ones are parked at or beyond
+        // the strip's trailing edge so none can sit over the trailing page slot or the `+`.
         var x = row.edgeSlotWidth - CGFloat(row.firstVisible) * row.slotWidth
         for i in 0..<n {
             if row.isPaged, i == row.visibleRange.upperBound { x = max(x, totalWidth) }
@@ -570,17 +310,12 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             leadingPageFrame = .zero
             trailingPageFrame = .zero
         }
-        // The `+` stays pinned at the trailing edge whatever the page.
         addButtonFrame = NSRect(x: (row.isPaged ? available : x) + gap, y: y, width: addW, height: h)
         refreshToolTips()
     }
 
     // MARK: - Tooltips
 
-    /// One tooltip rect per visible pill (and per page button that has a page
-    /// to turn to), answered by `view(_:stringForToolTip:point:userData:)`.
-    /// Titles are truncated on the pill itself, so this is where a long or
-    /// crowded title can be read in full.
     private func refreshToolTips() {
         var rects: [CGRect] = visiblePillRange.compactMap { (i: Int) -> CGRect? in
             i < pillFrames.count ? pillFrames[i] : nil
@@ -595,8 +330,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         toolTipRects = rects
     }
 
-    /// Resolved lazily from the point, so an OSC title change needs no
-    /// re-registration.
+    /// Resolved lazily from the point, so a title change needs no re-registration.
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
               point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
         if let direction = pageDirection(at: point), canPage(direction) {
@@ -606,111 +340,56 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return Self.displayTitle(tabs[i].title)
     }
 
-    // MARK: - Inline editing (delegated to TabRenameController)
+    // MARK: - Inline editing
 
-    /// Enter rename mode for the pill at `pillIndex`. The rename engine
-    /// (field install, commit/cancel/teardown, NSTextFieldDelegate) lives on
-    /// `TabRenameController`; this thin forwarder preserves the entry point
-    /// for external callers (`TitlebarTabBarViewController.beginInlineRename`).
     func beginEditing(pillIndex: Int) {
         tabRenameController.beginEditing(pillIndex: pillIndex)
     }
 
-    /// `true` while any pill is in inline-edit mode. Hover / close
-    /// rendering short-circuits on this so the editing pill doesn't
-    /// paint an `×` hotspot over its own text field.
     private var isEditing: Bool { tabRenameController.isEditing }
 
     #if DEBUG
-    /// Test hook — sets the editing field's value without going through
-    /// a real NSTextField + field-editor dance. Only meaningful while an
-    /// edit is in progress; no-op otherwise.
     @objc func setEditTextForTesting(_ text: String) {
         tabRenameController.editField?.stringValue = text
     }
-    /// Test hook — explicitly commits the in-flight edit.
     @objc func commitEditForTesting() { tabRenameController.commitEdit() }
-    /// Test hook — explicitly cancels the in-flight edit.
     @objc func cancelEditForTesting() { tabRenameController.cancelEdit() }
-    /// Test hook — `true` while a pill is in inline-rename mode. Lets the
-    /// click-sequence tests assert that a phantom `clickCount == 2` (one
-    /// whose first click this strip never saw) does NOT open the field.
     @objc var isEditingForTesting: Bool { isEditing }
 
-    /// Test hook — current pill count. Lets stress tests assert pill
-    /// geometry tracks the tab list without exposing the internal
-    /// `pillFrames` array publicly.
     var pillCountForTesting: Int { pillFrames.count }
-    /// Test hook — read/write `focusedPill` so the keyboard-close path
-    /// (`deleteBackward`) can be exercised without driving the AppKit
-    /// responder chain.
     var focusedPillForTesting: Int? {
         get { focusedPill }
         set { focusedPill = newValue }
     }
-    /// Test hook — invoke the keyboard-close path directly. AppKit's
-    /// `interpretKeyEvents` plumbing isn't available to a headless XCTest.
     @objc func deleteBackwardForTesting() { deleteBackward(nil) }
 
-    /// Test hook — pill index armed for a potential reorder drag, or
-    /// `nil` when phase is `.idle` (no pill grabbed) or `.dragging`
-    /// (already promoted past `pendingDrag`).
     var pendingDragPillIndexForTesting: Int? {
         tabDragController.armedPillIndex
     }
 
-    /// Test hook — active drag state, or `nil` when phase is not
-    /// `.dragging`. Tuple shape lets tests assert origin/target slot
-    /// transitions without reaching into the private `DragState`
-    /// struct. `cursorX` is the live mouse X used to anchor the
-    /// dragged-pill render.
     var dragStateForTesting: (originalIndex: Int, currentIndex: Int, cursorX: CGFloat)? {
         tabDragController.activeDragState.map {
             ($0.originalIndex, $0.currentIndex, $0.cursorX)
         }
     }
 
-    /// Test hook — pill frames laid out for the current `tabs`/`width`.
-    /// Lets a test pass realistic geometry into the static
-    /// `computeIntermediateIndex` helper without re-deriving it.
     var pillFramesForTesting: [CGRect] { pillFrames }
-    /// Test hook — the pills currently on screen (every pill unless the row
-    /// is paging).
     var visiblePillRangeForTesting: Range<Int> { visiblePillRange }
-    /// Test hook — the `‹` / `›` page-button slots (`.zero` when the row does
-    /// not page).
     var pageButtonFramesForTesting: (earlier: CGRect, later: CGRect) {
         (leadingPageFrame, trailingPageFrame)
     }
-    /// Test hook — the tooltip a hover at `point` (strip coordinates) would
-    /// show, or `nil` when no tooltip rect is registered there. Asks the same
-    /// rects and owner callback AppKit does, without reaching into private
-    /// `NSToolTip` state.
     func toolTipForTesting(at point: NSPoint) -> String? {
         guard toolTipRects.contains(where: { (r: CGRect) -> Bool in NSPointInRect(point, r) }) else {
             return nil
         }
         return view(self, stringForToolTip: 0, point: point, userData: nil)
     }
-    /// Test hook — the trailing `+` button frame, so the strip's trailing
-    /// layout (the `+` sits flush after the last pill, with no reserved drag
-    /// gutter) is assertable without exposing the private `addButtonFrame`.
     var addButtonFrameForTesting: CGRect { addButtonFrame }
     #endif
 
     // MARK: - Drawing
 
-    /// One paint pass' worth of pill colors, computed once per `draw(_:)`.
-    /// Value type — no heap allocation beyond the `CGColor`s the previous
-    /// inline path already built once per frame.
-    ///
-    /// Tint the pill bodies with `labelColor` (dark on light, light on dark)
-    /// so they stay visible regardless of whether the theme has a light or
-    /// dark titlebar. Hard-coding white meant the entire pill strip
-    /// disappeared on Gruvbox-light / Solarized-light / Catppuccin-latte /
-    /// Default-light. The dragged fill (`draggedBg`) is a touch brighter than
-    /// `selectedBg` — visible enough to read as "this is the one I'm holding",
-    /// subtle enough to avoid the heavy "lifted card" look of a shadow.
+    /// Tinted with `labelColor` so the pills stay visible on both light and dark titlebars.
     private struct PillPalette {
         let tint = NSColor.labelColor
         let selectedBg = NSColor.labelColor.withAlphaComponent(0.18).cgColor
@@ -724,22 +403,14 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let palette = PillPalette()
-        // Snapshot of the drag (if any) — captured once so every pill index in
-        // the loop sees a consistent state, and so the dragged pill draws LAST
-        // (it's moved to the tail of the draw order) on top of the siblings it
-        // visually overlaps.
         let activeDrag = tabDragController.activeDragState
         let drawOrder = Self.pillDrawOrder(count: tabs.count,
                                            draggedOriginalIndex: activeDrag?.originalIndex)
 
-        // Only the current page is painted; the rest of the row is virtual.
         for i in drawOrder where visiblePillRange.contains(i) && i < tabs.count && i < pillFrames.count {
             let (rect, isDraggedPill) = pillRect(for: i, activeDrag: activeDrag)
             let w = tabs[i]
             let isSelected = w === selectedTab
-            // Hover state is meaningless during a drag — both the close
-            // hotspot and the lighter "hovered" fill would compete with
-            // the dragged-pill highlight for the user's eye.
             let isHovered = hoveredPill == i && !isEditing && activeDrag == nil
             let isBeingEdited = tabRenameController.editingPill == i
             drawPill(ctx: ctx, window: w, index: i, rect: rect,
@@ -752,8 +423,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         drawAddButton(ctx: ctx, palette: palette)
     }
 
-    /// Two-pass draw order: the dragged pill (if any) is moved to the tail so
-    /// it paints LAST, on top of the siblings it overlaps. Pure.
+    /// The dragged pill paints LAST, on top of the siblings it overlaps.
     private static func pillDrawOrder(count: Int, draggedOriginalIndex: Int?) -> [Int] {
         if let d = draggedOriginalIndex {
             return (0..<count).filter { $0 != d } + [d]
@@ -761,10 +431,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return Array(0..<count)
     }
 
-    /// The rect (and dragged-flag) at which pill `i` paints this frame. With a
-    /// drag in flight the grabbed pill is anchored under the cursor — geometry
-    /// delegated to `TabDragController.draggedPillRect`, the drag-controller's
-    /// concern — and its siblings shift one slot to "make space".
     private func pillRect(for i: Int,
                           activeDrag: TabDragController.DragState?) -> (NSRect, Bool) {
         guard let d = activeDrag else { return (pillFrames[i], false) }
@@ -778,8 +444,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             )
             return (rect, true)
         }
-        // Siblings render at their intermediate slot — they appear to "make
-        // space" by shifting one slot toward the dragged pill's origin.
         let slot = Self.intermediateSlot(originalIdx: i,
                                          draggedFrom: d.originalIndex,
                                          draggedTo: d.currentIndex)
@@ -787,7 +451,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return (rect, false)
     }
 
-    /// Fill + (hover) close glyph + title + keyboard focus ring for one pill.
     private func drawPill(ctx: CGContext, window w: NSWindow, index i: Int,
                           rect: NSRect, isDraggedPill: Bool, isSelected: Bool,
                           isHovered: Bool, isBeingEdited: Bool,
@@ -805,16 +468,9 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
         ctx.fillPath()
 
-        // Pill being renamed — skip the title + close-hotspot drawing.
-        // The NSTextField subview covers the title area; drawing a
-        // label underneath would bleed through around the field's
-        // corners and confuse the eye about what's editable.
+        // The rename field covers the title area; a label drawn underneath bleeds through around its corners.
         if isBeingEdited { return }
 
-        // Close `×` shown only when the pill is hovered. Drawn at
-        // leading edge so text center stays stable. Tint with
-        // labelColor so the × circle stays visible on both light and
-        // dark themes (see pill body tinting rationale above).
         let closeRect = closeHotspot(in: rect)
         if isHovered {
             let xFillColor: CGColor
@@ -838,10 +494,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             ))
         }
 
-        // Title: centered, truncated if pill is narrow. Leave room
-        // for the close button's width on the left so titles don't
-        // jump when hover reveals it. Same horizontal math as the
-        // inline-rename field, via TabStripLayout.
+        // Room for the close button is always reserved so titles don't jump on hover; same
+        // horizontal math as the inline-rename field, via TabStripLayout.
         let area = TabStripLayout.titleArea(in: rect, closeWidth: closeRect.width)
         let titleArea = NSRect(
             x: area.x,
@@ -862,10 +516,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             y: titleArea.midY - tsize.height / 2
         ))
 
-        // Unseen-attention dot: a bell or program notification arrived in
-        // this tab while the user was elsewhere. Accent-coloured, 6 pt,
-        // tucked into the pill's trailing edge; cleared when the tab is
-        // next selected.
         if showsUnseenAttention(w) {
             let d: CGFloat = 6
             let dot = NSRect(x: rect.maxX - d - 6, y: rect.midY - d / 2, width: d, height: d)
@@ -874,11 +524,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             ctx.fillPath()
         }
 
-        // Keyboard focus ring. Full-Keyboard-Access users can't
-        // reach the pills without one. Drawn on TOP of the fill +
-        // title so it's visible regardless of selected/hovered
-        // state. Accent-coloured for consistency with the rest of
-        // AppKit's focus indicators. Audit titlebar-tabs F4.
         if focusedPill == i && isStripFirstResponder() {
             let focusPath = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
                                          xRadius: 4, yRadius: 4).cgPath
@@ -889,17 +534,11 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// `true` when `w` is a background tab that a bell or program notification
-    /// reached while the user was elsewhere (cleared when it is next selected).
     private func showsUnseenAttention(_ w: NSWindow) -> Bool {
         w !== selectedTab
             && (w.windowController as? MainWindowController)?.hasUnseenAttention == true
     }
 
-    /// The `‹` / `›` buttons that turn the row while it pages. Each is drawn
-    /// only when there is a page to turn to, and carries the same accent dot a
-    /// pill does when a tab hidden that way needs attention, so a background
-    /// tab on another page is not silently lost.
     private func drawPageButtons(ctx: CGContext, palette: PillPalette) {
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 15, weight: .medium),
@@ -924,8 +563,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// Trailing `+` button. Same label-tint so it stays visible on light
-    /// themes too.
     private func drawAddButton(ctx: CGContext, palette: PillPalette) {
         let addPath = NSBezierPath(ovalIn: addButtonFrame).cgPath
         ctx.addPath(addPath)
@@ -947,17 +584,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         Self.truncatedString(s, fitting: width, measure: Self.measureWidth)
     }
 
-    /// Binary-search the longest prefix that fits. The previous per-pill
-    /// per-frame loop dropped one character at a time and re-measured —
-    /// O(N) measurements for an N-character title. A 2 KB hostile OSC 0/2
-    /// title froze the strip on every redraw. Halving the search space
-    /// per probe is O(log N) measurements, capped further upstream by
-    /// `TerminalSession`'s 256-grapheme OSC title cap.
-    ///
-    /// Preserves the original "at least one character before the ellipsis
-    /// when the string itself doesn't fit" floor — if even one-char-plus-
-    /// ellipsis is wider than the pill, we still return that rather than
-    /// a bare ellipsis (matches the pre-fix visual).
+    /// Binary search, O(log N) measurements: a long hostile title must not freeze the redraw.
+    /// Always keeps at least one character before the ellipsis.
     static func truncatedString(_ s: String,
                                 fitting width: CGFloat,
                                 measure: (String) -> CGFloat) -> String {
@@ -966,10 +594,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         if chars.isEmpty { return s }
         if measure(s) <= width { return s }
 
-        // Search inclusive range [1, chars.count - 1] for the largest k
-        // such that prefix(k) + "…" fits. Floor at 1 preserves the
-        // original's "always at least one character + ellipsis" output
-        // even when the pill is too narrow to fit even that.
         var lo = 1
         var hi = max(1, chars.count - 1)
         while lo < hi {
@@ -1001,63 +625,26 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
     // MARK: - Hit testing & hover
 
-    /// What a strip mousedown landed on. Continuation of a click run
-    /// requires the same target — two clicks on different pills are two
-    /// gestures, not a double-click.
     enum ClickTarget: Equatable {
         case pill(Int)
         case addButton
-        /// One of the two page buttons flanking a paging row.
         case pageButton(PageDirection)
     }
 
-    /// One mousedown delivered to SOME strip in this process.
-    ///
-    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not any one
-    /// view's. AppKit keeps counting across window- and app-activation
-    /// boundaries, and it counts clicks no strip ever received: when
-    /// Blackbird isn't frontmost the activating click is swallowed
-    /// (`acceptsFirstMouse` is false by default), so the user's NEXT click
-    /// arrives already carrying `clickCount == 2`. Trusting that raw count
-    /// popped the rename field open when the user only meant to come back to
-    /// the app and pick a tab (user report 2026-07-24).
+    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, across activation boundaries and including clicks no
+    /// strip received: the activating click is swallowed, so the next click arrives with `clickCount == 2`.
     struct ClickSequenceMark: Equatable {
         let target: ClickTarget
-        /// Identity of the tab group whose strip recorded this mousedown.
-        ///
-        /// Sharing the mark across strips is deliberate, but it must not be
-        /// shared across UNRELATED window groups: `ClickTarget.pill` compares
-        /// a bare index, so without this a click on pill 1 of one group could
-        /// license a "double-click" on pill 1 of another. Two windows tabbed
-        /// together share one `NSWindowTabGroup` instance — including a tab
-        /// `addTabbedWindow` has just created — so gating on its identity
-        /// keeps every intra-group hand-off working while cutting the
-        /// cross-group leak. `nil` for a strip with no group (and in headless
-        /// tests, where all marks compare equal).
+        /// `ClickTarget.pill` compares a bare index, so the mark must not license a click run across
+        /// unrelated tab groups. `nil` for a strip with no group.
         let groupID: ObjectIdentifier?
-        /// The raw `NSEvent.clickCount` of that mousedown.
         let systemClickCount: Int
-        /// The count the strip assigned it after renumbering.
         let effectiveClickCount: Int
-        /// Whether the clicked pill was ALREADY the selected tab when this run
-        /// STARTED — carried forward unchanged through every click of the run.
-        ///
-        /// Inline rename requires it. Without it, clicking a background pill
-        /// to switch and then clicking it again opened the rename field, which
-        /// is what the 2026-07-24 report was about. That gesture is
-        /// indistinguishable at the event level from deliberately
-        /// double-clicking a background tab to rename it, so the two cannot be
-        /// separated by click bookkeeping alone — only by asking whether the
-        /// user had already been on that tab. Renaming a background tab is
-        /// therefore click, pause, double-click.
-        ///
-        /// Carried forward rather than re-read because by the second click the
-        /// tab IS selected: the first click selected it.
+        /// Whether the clicked pill was already selected when this run STARTED. Carried forward, not
+        /// re-read: by the second click the first has selected the tab. Inline rename requires it.
         let targetWasSelected: Bool
         let timestamp: TimeInterval
 
-        /// `groupID` and `targetWasSelected` are defaulted so callers that
-        /// don't model them (the predicate's unit tests) stay concise.
         init(target: ClickTarget,
              groupID: ObjectIdentifier? = nil,
              systemClickCount: Int,
@@ -1073,41 +660,17 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// The last mousedown any strip handled — deliberately SHARED across
-    /// every `TabStripView` in the process, not per-instance.
-    ///
-    /// Each tab is its own `NSWindow` with its own strip, and both selecting
-    /// a pill and opening a tab make a DIFFERENT window key. So the two
-    /// halves of a single user gesture are routinely delivered to two
-    /// different strip instances, at the same screen point. A per-view mark
-    /// cannot see the first half, which broke two gestures at once: a fast
-    /// double-click on `+` re-fired on the new window's strip and opened two
-    /// tabs (undoing RCA P2), and double-clicking a BACKGROUND pill to
-    /// rename it was refused, because click 1 selected that tab and click 2
-    /// landed on the destination window's fresh strip.
-    ///
-    /// Sharing is what distinguishes the two look-alike streams: for a
-    /// genuine background-pill double-click SOME strip saw the first click,
-    /// whereas for the phantom activation click NO strip did.
-    ///
-    /// AppKit delivers all of this on the main thread, so a plain `static`
-    /// needs no synchronization.
+    /// Deliberately SHARED across every strip: each tab is its own `NSWindow` with its own strip, so the two
+    /// halves of one gesture are routinely delivered to different strips. Main thread only.
     private(set) static var lastMouseDown: ClickSequenceMark?
 
-    /// The ordinal of this mousedown within the run of mousedowns the STRIPS
-    /// received, rather than within the window server's sequence.
-    ///
-    /// Mirrors `TerminalView.effectiveClickCount`; the extra `target` is what
-    /// the terminal deliberately omits (it has a single click surface, the
-    /// strip has pills plus `+`).
+    /// The ordinal of this mousedown within the run the STRIPS received, not the window server's sequence.
     static func effectiveClickCount(previous: ClickSequenceMark?,
                                     target: ClickTarget,
                                     groupID: ObjectIdentifier? = nil,
                                     clickCount: Int,
                                     timestamp: TimeInterval,
                                     doubleClickInterval: TimeInterval) -> Int {
-        // 1 already starts a gesture; 0 and negatives are synthesized values
-        // no caller should see rewritten.
         guard clickCount > 1 else { return clickCount }
         guard let previous,
               previous.target == target,
@@ -1120,15 +683,10 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     }
 
     #if DEBUG
-    /// Test hook — the shared mark is process-wide state, so a test that
-    /// drives `mouseDown` must clear it or it leaks into the next test.
     static func resetClickSequenceForTesting() { lastMouseDown = nil }
-    /// Test hook — read the shared mark.
     static var lastMouseDownForTesting: ClickSequenceMark? { lastMouseDown }
     #endif
 
-    /// Index of the on-screen pill whose frame contains `p`, or `nil` for the
-    /// `+` button, the page buttons, and the bare strip regions between pills.
     /// Pills on other pages have frames too, but are never hit.
     private func pillIndex(at p: CGPoint) -> Int? {
         visiblePillRange.first(where: { (i: Int) -> Bool in
@@ -1136,16 +694,12 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         })
     }
 
-    /// Which page-button slot `p` is in, or `nil`. Answers for a slot whether
-    /// or not its button is drawn; `canPage` says whether pressing it does
-    /// anything.
     private func pageDirection(at p: CGPoint) -> PageDirection? {
         if NSPointInRect(p, leadingPageFrame) { return .earlier }
         if NSPointInRect(p, trailingPageFrame) { return .later }
         return nil
     }
 
-    /// `true` when pills exist on a page before / after the visible one.
     fileprivate func canPage(_ direction: PageDirection) -> Bool {
         switch direction {
         case .earlier: return visiblePillRange.lowerBound > 0
@@ -1153,7 +707,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// Tabs hidden on the page(s) in `direction`.
     private func hiddenPillRange(_ direction: PageDirection) -> Range<Int> {
         switch direction {
         case .earlier: return 0 ..< min(visiblePillRange.lowerBound, tabs.count)
@@ -1161,23 +714,18 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// A background tab off-screen is only visible through its attention dot,
-    /// so the page button toward it has to show one too.
     private func hasHiddenAttention(_ direction: PageDirection) -> Bool {
         hiddenPillRange(direction).contains(where: { (i: Int) -> Bool in
             showsUnseenAttention(tabs[i])
         })
     }
 
-    /// Tooltip / VoiceOver text of the page button.
     fileprivate func pageButtonLabel(_ direction: PageDirection) -> String {
         let base = direction == .earlier ? "Show earlier tabs" : "Show later tabs"
         return hasHiddenAttention(direction) ? base + " (a tab needs attention)" : base
     }
 
-    /// Turn the row one page by selecting the tab next to the visible page: the
-    /// page is a function of the selection, so selecting is how it turns. Fired
-    /// from the page button; a no-op past the first / last page.
+    /// The page is a function of the selection, so selecting the tab next to the visible page is how it turns.
     fileprivate func page(_ direction: PageDirection) {
         guard canPage(direction) else { return }
         let target = direction == .earlier ? visiblePillRange.lowerBound - 1 : visiblePillRange.upperBound
@@ -1185,7 +733,6 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         onSelectWindow?(tabs[target])
     }
 
-    /// What a mousedown at `p` landed on.
     private func clickTarget(at p: CGPoint) -> ClickTarget? {
         if let i = pillIndex(at: p) { return .pill(i) }
         if NSPointInRect(p, addButtonFrame) { return .addButton }
@@ -1195,19 +742,10 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        // Renumber into the run of clicks the STRIPS have seen, and record
-        // this one, BEFORE any dispatch below can return early. `clicks == 1`
-        // means "first click of a gesture as far as the strips are
-        // concerned", which is what every gate below actually wants — the raw
-        // system count keeps rising across an activating click no strip ever
-        // received. See `ClickSequenceMark`.
+        // Renumber and record this click BEFORE any dispatch below can return early.
         let target = clickTarget(at: p)
         let clicks: Int
-        // Hoisted out of the branch so the rename gate below reads THIS
-        // click's value directly, rather than fishing it back out of
-        // `Self.lastMouseDown` after that has already been overwritten. The
-        // read-back happened to be correct, but only by accident of statement
-        // order — a hazard not worth leaving in a gate this load-bearing.
+        // Hoisted so the rename gate reads THIS click's value, not `Self.lastMouseDown` after it is overwritten.
         let wasSelected: Bool
         if let target {
             let groupID = window?.tabGroup.map(ObjectIdentifier.init)
@@ -1217,11 +755,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
                                               clickCount: event.clickCount,
                                               timestamp: event.timestamp,
                                               doubleClickInterval: NSEvent.doubleClickInterval)
-            // `clicks > 1` happens only when the run continued, so it is
-            // exactly the signal to inherit the run's original selectedness
-            // rather than re-read it (by now the first click has selected the
-            // tab, which would make every background double-click look
-            // eligible again).
+            // A continued run inherits its original selectedness: by now the first click has selected the tab.
             if clicks > 1, let previous = Self.lastMouseDown {
                 wasSelected = previous.targetWasSelected
             } else if case .pill(let i) = target, i < tabs.count {
@@ -1236,62 +770,30 @@ final class TabStripView: NSView, NSViewToolTipOwner {
                                                    targetWasSelected: wasSelected,
                                                    timestamp: event.timestamp)
         } else {
-            // Landed on bare strip; nothing can continue from here.
             clicks = event.clickCount
             wasSelected = false
             Self.lastMouseDown = nil
         }
-        // Mouse interaction retires the keyboard focus-ring state — a
-        // stale ring from a prior arrow-key session shouldn't linger on
-        // a different pill after the user mouse-clicks. The next arrow
-        // key press will re-establish `focusedPill` from scratch.
         if focusedPill != nil {
             focusedPill = nil
             needsDisplay = true
         }
 
-        // Every exit point below must either yield the strip's first-
-        // responder status back to the host TerminalView or hand it to
-        // the inline rename field. AppKit's NSWindow.sendEvent auto-
-        // promotes the hit-tested view to first responder when its
-        // `acceptsFirstResponder` returns true (see this view's
-        // `becomeFirstResponder` comment block) — which is us during a
-        // pill / + click. If we exit without yielding, subsequent
-        // keystrokes route to TabStripView.keyDown → interpretKeyEvents
-        // → insertText, and insertText only honours space (FKA pill
-        // activation). Anything else falls through to AppKit's
-        // `noResponderFor:` path and rings NSBeep. The
-        // `selectedWindow` KVO restore in MainWindowController only
-        // covers the DESTINATION window AND only fires on actual value
-        // changes — clicking the already-selected pill ((self-)select
-        // is a no-op) leaves the strip parked. Restoring here unifies
-        // every mouse exit through one spot. Because it's a `defer`, it
-        // also fires after each of the dispatch helpers below returns.
+        // Every exit must yield first responder to the terminal or hand it to the rename field: `NSWindow.sendEvent`
+        // auto-promotes the hit-tested view, and keystrokes left on the strip ring NSBeep.
         defer { yieldFirstResponderToTerminalIfParked() }
 
         if commitEditOnOutsideClick(p) { return }
         if NSPointInRect(p, addButtonFrame) {
-            // Only fire on the FIRST click of a click sequence — a fast
-            // double-click on `+` used to fire `onAddTab` twice (opening
-            // two tabs from one gesture). Any click in the button's area is
-            // still swallowed here regardless of count, so a rapid second
-            // click doesn't fall through to pill hit-testing either (P2,
-            // RCA docs/rca-tab-behaviors-2026-07-01.md).
-            //
-            // "First click of a sequence" has to mean first click THIS VIEW
-            // SAW, not `clickCount == 1`: the raw count keeps rising across
-            // an activation click AppKit never delivered here, which made
-            // `+` inert on the click right after coming back to the app.
-            // See `AddButtonClickMark`.
+            // Fire only on the first click the STRIPS saw; later clicks are still swallowed here so
+            // they don't fall through to pill hit-testing.
             if clicks == 1 {
                 onAddTab?()
             }
             return
         }
         if let direction = pageDirection(at: p) {
-            // Same first-click-only rule as `+`: a double-click turns one page,
-            // not two, and the second click is swallowed here rather than
-            // falling through to the titlebar (which would zoom the window).
+            // Same first-click-only rule; a second click falling through to the titlebar would zoom the window.
             if clicks == 1 {
                 page(direction)
             }
@@ -1301,15 +803,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         handlePillClick(p, event: event, clicks: clicks)
     }
 
-    /// While a pill is being renamed, a click inside the edit field belongs to
-    /// the field editor — we shouldn't see it here (subviews hit-test first),
-    /// but the containing pill bounds still route here when the click lands on
-    /// the pill body outside the field (e.g. the close hotspot area). Commit
-    /// the in-flight edit on any outside click so the click doesn't silently
-    /// drop the edit. Returns `true` (commit-and-stay-put) when the click was
-    /// inside the editing pill but outside the field; `false` when it was
-    /// outside the editing pill entirely (the caller then treats it as a normal
-    /// click on whatever it landed on) or when nothing is being edited.
+    /// Returns `true` when the click was inside the editing pill but outside the field.
     private func commitEditOnOutsideClick(_ p: CGPoint) -> Bool {
         guard let idx = tabRenameController.editingPill, idx < pillFrames.count else { return false }
         let editingRect = pillFrames[idx]
@@ -1317,23 +811,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return NSPointInRect(p, editingRect)
     }
 
-    /// Double-click on a pill body (outside the close hotspot) → enter inline
-    /// rename mode. Matches Safari / Chrome / iTerm2 tab rename — no modal, no
-    /// menu trip. `beginEditing` makes the edit field first responder; the
-    /// `defer` in `mouseDown` sees that and skips the terminal-focus restore so
-    /// the rename field keeps focus. Returns `true` when rename began.
-    ///
-    /// `clicks` is the RENUMBERED count (`effectiveClickCount`), not
-    /// `event.clickCount`. 2 means "the strips saw both halves of this
-    /// gesture on this pill", which admits a genuine double-click on a
-    /// BACKGROUND pill — where click 1 lands on the source window's strip and
-    /// click 2 on the destination's — while still rejecting the phantom
-    /// activation click whose first half no strip ever received.
-    ///
-    /// `wasSelected` is the run's ORIGINAL selectedness: rename is for the tab
-    /// you are already on. Double-clicking a background pill switches to it and
-    /// stops there, which is what keeps "click a tab, click it again" from
-    /// popping the rename field open.
+    /// `clicks` is the renumbered count and `wasSelected` the run's ORIGINAL selectedness: rename is only for
+    /// the tab already selected, so double-clicking a background pill switches to it and stops there.
     private func beginRenameOnDoubleClick(_ p: CGPoint, clicks: Int, wasSelected: Bool) -> Bool {
         guard clicks == 2, wasSelected, let i = pillIndex(at: p), i < tabs.count else { return false }
         guard !NSPointInRect(p, closeHotspot(in: pillFrames[i])) else { return false }
@@ -1341,35 +820,18 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return true
     }
 
-    /// A single click that landed on a pill: close it (only when the × is
-    /// actually hovered), or arm a potential drag, or select. Selection is
-    /// DEFERRED to mouseUp-as-click (see `mouseUp`'s `.armed` case) so a drag —
-    /// reorder OR window move — never switches tabs. Grabbing a background pill
-    /// to move the window used to eagerly select it here, yanking the
-    /// foreground session onto that tab before the gesture was classified (user
-    /// report 2026-06-07; critique complaint C). Arming lets `mouseDragged`
-    /// promote it; the tab only switches if the press is released without a
-    /// drag. Arming is suppressed for single-tab windows (no peer to reorder
-    /// against), a click that also begins rename (clickCount ≥ 2), and any
-    /// pill being renamed elsewhere — there we select now to keep the
-    /// click-to-switch contract.
+    /// Selection is DEFERRED to mouseUp-as-click so a drag, reorder or window move, never switches tabs.
     private func handlePillClick(_ p: CGPoint, event: NSEvent, clicks: Int) {
         if let i = pillIndex(at: p) {
             guard i < tabs.count else { return }
             let rect = pillFrames[i]
-            // Only honour a close click when the user is actually hovered on
-            // the × — otherwise a stationary click near the leading edge of a
-            // pill would quietly close it even though the × wasn't visible to
-            // the user yet. Selecting is the safe default.
+            // Honour a close click only when the × is actually hovered, i.e. visible to the user.
             if hoveredPill == i, hoveredClose, NSPointInRect(p, closeHotspot(in: rect)) {
                 onCloseWindow?(tabs[i])
                 return
             }
-            // `clicks`, not `event.clickCount`: after an activating click no
-            // strip received, the raw count is already 2 and this used to
-            // skip arming entirely — so the press eagerly selected on
-            // mouseDown and the drag reordered nothing, which is verbatim the
-            // 2026-06-07 report the deferred-selection arm exists to prevent.
+            // `clicks`, not `event.clickCount`: after an activating click no strip received, the raw
+            // count is already 2 and arming would be skipped.
             let canReorder = tabs.count > 1
                 && clicks == 1
                 && !isEditing
@@ -1387,13 +849,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    // MARK: - Drag-to-reorder (delegated to TabDragController)
-    //
-    // The strip's NSResponder overrides forward the gesture to the drag
-    // controller; the three-phase state machine, the `dragThreshold`, the
-    // dropped-click-vs-reorder arbitration, and the `os.Logger` canaries all
-    // live there. `mouseDown`'s arm branch (`handlePillClick`) and
-    // `update(tabs:)`'s list-shape cancellation route through it too.
+    // MARK: - Drag-to-reorder
 
     override func mouseDragged(with event: NSEvent) {
         tabDragController.mouseDragged(with: event)
@@ -1403,15 +859,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         tabDragController.mouseUp(with: event)
     }
 
-    /// Compute which slot the dragged pill is currently over, given the
-    /// live cursor X and the offset within the pill where the user
-    /// grabbed it. The dragged pill's anchor X is `cursorX - downOffsetX`;
-    /// the slot is the one whose CENTER is closest to the pill's center
-    /// (anchor + pillW/2). Clamped to `[0, count-1]`.
-    ///
-    /// Static + pure so unit tests can drive every transition with a
-    /// synthetic `pillFrames` array — no NSWindows, no NSEvents, no
-    /// strip instance needed.
+    /// The slot whose centre is nearest the dragged pill's centre. Assumes equal-width pills.
     internal static func computeIntermediateIndex(cursorX: CGFloat,
                                                   downOffsetX: CGFloat,
                                                   count: Int,
@@ -1420,44 +868,29 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         guard count > 0, !pillFrames.isEmpty else { return fallback }
         let pillW = pillFrames[0].width
         let pillCenter = (cursorX - downOffsetX) + pillW / 2
-        // Slot i's center = pillFrames[i].midX. Find the slot whose
-        // center is nearest to pillCenter. Equal-width pills means we
-        // can compute directly from the first slot's origin.
         let firstOriginX = pillFrames[0].minX
         let slotPitch: CGFloat = (count > 1 && pillFrames.count > 1)
             ? (pillFrames[1].minX - pillFrames[0].minX)
             : pillW
-        // Degenerate input: zero-width strip (window collapsed mid-
-        // drag) or two pills at the same origin. Return the caller's
-        // fallback (typically `state.originalIndex`) so the dragged
-        // pill holds its slot — silently snapping to slot 0, the old
-        // behaviour, would commit a reorder the user didn't intend on
-        // the next mouseUp.
+        // Zero pitch (strip collapsed mid-drag): return the fallback so the dragged pill holds its
+        // slot instead of snapping to slot 0 and committing an unintended reorder.
         guard slotPitch > 0 else { return fallback }
         let rawIndex = (pillCenter - (firstOriginX + pillW / 2)) / slotPitch
         let rounded = Int(rawIndex.rounded())
         return max(0, min(count - 1, rounded))
     }
 
-    /// Where pill `originalIdx` renders during a drag, given the dragged
-    /// pill moved from `draggedFrom` to `draggedTo`. The dragged pill
-    /// itself is returned as `draggedTo`; the displaced siblings shift
-    /// by one slot toward the source. Pure helper; tests reach it via
-    /// `@testable import Blackbird`.
+    /// Where pill `originalIdx` renders during a drag: displaced siblings shift one slot toward the source.
     internal static func intermediateSlot(originalIdx: Int,
                                           draggedFrom: Int,
                                           draggedTo: Int) -> Int {
         if originalIdx == draggedFrom { return draggedTo }
         if draggedFrom == draggedTo { return originalIdx }
         if draggedFrom < draggedTo {
-            // Dragged moved right: siblings in (draggedFrom, draggedTo]
-            // shift one slot left.
             if originalIdx > draggedFrom, originalIdx <= draggedTo {
                 return originalIdx - 1
             }
         } else {
-            // Dragged moved left: siblings in [draggedTo, draggedFrom)
-            // shift one slot right.
             if originalIdx >= draggedTo, originalIdx < draggedFrom {
                 return originalIdx + 1
             }
@@ -1465,73 +898,23 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         return originalIdx
     }
 
-    /// Right-click also auto-promotes the strip via AppKit's NSWindow
-    /// event dispatch (same path as `mouseDown` — `acceptsFirstResponder`
-    /// is gate-keeper, regardless of mouse button). `super` calls
-    /// `menuForEvent:` which routes to our `menu(for:)` override; that
-    /// shows the contextual menu and runs the chosen item's action
-    /// synchronously, then returns. Whether the user picks an item or
-    /// dismisses, first responder ends up parked on the strip — so we
-    /// yield in the same shape as `mouseDown`.
+    /// Right-click auto-promotes the strip to first responder exactly like `mouseDown`, so yield the same way.
     override func rightMouseDown(with event: NSEvent) {
-        // A right-click while a reorder gesture is armed/active is a clean
-        // interruption — the context menu is the user's actual intent now.
-        // Without this, a stale `.armed`/`.dragging` phase survives the
-        // right-click and can misfire on a LATER left mouseUp unrelated to
-        // the abandoned gesture (P3, RCA
-        // docs/rca-tab-behaviors-2026-07-01.md — no cancel path existed for
-        // an in-flight reorder drag).
+        // A stale `.armed`/`.dragging` phase would misfire on a later, unrelated left mouseUp.
         tabDragController.cancelInProgress()
         defer { yieldFirstResponderToTerminalIfParked() }
         super.rightMouseDown(with: event)
     }
 
-    /// `os.Logger` (not `NSLog`) so `privacy: .public` markers actually
-    /// take effect. Same pattern as `MainWindowController.tabsLogger`.
-    /// Used as a canary for the rare case where
-    /// `window.makeFirstResponder(cv)` returns `false` — that would
-    /// silently re-open the NSBeep regression this fix targets.
-    ///
-    /// NOT gated on `#if DEBUG`: the failure mode (NSBeep on every
-    /// keystroke until the user clicks away) is exactly the kind of
-    /// regression that only shows up in production, and the log line
-    /// is the only evidence we'd have to act on a user report.
-    /// (audit M-5, sibling pattern of M-4)
     private static let focusLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "tabFocus")
 
-    /// `os.Logger` for drag diagnostics — kept separate from `focusLogger`
-    /// so the categories don't bleed into each other in the unified log.
-    /// `fileprivate` so it is the single source of truth shared by the
-    /// strip's `requestWindowDrag` no-window canary AND `TabDragController`'s
-    /// `mouseUp` "should-never-happen but did" branches (which would
-    /// otherwise discard a reorder gesture silently).
     fileprivate static let dragLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                                category: "tabDrag")
 
-    /// Yield first-responder status from the strip back to the host
-    /// window's contentView (the TerminalView in production) when the
-    /// strip — or one of its non-edit-field descendants — is currently
-    /// parked there. See the multi-paragraph rationale in `mouseDown`
-    /// for *why*. Idempotent: when the strip isn't first responder, or
-    /// when one of the protected roots (the inline rename text field)
-    /// legitimately holds it, this is a no-op. Tolerant of a nil
-    /// window / contentView (the strip outliving its host briefly
-    /// during teardown).
-    ///
-    /// Called from `mouseDown`'s defer, `rightMouseDown`'s defer, and
-    /// `teardownEdit` — every path the strip can be silently parked on
-    /// after a user gesture.
+    /// Idempotent: a no-op when the strip is not first responder or the inline rename field holds it.
     fileprivate func yieldFirstResponderToTerminalIfParked() {
         guard let win = window, let cv = win.contentView else { return }
-        // When the rename controller's `editField` is non-nil we expect it to
-        // be a subview of the strip (the inline rename text field is added in
-        // `beginEditing` via `addSubview`). DEBUG-assert the invariant
-        // so a future refactor that breaks the parentage trips loudly
-        // instead of producing plausible-looking but wrong yield
-        // decisions (an editField from a different strip would
-        // short-circuit the protection branch and allow real keystroke
-        // theft).
         let editField = tabRenameController.editField
         #if DEBUG
         if let field = editField {
@@ -1547,38 +930,19 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         ) else { return }
         let ok = win.makeFirstResponder(cv)
         if !ok {
-            // Logs in Release too — the NSBeep-on-every-keystroke
-            // regression this canary covers is field-only by nature.
-            // (audit M-5)
             Self.focusLogger.error("yieldFirstResponderToTerminalIfParked: makeFirstResponder(contentView) returned false — strip remains parked, keystrokes will ring NSBeep until the user clicks away. Investigate why TerminalView refused to become first responder.")
         }
     }
 
-    // MARK: - Keyboard focus (titlebar-tabs F4)
+    // MARK: - Keyboard focus
 
-    /// Accept first responder so Full-Keyboard-Access users (Tab /
-    /// Shift-Tab key path) can reach the strip. While focused, arrow
-    /// keys move the focus between pills, Space/Return activates the
-    /// focused pill, and Delete closes it.
+    /// Lets Full-Keyboard-Access users reach the strip.
     override var acceptsFirstResponder: Bool { !tabs.isEmpty }
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
-        // Only auto-set `focusedPill` (which drives the custom keyboard
-        // focus ring) when the promotion to first responder came from a
-        // keyboard event — Tab / Shift-Tab. A mouse-click promotion
-        // leaves `focusedPill = nil` so the user just sees their tab
-        // selected with no extra focus-ring decoration. Arrow keys and
-        // Space still work afterward: the first arrow press sets
-        // `focusedPill` via `moveLeft` / `moveRight` and the ring then
-        // paints from that point forward.
-        //
-        // Why this matters: before this gate, clicking a pill would
-        // become first responder → `focusedPill` defaulted to the
-        // selected tab → the custom ring painted around that pill. User
-        // feedback: looked like a stuck blue outline. Mouse clicks are
-        // already a clear focus cue (the tab highlights); the ring is
-        // keyboard-only affordance.
+        // Set `focusedPill` only when a keyboard event promoted the strip: a mouse-click promotion
+        // must not paint the focus ring.
         let viaKeyboard = NSApp.currentEvent?.type == .keyDown
         if viaKeyboard, focusedPill == nil, !tabs.isEmpty {
             if let sel = selectedTab,
@@ -1595,36 +959,21 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     override func resignFirstResponder() -> Bool {
         let ok = super.resignFirstResponder()
         if ok {
-            // Keep `focusedPill` set so Tab->back restores the last
-            // focused pill. Just repaint so the ring disappears while
-            // another responder is active.
+            // `focusedPill` stays set so tabbing back restores the last focused pill.
             needsDisplay = true
         }
         return ok
     }
 
-    /// True while the window's first responder is this strip. The focus
-    /// ring only renders when true so the ring isn't painted after a
-    /// responder swap leaves `focusedPill` valid but the strip
-    /// inactive. Audit titlebar-tabs F4.
     private func isStripFirstResponder() -> Bool {
         window?.firstResponder === self
     }
 
     override func keyDown(with event: NSEvent) {
-        // Let interpretKeyEvents route arrow/Space/Return/Delete/Escape
-        // through the standard NSResponder selector dispatch so our
-        // `moveLeft:`/`moveRight:`/`insertNewline:`/`deleteBackward:`/
-        // `cancelOperation:` overrides below fire. Unrecognised selectors
-        // fall back to super (menu bar bindings, etc.).
+        // Routes arrow/Space/Return/Delete/Escape through NSResponder selector dispatch to the overrides below.
         self.interpretKeyEvents([event])
     }
 
-    /// Escape — the standard NSResponder cancel selector, routed here via
-    /// `interpretKeyEvents`. Cancels an in-flight reorder gesture if one is
-    /// armed/active; otherwise defers to `super` (P3, RCA
-    /// docs/rca-tab-behaviors-2026-07-01.md — no cancel path existed for an
-    /// in-flight reorder drag).
     override func cancelOperation(_ sender: Any?) {
         guard tabDragController.armedPillIndex != nil || tabDragController.isDragging else {
             super.cancelOperation(sender)
@@ -1635,15 +984,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
     override func moveLeft(_ sender: Any?) {
         guard !tabs.isEmpty else { return }
-        // Clamp the STARTING index first — `focusedPill` can be stale-high
-        // if the tab list shrank since it was last set (P6, RCA
-        // docs/rca-tab-behaviors-2026-07-01.md); `max(0, current - 1)`
-        // alone only protects the lower bound.
-        //
-        // Clamped to the visible page as well: focus must never rest on a pill
-        // that isn't painted, or Delete / Return would act on a tab the user
-        // can't see. Moving past the page's edge stops there (the page buttons
-        // and the tab-switching shortcuts turn the page).
+        // Clamp the STARTING index first: `focusedPill` can be stale-high after the tab list shrank.
+        // Clamped to the visible page so focus never rests on a pill that is not painted.
         let current = clampToVisiblePills(focusedPill ?? 0)
         focusedPill = clampToVisiblePills(current - 1)
         needsDisplay = true
@@ -1656,17 +998,14 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         needsDisplay = true
     }
 
-    /// `i` pulled into the pills on screen (and into `tabs`).
     fileprivate func clampToVisiblePills(_ i: Int) -> Int {
         let last = min(visiblePillRange.upperBound, tabs.count) - 1
         let first = min(visiblePillRange.lowerBound, max(0, last))
         return max(first, min(last, i))
     }
 
-    /// The keyboard-focused pill, but only while it is actually on screen: the
-    /// page can turn under a still-set `focusedPill` (the selection moved to
-    /// another page), and Delete / Return must not act on a tab the user can't
-    /// see.
+    /// The page can turn under a still-set `focusedPill`; Delete / Return must not act on a tab
+    /// the user cannot see.
     private var focusedVisiblePill: Int? {
         guard let i = focusedPill, i < tabs.count, visiblePillRange.contains(i) else { return nil }
         return i
@@ -1676,10 +1015,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         activateFocusedPill()
     }
 
-    /// Space (via `insertText` under FKA) also selects — matches
-    /// AppKit's standard "button"-ish activation. NSTextField-style
-    /// `performKeyEquivalent` isn't used here because we want the
-    /// Space to activate even without a Cmd modifier.
+    /// Space arrives via `insertText` under Full Keyboard Access.
     override func insertText(_ insertString: Any) {
         if let str = insertString as? String, str == " " {
             activateFocusedPill()
@@ -1690,13 +1026,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
     override func deleteBackward(_ sender: Any?) {
         guard let idx = focusedVisiblePill else { return }
-        // `onCloseWindow?` routes through `performClose(nil)` which
-        // synchronously fires `windowWillClose` → `terminateSessions` →
-        // `refreshAllTabBars`, mutating `self.tabs` (and `focusedPill`
-        // via that refresh) before we return. Snapshot the pre-close
-        // state so the post-close clamp lands on the right pill — reading
-        // `focusedPill` / `tabs.count` after the close would clamp
-        // against already-mutated state.
+        // `onCloseWindow` synchronously mutates `tabs` and `focusedPill` (performClose → windowWillClose →
+        // refreshAllTabBars) before returning, so snapshot the pre-close state for the clamp below.
         let priorIndex = idx
         let closing = tabs[idx]
         onCloseWindow?(closing)
@@ -1727,27 +1058,18 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        // Hover state freezes during a drag: the dragged-pill highlight
-        // is the user's focus point, and a stale `×` hotspot appearing
-        // on a sibling pill mid-drag would compete with it. `mouseDragged`
-        // is the only event we care about while a drag is live.
+        // Hover state freezes during a drag.
         if tabDragController.isDragging { return }
         applyHover(at: convert(event.locationInWindow, from: nil))
     }
 
-    /// Drop all three hover fields together (they only make sense as a set).
-    /// Callers own the `needsDisplay` — the sites differ in when they repaint.
+    /// Callers own the `needsDisplay`.
     fileprivate func clearHover() {
         hoveredPill = nil
         hoveredClose = false
         hoveredAdd = false
     }
 
-    /// Recompute hovered pill / close-hotspot / add-button for `p` (in the
-    /// strip's own coordinate space) and repaint if anything changed.
-    /// Shared by `mouseMoved` (the event's live location) and
-    /// `applyHoverAtCurrentCursorLocation` (the CURRENT cursor position,
-    /// queried rather than driven by an event — see that method).
     private func applyHover(at p: NSPoint) {
         let prevPill = hoveredPill
         let prevClose = hoveredClose
@@ -1757,9 +1079,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             hoveredAdd = true
         } else if let i = pillIndex(at: p) {
             hoveredPill = i
-            // Don't arm the close hotspot for the pill under edit —
-            // the `×` isn't drawn there and honouring a close click
-            // would toss the field and kill the session.
+            // Never arm the close hotspot for the pill under edit: a close click there would kill the session.
             hoveredClose = tabRenameController.editingPill != i
                 && NSPointInRect(p, closeHotspot(in: pillFrames[i]))
         }
@@ -1768,21 +1088,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// Recompute hover using the CURRENT cursor position (queried via
-    /// `NSEvent.mouseLocation`, not a stored/stale event) rather than
-    /// waiting for the next `mouseMoved`. `update(tabs:selected:width:)`
-    /// calls this after every relayout: `layoutPills()` recomputes
-    /// `pillFrames`/`addButtonFrame` but a plain `mouseMoved`-driven
-    /// `hoveredPill`/`hoveredClose` doesn't know geometry just shifted
-    /// under a STATIONARY cursor — which happens constantly (live resize
-    /// re-lays out at 120 Hz, tab add/close, reorder commit). Without this,
-    /// the close-`×` can visibly paint over one pill while a click there
-    /// lands on the NEW pill actually under the cursor — the click reads
-    /// as a tab switch instead of a close (P1, RCA
-    /// docs/rca-tab-behaviors-2026-07-01.md). No-op with no window yet, or
-    /// mid-drag (same freeze rule as `mouseMoved` — the dragged-pill
-    /// highlight is the focus point, a stale `×` on a sibling would compete
-    /// with it).
+    /// Uses the CURRENT cursor position: a relayout shifts geometry under a stationary cursor with no
+    /// `mouseMoved`, which would leave the close-× painted on a pill other than the one a click hits.
     private func applyHoverAtCurrentCursorLocation() {
         guard !tabDragController.isDragging, let window else { return }
         let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
@@ -1790,11 +1097,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
     }
 
     override func mouseExited(with event: NSEvent) {
-        // Cursor leaving the strip's tracking area while a drag is in
-        // flight is normal — AppKit still routes mouseDragged events to
-        // us no matter where the cursor lives. Don't clobber hover
-        // state (already cleared at drag start anyway) and don't trigger
-        // a redraw.
+        // AppKit keeps routing mouseDragged here during a drag, wherever the cursor is.
         if tabDragController.isDragging { return }
         if hoveredPill != nil || hoveredAdd || hoveredClose {
             clearHover()
@@ -1802,54 +1105,28 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    // MARK: - Context menu (right-click to rename)
+    // MARK: - Context menu
 
-    /// Build a per-pill context menu on right-click. The Reset item targets
-    /// the right-clicked window's `MainWindowController` explicitly (Rename
-    /// targets this strip, see below) so the responder chain's state at the
-    /// moment the menu fires (which may lag key-window transitions on slow
-    /// machines or under tests) can't mis-route the action to a different
-    /// window's controller. Audit titlebar-tabs F15.
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
-        // Hit-test against pillFrames. Falling outside a pill (e.g. over the
-        // `+` button or the empty trailing region) yields no contextual menu —
-        // there's no tab to target.
         guard
             let idx = pillIndex(at: p),
             idx < tabs.count
         else { return nil }
 
+        // No selection side effect: every item below carries `targetWindow` explicitly.
         let targetWindow = tabs[idx]
-        // No selection side effect (v0.8.1): right-clicking a background
-        // pill used to foreground it before the menu appeared, so "Close
-        // Tab" on a background tab first switched to it and the menu was
-        // then shown by a strip whose window had just been ordered out.
-        // Every item below carries `targetWindow` explicitly.
 
         let menu = NSMenu()
 
-        // Explicit targets, not responder-chain dispatch. Audit
-        // titlebar-tabs F15.
         let controller = targetWindow.windowController as? MainWindowController
 
-        // Audit L9. NSMenu does NOT call `validateMenuItem` for context
-        // menus built via `menu(for:)` — only for menu-bar menus reached
-        // through the responder chain. Without filtering at build time,
-        // "Rename…" and "Reset to Auto" appear enabled even when the
-        // window's session has been torn down (shell exited mid-close)
-        // or when no override is currently active. Both selectors then
-        // hit `guard let session` / `guard … != nil` and silently no-op,
-        // misleading the user. Mirror MainWindowController.validateMenuItem
-        // logic at the build site so the items are simply absent when
-        // they wouldn't fire usefully.
+        // NSMenu does NOT call `validateMenuItem` for context menus built via `menu(for:)`, so items
+        // that could not fire usefully are left out at build time.
         let session = controller?.session
         if session != nil {
-            // Targets THIS strip, not the pill's controller: for a
-            // background tab the controller's own strip lives in an
-            // ordered-out window, so the editor opened there is invisible
-            // and a later tab-list change commits whatever it holds as a
-            // permanent title override. This strip is the one on screen.
+            // Targets THIS strip, not the pill's controller: a background tab's own strip lives in an
+            // ordered-out window, where the editor would be invisible.
             let rename = NSMenuItem(
                 title: "Rename…",
                 action: #selector(renamePillFromMenu(_:)),
@@ -1870,32 +1147,25 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             menu.addItem(reset)
         }
 
-        // Only emit the separator if at least one item was added above —
-        // a leading separator on a context menu looks broken.
         if !menu.items.isEmpty {
             menu.addItem(.separator())
         }
 
         appendMoveItems(to: menu, for: targetWindow)
 
-        // Close — dupes what the hover `×` does, but is useful on a
-        // context menu for discoverability and for users who never hover.
         let close = NSMenuItem(
             title: "Close Tab",
             action: #selector(NSWindow.performClose(_:)),
             keyEquivalent: ""
         )
-        // performClose: must target the window directly; it isn't a
-        // responder-chain action like rename.
+        // `performClose:` must target the window directly.
         close.target = targetWindow
         menu.addItem(close)
 
         return menu
     }
 
-    /// "Rename…" from the pill context menu: edit the right-clicked pill
-    /// inline in this strip. Resolves the index from `tabs` at fire time, so
-    /// a list change while the menu was open just drops the request.
+    /// Resolves the index at fire time, so a list change while the menu was open drops the request.
     @objc private func renamePillFromMenu(_ sender: NSMenuItem) {
         guard let window = sender.representedObject as? NSWindow,
               let idx = tabs.firstIndex(where: { $0 === window })
@@ -1903,22 +1173,9 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         beginEditing(pillIndex: idx)
     }
 
-    /// The "Move Tab to New Window" / "Move Tab to Window ▸" section of the
-    /// pill context menu (RCA docs/rca-tab-behaviors-2026-07-01.md Bug 6 —
-    /// the menu-based move affordance). Appends a trailing separator when it
-    /// added anything, so "Close Tab" below always sits in its own section.
-    ///
-    /// Same build-time filtering rationale as the Rename/Reset items above
-    /// (audit L9): `menu(for:)` context menus never get `validateMenuItem`,
-    /// so an item that can't fire usefully is simply absent —
-    /// "Move Tab to New Window" needs a sibling to detach from, and the
-    /// destination submenu needs at least one other eligible window.
     private func appendMoveItems(to menu: NSMenu, for targetWindow: NSWindow) {
         var addedAny = false
 
-        // The strip only shows with ≥ 2 tabs, so this guard is
-        // defense-in-depth for a future caller, not a reachable state
-        // from the pill menu today.
         if (targetWindow.tabGroup?.windows.count ?? 1) > 1 {
             let detach = NSMenuItem(
                 title: "Move Tab to New Window",
@@ -1931,14 +1188,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             addedAny = true
         }
 
-        // Fullscreen SOURCE sits out cross-window moves, mirroring the
-        // destination-side rule in `destinationEligible` (the strip is
-        // reachable in native fullscreen via the revealed titlebar, and a
-        // cross-Space splice out of a fullscreen group is the same
-        // sensitive path as one into it). Absent, not disabled — audit L9.
-        // "Move Tab to New Window" stays available: it delegates to the
-        // native `moveTabToNewWindow(_:)`, which AppKit itself offers in
-        // fullscreen. `TabMover.moveTab` re-checks at fire time.
+        // A fullscreen SOURCE sits out cross-window moves, mirroring `destinationEligible`.
+        // `TabMover.moveTab` re-checks at fire time.
         let sourceIsFullscreen = targetWindow.styleMask.contains(.fullScreen)
         let destinations = sourceIsFullscreen
             ? []
@@ -1972,21 +1223,11 @@ final class TabStripView: NSView, NSViewToolTipOwner {
         }
     }
 
-    /// Menu label for one move destination: the window's title (matching
-    /// what its pill / titlebar shows), "Untitled" when empty — the same
-    /// fallback the pills draw — plus a tab-count suffix when the
-    /// destination is itself a multi-tab group. Pure + static so the
-    /// format is unit-testable.
     static func moveDestinationTitle(windowTitle: String, groupTabCount: Int) -> String {
         let base = displayTitle(windowTitle)
         return groupTabCount >= 2 ? "\(base) (\(groupTabCount) tabs)" : base
     }
 
-    /// The one "Untitled" fallback for an empty window title. Pills, the
-    /// inline-rename seed, VoiceOver labels, and the move-destination menu
-    /// all show the same string for a title-less window — hoisted so the
-    /// fallback can't diverge between them (it had been duplicated at four
-    /// sites; type-design review).
     static func displayTitle(_ windowTitle: String) -> String {
         windowTitle.isEmpty ? "Untitled" : windowTitle
     }
@@ -1994,44 +1235,8 @@ final class TabStripView: NSView, NSViewToolTipOwner {
 
 // MARK: - Strip first-responder yield decision
 
-/// Pure decision function for `TabStripView.yieldFirstResponderToTerminalIfParked`.
-/// Returns `true` when the caller SHOULD push first-responder back to
-/// the host window's contentView, `false` when the current responder
-/// is somewhere we must not clobber.
-///
-/// `claimant` is the view AppKit may have auto-promoted on a mouse
-/// gesture (the `TabStripView` in production). `protectedRoots` is the
-/// list of subtrees that legitimately own first responder while
-/// non-empty — for the strip that's the inline rename text field while
-/// rename is active, and only that. Empty at all other times.
-///
-/// Mirrors the shape of `shouldRestoreFirstResponder(currentFirstResponder:preserveDescendantsOf:)`
-/// in `MainWindowController` so a future "another view that
-/// legitimately holds FR" case is a 1-line append to `protectedRoots`
-/// rather than another parameter.
-///
-/// Decision order (first match wins):
-///   1. nil current responder — auto-promotion failed in some odd way
-///      OR a `makeFirstResponder(nil)` left the window without one.
-///      Restore so subsequent keystrokes have a definite home.
-///   2. Non-NSView responder (typically the host NSWindow itself,
-///      which is an NSResponder but NOT an NSView subclass — the
-///      state a window briefly enters when a `becomeFirstResponder`
-///      call returns false). Anything else hitting this branch
-///      (NSWindowController, NSApplication, custom global responders)
-///      is treated as "unintended" — restore. Production today has
-///      no such responder; a comment in the call site flags the
-///      assumption for any future addition.
-///   3. Inside any protected root — leave alone.
-///   4. The claimant itself or any of its non-protected descendants —
-///      AppKit auto-promoted us, restore.
-///   5. Anything else (typically TerminalView or a TerminalView
-///      descendant such as the FindBar's text field) — first responder
-///      already lives where keystrokes belong. Leave alone.
-///
-/// Pure (no AppKit reach-in) so unit tests can drive every case
-/// without instantiating an NSWindow. Internal so tests can reach it
-/// via `@testable import Blackbird`.
+/// True when first responder should go back to the contentView: it is nil, a non-NSView responder (the NSWindow
+/// itself), or the claimant or one of its descendants outside every protected root.
 internal func shouldYieldFirstResponderToTerminal(
     currentFirstResponder: NSResponder?,
     claimedBy claimant: NSView,
@@ -2047,45 +1252,20 @@ internal func shouldYieldFirstResponderToTerminal(
 
 // MARK: - Tab drag-to-reorder controller
 
-/// The pill drag-to-reorder state machine, hoisted out of `TabStripView`
-/// (REFACTOR.md Area 5). Owns the three-phase gesture state; the strip's
-/// `mouseDragged` / `mouseUp` overrides forward here, `mouseDown`'s arm branch
-/// calls `arm(...)`, and `update(tabs:)` / `draw(_:)` query it. Holds an
-/// `unowned` back-reference to the strip for its layout (`tabs` / `pillFrames`),
-/// hover paint, and callbacks; the strip strong-references the controller, so
-/// the back-ref is valid for the controller's whole life. Not an NSResponder —
-/// the strip keeps the overrides and forwards.
+/// Not an NSResponder: the strip keeps the overrides and forwards here.
 private final class TabDragController {
     unowned let view: TabStripView
 
     init(view: TabStripView) { self.view = view }
 
-    /// Captured on `mouseDown` over a pill body when reorder is feasible
-    /// (≥ 2 tabs, not on the close hotspot, not entering inline-rename).
-    /// `mouseDragged` checks the threshold against `startPoint.x` to
-    /// decide whether to promote to a real reorder gesture.
     struct PendingDrag {
         let pillIndex: Int
         let startPoint: NSPoint
-        /// Horizontal offset inside the pill at mousedown — preserved so
-        /// the dragged pill stays anchored to where the user grabbed it
-        /// rather than snapping its left edge to the cursor.
         let downOffsetX: CGFloat
-        /// The ORIGINAL mouseDown event. `NSWindow.performDrag(with:)`'s
-        /// documented contract expects the event `mouseDown` received, not
-        /// a later `mouseDragged` sample — threaded through so the
-        /// `.windowMove` hand-off in `mouseDragged` can honor that contract
-        /// instead of seeding `performDrag` with the wrong event (P4, RCA
-        /// docs/rca-tab-behaviors-2026-07-01.md).
+        /// `NSWindow.performDrag(with:)` expects the ORIGINAL mouseDown event, not a later mouseDragged sample.
         let mouseDownEvent: NSEvent
     }
 
-    /// Active drag — promoted from the `.armed` phase once the user
-    /// moves the cursor past `dragThreshold`. `currentIndex` is the
-    /// intermediate slot the dragged pill currently occupies; siblings
-    /// render shifted around that slot. `cursorX` is the live mouse X
-    /// used to draw the dragged pill under the cursor (clamped to
-    /// strip bounds).
     struct DragState {
         let originalIndex: Int
         let downOffsetX: CGFloat
@@ -2093,13 +1273,6 @@ private final class TabDragController {
         var currentIndex: Int
     }
 
-    /// Three-phase state machine for reorder gestures. The enum makes
-    /// the "armed but not yet dragging" vs "actively dragging" vs
-    /// "neither" distinction representable in the type system — the
-    /// previous two-optional encoding (`pendingDrag: ?`, `dragState: ?`)
-    /// admitted a representable-but-illegal `(nil, set)` fourth state.
-    /// `mouseDragged` reads + transitions; `mouseUp` always returns to
-    /// `.idle`.
     enum DragPhase {
         case idle
         case armed(PendingDrag)
@@ -2107,37 +1280,22 @@ private final class TabDragController {
     }
     private var phase: DragPhase = .idle
 
-    /// Pixels of horizontal motion required before a mousedown is
-    /// promoted to a reorder drag. Anything smaller is treated as a
-    /// click and falls through to the existing select / close path. 5pt
-    /// matches the macOS-wide drag-recognition tolerance for AppKit
-    /// controls and is high enough to absorb hand-tremor without making
-    /// the gesture feel laggy.
     private static let dragThreshold: CGFloat = 5
 
-    /// `os.Logger` for the `mouseUp` "should-never-happen but did" canaries.
-    /// Shared single source of truth with the strip's `requestWindowDrag`
-    /// no-window log — lives on `TabStripView` (`tabDrag` category).
     private static var dragLogger: Logger { TabStripView.dragLogger }
 
-    // MARK: Queries (consumed by the strip's draw / hover / test hooks)
+    // MARK: Queries
 
-    /// True while an active reorder drag is in flight. The strip freezes
-    /// hover paint and short-circuits `mouseMoved` / `mouseExited` on this.
     var isDragging: Bool {
         if case .dragging = phase { return true }
         return false
     }
 
-    /// The live drag state while `.dragging`, else `nil`. Drives the
-    /// dragged-pill render in `draw(_:)`.
     var activeDragState: DragState? {
         if case .dragging(let s) = phase { return s }
         return nil
     }
 
-    /// The armed pill index while `.armed` (pressed, not yet promoted past
-    /// the threshold), else `nil`. Test-hook surface.
     var armedPillIndex: Int? {
         if case .armed(let p) = phase { return p.pillIndex }
         return nil
@@ -2145,9 +1303,6 @@ private final class TabDragController {
 
     // MARK: Transitions
 
-    /// Arm a potential reorder from a pill mousedown. Called by the strip's
-    /// `handlePillClick` arm branch; selection stays DEFERRED to `mouseUp`
-    /// so a drag — reorder OR window move — never switches tabs.
     func arm(pillIndex: Int, startPoint: NSPoint, downOffsetX: CGFloat, mouseDownEvent: NSEvent) {
         phase = .armed(PendingDrag(pillIndex: pillIndex,
                                    startPoint: startPoint,
@@ -2155,20 +1310,11 @@ private final class TabDragController {
                                    mouseDownEvent: mouseDownEvent))
     }
 
-    /// Hard-cancel an in-flight drag without committing. Used when the
-    /// list shape changes underneath the gesture so we don't try to
-    /// reorder against a stale index.
     func cancelInProgress() {
         phase = .idle
         view.needsDisplay = true
     }
 
-    /// Cancel an armed-or-active gesture when the tab list changed shape
-    /// beneath it (sibling closed, new tab opened, post-commit reorder). A
-    /// stale `.dragging` would commit a reorder against the wrong slot, and a
-    /// stale `.armed` would fire a wrong selection on the trailing mouseUp.
-    /// `.idle` is left untouched — the post-commit refresh path already
-    /// returned `.idle` in `mouseUp` before the notification fired.
     func cancelForListShapeChange() {
         switch phase {
         case .armed, .dragging: cancelInProgress()
@@ -2185,13 +1331,7 @@ private final class TabDragController {
         case .armed(let pending):
             let dx = p.x - pending.startPoint.x
             let dy = p.y - pending.startPoint.y
-            // A plain drag reorders; a drag carrying the configured
-            // window-move modifier (default ⌘) moves the window, in EITHER
-            // axis — the same gesture grammar as the terminal body
-            // (`TerminalView.mouseDown`). Direction no longer decides the
-            // outcome: the old steep-vertical-pull-moves-window heuristic was
-            // removed (critique 2026-06-07, audit titlebar-tabs F10 lives on
-            // as this modifier path).
+            // A plain drag reorders; a drag carrying the window-move modifier moves the window, in either axis.
             let dragMask = Preferences.shared.windowDragModifier.modifierMask
             let hasMoveModifier = !dragMask.isEmpty
                 && event.modifierFlags.contains(dragMask)
@@ -2199,13 +1339,8 @@ private final class TabDragController {
                                                  threshold: Self.dragThreshold,
                                                  hasMoveModifier: hasMoveModifier) {
             case .pending:
-                // Hasn't moved far enough — still potentially a click.
                 return
             case .reorder:
-                // Plain drag — promote to an active reorder drag. Snap the
-                // hover state off: we're not painting close hotspots or hover
-                // backgrounds while a drag is in flight, and stale hover
-                // indices would visibly linger under the moving pill.
                 view.clearHover()
                 phase = .dragging(DragState(
                     originalIndex: pending.pillIndex,
@@ -2215,36 +1350,19 @@ private final class TabDragController {
                 ))
                 view.needsDisplay = true
             case .windowMove:
-                // Modifier held — the user is moving the window, not
-                // reordering. Drop the armed reorder, clear hover paint,
-                // and hand off to a native AppKit window drag. The
-                // hand-off consumes the rest of the gesture (the default
-                // `performDrag(with:)` blocks until mouse-up), so reset
-                // to `.idle` *before* the hand-off — no `mouseUp` will
-                // arrive to clear it for us.
+                // `performDrag(with:)` blocks until mouse-up and no `mouseUp` arrives here afterwards,
+                // so reset to `.idle` BEFORE the hand-off.
                 view.clearHover()
                 phase = .idle
                 view.needsDisplay = true
-                // `performDrag(with:)`'s documented contract wants the
-                // ORIGINAL mouseDown event, not this mouseDragged sample
-                // (P4) — `pending.mouseDownEvent` is exactly that.
                 view.requestWindowDrag(pending.mouseDownEvent)
             }
         case .dragging(var state):
-            // Bail out cleanly if the underlying tab list changed
-            // shape mid-gesture (a sibling closed, a new tab opened) —
-            // the original index no longer matches the strip.
             guard state.originalIndex < view.tabs.count else {
                 cancelInProgress()
                 return
             }
-            // Degenerate strip width (mid-gesture window collapse to ~0):
-            // `computeIntermediateIndex` can't compute a meaningful slot
-            // without a positive pill pitch. Hold the dragged pill at
-            // its original slot rather than yanking it to slot 0.
-            // Clamped to the page on screen: the slots past its edges have
-            // virtual frames the user can't see, and a reorder is never carried
-            // across pages (the selection would leave its own page).
+            // Clamped to the page on screen: a reorder is never carried across pages.
             let newIndex = view.clampToVisiblePills(TabStripView.computeIntermediateIndex(
                 cursorX: p.x,
                 downOffsetX: state.downOffsetX,
@@ -2263,52 +1381,28 @@ private final class TabDragController {
         defer {
             phase = .idle
         }
-        // A press that armed a drag but never crossed the threshold is a
-        // click: NOW switch tabs (selection was deferred from `mouseDown` so a
-        // drag never selects — critique complaint C). Guard the index against
-        // a list-shape change between mouseDown and mouseUp.
+        // An armed press that never crossed the threshold is a click: select now.
         if case .armed(let pending) = phase {
-            // `.armed` is cancelled in `update(tabs:)` on any list-shape
-            // change, so a surviving armed index should always be valid here.
-            // If it isn't, the armed phase outlived a refresh that should have
-            // reconciled it — log (matching the `.dragging` canary below)
-            // rather than dropping the click silently.
             guard pending.pillIndex < view.tabs.count else {
                 Self.dragLogger.notice("mouseUp: armed pillIndex \(pending.pillIndex, privacy: .public) >= tabs.count \(self.view.tabs.count, privacy: .public); armed phase outlived a list-shape change without being cancelled in update(tabs:) — click-to-select dropped, investigate.")
                 return
             }
-            // Only an index guard is needed here (unlike the reorder-commit
-            // path below, which re-checks `tabGroup`): selecting a window whose
-            // group changed mid-press is benign, whereas committing a reorder
-            // against a detached window is not.
             view.onSelectWindow?(view.tabs[pending.pillIndex])
             return
         }
-        // Only the actively-dragging phase has a reorder commit to consider;
-        // `.idle` (no pill grabbed) falls straight through the guard.
         guard case .dragging(let state) = phase else { return }
-        // No-op when the user lifted on the original slot.
         guard state.currentIndex != state.originalIndex else {
             view.needsDisplay = true
             return
         }
-        // Defensive: tabs could have shrunk between the last
-        // `mouseDragged` (where we already checked) and `mouseUp`. The
-        // `update(tabs:)` cancellation path should have nilled the
-        // drag, but the gesture is on the same main thread as the KVO
-        // refresh so a synchronous interleave is theoretically possible
-        // on AppKit's part. Log so a regression is visible.
         guard state.originalIndex < view.tabs.count else {
             Self.dragLogger.notice("mouseUp: dragState.originalIndex \(state.originalIndex, privacy: .public) >= tabs.count \(self.view.tabs.count, privacy: .public); list shape changed between mouseDragged and mouseUp without an update(tabs:) refresh — investigate.")
             view.needsDisplay = true
             return
         }
         let target = view.tabs[state.originalIndex]
-        // Tab must still be in a group for the coordinator's
-        // group-keyed storage to accept the move. Drag-out (the user
-        // detaching the window) is the documented way `tabGroup` goes
-        // nil mid-drag; treat the reorder as discarded rather than
-        // trying to commit against the now-standalone window.
+        // The tab must still be in a group for the coordinator to accept the move; `tabGroup` goes
+        // nil when the window is detached mid-drag.
         guard let group = target.tabGroup else {
             Self.dragLogger.notice("mouseUp: dragged window's tabGroup went nil mid-drag (detached?); discarding reorder")
             view.needsDisplay = true
@@ -2317,22 +1411,11 @@ private final class TabDragController {
         TabOrderCoordinator.shared.move(window: target,
                                         to: state.currentIndex,
                                         in: group)
-        // The coordinator's `orderDidChange` notification drives
-        // `refreshAllTabBars()` — every sibling strip in the group
-        // repaints with the new permutation. Setting `needsDisplay` here
-        // covers the (rare) case where notification delivery is delayed
-        // past the next paint pass: we want the dragged pill to settle
-        // into its new slot immediately even if the refresh hasn't
-        // landed yet.
+        // The coordinator's `orderDidChange` notification drives the full refresh; this covers a delayed delivery.
         view.needsDisplay = true
     }
 
-    /// Where the dragged pill renders this frame: anchored to the cursor by
-    /// the grab offset (`downOffsetX`, so it doesn't snap-left on grab),
-    /// clamped against the laid-out `+` button frame (the single source of
-    /// truth for the trailing boundary) so it can never slide under the
-    /// button and this can't drift from `layoutPills()`'s math. Pure so the
-    /// strip's draw path delegates the geometry here.
+    /// Clamped against the laid-out `+` button frame so the dragged pill can never slide under it.
     static func draggedPillRect(base: NSRect, cursorX: CGFloat,
                                 downOffsetX: CGFloat, addButtonMinX: CGFloat,
                                 spacing: CGFloat) -> NSRect {
@@ -2345,15 +1428,6 @@ private final class TabDragController {
 
 // MARK: - Tab inline-rename controller
 
-/// The inline-rename engine, hoisted out of `TabStripView` (REFACTOR.md
-/// Area 5). Owns the editing pill index + field editor and IS the field's
-/// `NSTextFieldDelegate` + action target. The strip exposes thin
-/// `beginEditing` / `commitEditIfNeeded` forwarders for its external callers
-/// (`TitlebarTabBarViewController`) and queries `editingPill` / `isEditing`
-/// from its draw + hit-test + hover paths. `unowned view`; the strip
-/// strong-references this, so the back-ref is valid for the controller's
-/// whole life. NSObject base is required for the `@objc` action + the
-/// Cocoa text-field delegate protocol.
 private final class TabRenameController: NSObject, NSTextFieldDelegate {
     unowned let view: TabStripView
 
@@ -2362,27 +1436,14 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         super.init()
     }
 
-    /// Index of the pill currently in inline-edit mode, or `nil`. Only one
-    /// pill edits at a time; opening a second commits the first so the
-    /// user never silently loses an in-flight title edit.
     private(set) var editingPill: Int? = nil
-    /// Field editor used while a pill is being renamed. Lifetime matches
-    /// `editingPill` — nil'd together by `teardownEdit`.
+    /// Nil'd together with `editingPill` by `teardownEdit`.
     private(set) var editField: NSTextField? = nil
-    /// The text `beginEditing` pre-filled the field with, kept so
-    /// `commitEdit` can tell an untouched field from a typed name. Nil'd by
-    /// `teardownEdit` together with `editField`.
+    /// The text the field was pre-filled with, so `commitEdit` can tell an untouched field from a typed name.
     private var seededText: String? = nil
 
-    /// `true` while any pill is in inline-edit mode. The strip's hover /
-    /// close / draw paths short-circuit on this so the editing pill doesn't
-    /// paint an `×` hotspot over its own text field.
     var isEditing: Bool { editingPill != nil }
 
-    /// Swap the pill at `pillIndex` into rename mode. Installs an
-    /// `NSTextField` over the pill's title area, pre-fills with the window
-    /// title, selects all. Commits any in-flight edit first so two
-    /// double-clicks in a row don't drop the first edit silently.
     func beginEditing(pillIndex: Int) {
         guard pillIndex >= 0,
               pillIndex < view.tabs.count,
@@ -2391,8 +1452,6 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         if let existing = editingPill, existing != pillIndex {
             commitEdit()
         }
-        // If the field already exists for the same pill (e.g., user hit
-        // ⌃⌘R a second time on the same pill), just refocus it.
         if editingPill == pillIndex, let existing = editField {
             view.window?.makeFirstResponder(existing)
             existing.currentEditor()?.selectAll(nil)
@@ -2410,10 +1469,8 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         field.stringValue = TabStripView.displayTitle(view.tabs[pillIndex].title)
         seededText = field.stringValue
         field.delegate = self
-        // Enter fires the action; action selector + target here is a
-        // defense-in-depth for environments where the field-editor
-        // `insertNewline:` command path doesn't route through the
-        // delegate. Both paths funnel through `commitEdit`.
+        // Fallback for environments where `insertNewline:` does not route through the delegate;
+        // both paths funnel through `commitEdit`.
         field.target = self
         field.action = #selector(editFieldCommitAction(_:))
         view.addSubview(field)
@@ -2427,27 +1484,8 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         commitEdit()
     }
 
-    /// Publish the current edit-field value through `onCommitRename` and
-    /// tear down the field. Trims whitespace; empty → `""` which the
-    /// caller (MainWindowController.applyInlineRename) treats as
-    /// "clear override, revert to auto title".
-    ///
-    /// Note: titlebar-tabs F8 flagged pure-whitespace input over a
-    /// non-empty existing title as an "accidental override clear".
-    /// The current contract — and the existing
-    /// `InlineRenameTests.test_commit_empty_forwards_empty_string`
-    /// pinning — is that whitespace-only commits still forward as the
-    /// empty string so the consumer can map it to "revert to OSC".
-    /// Modifying that behaviour would be a test-owner change; deferred
-    /// here.
-    ///
-    /// A field still holding exactly the pre-filled title is a cancel, not a
-    /// commit: forwarding it would make `applyInlineRename` pin the tab's
-    /// current auto title as a permanent override, freezing the pill against
-    /// every later OSC 0/2 title. Every implicit exit (focus loss, a tab
-    /// opening or closing, an outside click) reaches here too, so a user who
-    /// only opened the editor never pays for it. The comparison is against
-    /// the raw, untrimmed seed so a whitespace-only clear still forwards.
+    /// Whitespace-only input forwards as `""` (clear the override). A field still holding exactly the raw, untrimmed
+    /// pre-filled title is a cancel: forwarding it would pin the current auto title as a permanent override.
     func commitEdit() {
         guard let idx = editingPill,
               let field = editField,
@@ -2463,39 +1501,21 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = view.tabs[idx]
         teardownEdit()
-        // Call through AFTER teardown so the consumer's side-effects
-        // (title publication → KVO → refreshTabBar) don't land while
-        // the field subview is still alive. Note that `teardownEdit`
-        // now also yields first-responder back to the terminal view
-        // synchronously (see `yieldFirstResponderToTerminalIfParked`),
-        // so by the time `onCommitRename` runs the FR slot is settled
-        // — the older comment about "racing for the first-responder
-        // slot" no longer applies, but the teardown-then-publish
-        // ordering still does.
+        // Call through AFTER teardown so the consumer's side effects (title publication → KVO →
+        // refreshTabBar) don't land while the field subview is still alive.
         view.onCommitRename?(target, trimmed)
     }
 
-    /// Dismiss the edit without publishing. Used for Escape and for any
-    /// path that takes the field down without consumer notification.
     func cancelEdit() {
         teardownEdit()
     }
 
-    /// Commit the in-flight edit if one is active. No-op otherwise. Used
-    /// by `TabStripView.commitEditIfNeeded` (→
-    /// `MainWindowController.refreshTabBar`) on the multi-tab → single-tab
-    /// transition so the field doesn't survive as a subview of a hidden
-    /// strip. (main-window F8)
     func commitIfNeeded() {
         if editingPill != nil {
             commitEdit()
         }
     }
 
-    /// Move the field to track the pill's new x/width on a width-only
-    /// `update` (the path `windowDidResize` takes every tick at 120 Hz on
-    /// ProMotion) so the caret doesn't drift off-pill. No-op when no edit is
-    /// in flight. Geometry mirrors `beginEditing`'s field-rect computation.
     func repositionFieldForWidthChange() {
         guard let idx = editingPill,
               idx < view.pillFrames.count,
@@ -2504,11 +1524,7 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         field.frame = fieldRect(for: view.pillFrames[idx])
     }
 
-    /// The edit field's frame inside `pill`: the pill's title area (the SAME
-    /// horizontal math the drawing path uses, via TabStripLayout). 2 pt
-    /// top/bottom inset keeps the field slightly inside the pill body so its
-    /// focus-ring-free border is visible. Shared by `beginEditing` and
-    /// `repositionFieldForWidthChange` so the two can't drift.
+    /// The SAME horizontal math the drawing path uses, via TabStripLayout.
     private func fieldRect(for pill: NSRect) -> NSRect {
         let closeRect = view.closeHotspot(in: pill)
         let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
@@ -2527,24 +1543,13 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         seededText = nil
         editingPill = nil
         view.needsDisplay = true
-        // Removing the field as a subview triggers AppKit's
-        // `makeFirstResponder(nil)`, which lands first responder on the
-        // host NSWindow itself — an NSResponder but not an NSView, so
-        // typed characters fall to `noResponderFor:` and ring NSBeep.
-        // Push first responder back to the terminal in the same
-        // synchronous step so no keystrokes can squeak through the
-        // window-as-FR window. The `onCommitRename` side-effects fired
-        // by `commitEdit` (KVO → refreshTabBar) don't touch first
-        // responder, so doing this here (vs. at every call site) is
-        // safe and keeps the contract local.
+        // Removing the field triggers AppKit's `makeFirstResponder(nil)`, leaving the NSWindow itself as first
+        // responder, where typed characters ring NSBeep; yield to the terminal in the same synchronous step.
         view.yieldFirstResponderToTerminalIfParked()
     }
 
     // MARK: NSTextFieldDelegate
 
-    /// Enter → commit, Escape → cancel. Routed through the field editor's
-    /// command dispatch so we get both Return on a physical keyboard and
-    /// Enter on the numeric keypad.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         if sel == #selector(NSResponder.cancelOperation(_:)) {
             cancelEdit()
@@ -2557,44 +1562,22 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         return false
     }
 
-    /// Focus loss that isn't routed through Enter / Escape — clicked
-    /// elsewhere in the app, ⌘-Tab to another app, etc. Commit so the
-    /// user's typed value survives. `cancelEdit` paths have already
-    /// nil'd `editField`, so this is a no-op in that case.
+    /// Focus loss commits. `cancelEdit` paths have already nil'd `editField`, so this is a no-op for them.
     func controlTextDidEndEditing(_ obj: Notification) {
         if editField != nil { commitEdit() }
     }
 }
 
-// `NSBezierPath.cgPath` comes from the macOS 14 SDK (the app's floor);
-// the private reimplementation that lived here was deleted in v0.8.1.
-
-/// VoiceOver accessibility for `TabStripView` (hoisted collaborator, `unowned
-/// view`). Each pill + the `+` button are drawn shapes, not real views, so
-/// NSAccessibility sees nothing by default. This builds per-pill + "New Tab"
-/// `NSAccessibilityElement` buttons (keyed to window titles) so rotor / VO
-/// navigation reach them, caches them for stable VO element identity, and posts
-/// `valueChanged` when a title changes in place. The strip keeps the
-/// NSAccessibility protocol overrides (AppKit calls them on the view) and
-/// forwards here. Audit titlebar-tabs F3 / F5.
 private final class TabStripAccessibility {
     unowned let view: TabStripView
     init(view: TabStripView) { self.view = view }
 
-    /// Cached per-pill elements so `accessibilityChildren()` and the
-    /// value-changed posts share identical instances (VoiceOver tracks element
-    /// identity). Rebuilt lazily; invalidated by `layoutPills` via `invalidateCache`.
+    /// Cached because VoiceOver tracks element identity; invalidated by `layoutPills`.
     private var cachedPillElements: [NSAccessibilityElement]?
-    /// Snapshot of the pill TITLE strings applied on the previous `update()`.
-    /// Value-changed posts diff against THIS (not the live window refs, which
-    /// always equal the current title). Audit titlebar-tabs F5.
+    /// Value-changed posts diff against this snapshot, not the live windows, which always hold the current title.
     private var lastAppliedTitles: [String] = []
 
-    /// The child element list `accessibilityChildren()` returns: the on-screen
-    /// pills' buttons, the page buttons flanking them while the row pages, then
-    /// the "New Tab" button. Pills on other pages are left out: their frames
-    /// are virtual, so VoiceOver would report and highlight rects outside the
-    /// strip. The page buttons are how it reaches them.
+    /// Pills on other pages are left out: their frames are virtual.
     func children() -> [NSAccessibilityElement] {
         let pills = pillElements()
         var earlier: [NSAccessibilityElement] = []
@@ -2617,10 +1600,7 @@ private final class TabStripAccessibility {
         return out
     }
 
-    /// Post VoiceOver value-changed for any title that changed in place (skipped
-    /// on a list-shape change — AppKit's container-children invalidation covers
-    /// those), targeting the cached pill elements so VO tracks a stable identity,
-    /// then refresh the stored title snapshot. Audit titlebar-tabs F5 / KNOWN_ISSUES.
+    /// Skipped on a list-shape change: AppKit's container-children invalidation covers those.
     func refreshTitlesAndPost(tabs: [NSWindow], listShapeChanged: Bool) {
         if !listShapeChanged {
             let current = tabs.map { $0.title }
@@ -2635,15 +1615,12 @@ private final class TabStripAccessibility {
         lastAppliedTitles = tabs.map { $0.title }
     }
 
-    /// Pill frames are about to change → cached elements (which embed a frame)
-    /// are stale; rebuild lazily on next access.
+    /// Cached elements embed a frame.
     func invalidateCache() {
         cachedPillElements = nil
         cachedPageElements = nil
     }
 
-    /// Cached for the same reason as the pill elements; one per page button
-    /// that currently has a page to turn to.
     private var cachedPageElements: [(TabStripView.PageDirection, NSAccessibilityElement)]?
 
     private func pageElements() -> [(TabStripView.PageDirection, NSAccessibilityElement)] {
@@ -2696,14 +1673,6 @@ private final class TabStripAccessibility {
     }
 }
 
-/// Shared base for the pill-strip's accessibility element proxies. Owns the
-/// frame-tracking state (`parentView` + the element's frame in the parent's
-/// local coordinate space) and the `accessibilityFrame()` override; concrete
-/// subclasses add only their distinct behavior (label text, press/custom
-/// actions). Hoisted out of `BBTabPillAccessibilityElement` /
-/// `BBAddTabAccessibilityElement`, which used to duplicate this state and
-/// override verbatim (type-design review, RCA
-/// docs/rca-tab-behaviors-2026-07-01.md batch).
 class BBFrameTrackingAccessibilityElement: NSAccessibilityElement {
     private weak var parentView: NSView?
     private let localFrame: NSRect
@@ -2714,34 +1683,15 @@ class BBFrameTrackingAccessibilityElement: NSAccessibilityElement {
         super.init()
         setAccessibilityParent(parent)
         setAccessibilityRole(role)
-        // Defensive fallback for any AXAPI caller that reads
-        // frameInParentSpace directly instead of going through
-        // accessibilityFrame() — the override below is the one VoiceOver
-        // actually queries and is the one that's correct.
+        // Fallback for AXAPI callers that read frameInParentSpace directly; VoiceOver queries `accessibilityFrame()`.
         setAccessibilityFrameInParentSpace(frame)
     }
 
-    /// Recompute the ABSOLUTE screen-space accessibility frame ourselves,
-    /// instead of trusting AppKit's `accessibilityFrameInParentSpace` →
-    /// `accessibilityFrame` resolution through the `accessibilityParent`
-    /// chain. Empirically verified (RCA docs/rca-tab-behaviors-2026-07-01.md
-    /// P5): with `TabStripView.isFlipped == true`, that resolution is off by
-    /// exactly the element's local y-offset — AppKit doesn't correctly
-    /// un-flip the parent-space frame when resolving it for VoiceOver's
-    /// screen-space query. Recomputing from `parentView` on every call (not
-    /// caching) keeps this correct across window moves/resizes without an
-    /// extra invalidation hook — `NSView.convert(_:to:)` and
-    /// `NSWindow.convertToScreen(_:)` always reflect current geometry.
+    /// Computed here because AppKit's resolution of `accessibilityFrameInParentSpace` is off by the
+    /// element's local y-offset when the parent view is flipped.
     override func accessibilityFrame() -> NSRect {
         guard let parentView, let window = parentView.window else {
-            // `super.accessibilityFrame()` would fall back to the exact
-            // buggy `accessibilityFrameInParentSpace` resolution this
-            // override exists to bypass (P5) — a transient teardown race
-            // (parentView/window nil between VoiceOver's element cache and
-            // its query) would then silently resurrect the flipped-
-            // coordinate bug instead of degrading obviously. `.zero` is an
-            // unambiguous "no frame available" signal instead (silent-
-            // failure review, RCA docs/rca-tab-behaviors-2026-07-01.md batch).
+            // Not `super.accessibilityFrame()`: that falls back to the buggy parent-space resolution.
             return .zero
         }
         let windowFrame = parentView.convert(localFrame, to: nil)
@@ -2751,9 +1701,6 @@ class BBFrameTrackingAccessibilityElement: NSAccessibilityElement {
     override func isAccessibilityEnabled() -> Bool { true }
 }
 
-/// Accessibility proxy for a single tab pill. Maps its `activate` to
-/// `onSelect` (equivalent to clicking the pill) and exposes a custom
-/// "Close Tab" action that routes to `onClose`.
 final class BBTabPillAccessibilityElement: BBFrameTrackingAccessibilityElement {
     private let onSelect: () -> Void
     private let onClose: () -> Void
@@ -2786,8 +1733,6 @@ final class BBTabPillAccessibilityElement: BBFrameTrackingAccessibilityElement {
     }
 }
 
-/// Accessibility proxy for one of the page buttons flanking a paging pill row.
-/// Role=.button; its press turns the row one page.
 final class BBPageButtonAccessibilityElement: BBFrameTrackingAccessibilityElement {
     private let label: String
     private let onPress: () -> Void
@@ -2806,8 +1751,6 @@ final class BBPageButtonAccessibilityElement: BBFrameTrackingAccessibilityElemen
     }
 }
 
-/// Accessibility proxy for the trailing `+` button. Role=.button with
-/// a single press action that fires `onAddTab`.
 final class BBAddTabAccessibilityElement: BBFrameTrackingAccessibilityElement {
     private let onAdd: () -> Void
 

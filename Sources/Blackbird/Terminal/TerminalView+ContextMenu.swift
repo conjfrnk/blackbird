@@ -2,47 +2,23 @@ import AppKit
 import Foundation
 import BBCore
 
-/// Right-click context menu + menu-item validation for `TerminalView`.
-/// Split out of `TerminalView+Find.swift` so the find/search engine there
-/// isn't interleaved with this responder concern (REFACTOR.md Area 3).
-/// `menu(for:)` surfaces Open-Link / Copy-Link items when the right-click
-/// lands on a resolvable URL (OSC 8 first, regex fallback; the anti-phishing
-/// gate offers a deliberate Copy-only for a host-divergent OSC 8 link), then
-/// the standard Copy / Paste. `validateMenuItem` enables/disables the app
-/// menu's edit / find / prompt-nav / font items against the live selection,
-/// snapshot, session, and match state.
 extension TerminalView: NSMenuItemValidation {
 
-    // The conformance is what exposes this to AppKit: a plain Swift method is
-    // not @objc, so NSMenu's `respondsToSelector:validateMenuItem:` check
-    // failed and every item targeting the view was merely auto-enabled (the
-    // gating and the find-mode checkmarks below never ran).
+    // The conformance is required: a plain Swift method is not @objc, so without it
+    // NSMenu never calls this and every item targeting the view is auto-enabled.
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(copy(_:)):                      return selection != nil
         case #selector(selectAll(_:)):                 return currentSnapshot != nil
         case #selector(paste(_:)):
-            // Paste needs BOTH a session to receive the bytes AND string
-            // content on the pasteboard. Before this check, a paste on a
-            // view with no session silently dropped the clipboard content
-            // instead of clearly disabling the menu item.
-            // Audit terminal-view-2 F13. Presence-only: `availableType`
-            // does not decode the payload, so a multi-MB clipboard costs
-            // O(1) per validation pass instead of a full copy + UTF-8
-            // decode on main; `paste(_:)` does the real read.
+            // Presence-only: `availableType` does not decode the payload.
             return session != nil && NSPasteboard.general.availableType(from: [.string]) != nil
         case #selector(performFindPanelAction(_:)),
              #selector(showFindBar(_:)):               return currentSnapshot != nil
         case #selector(performFindNextAction(_:)),
              #selector(performFindPreviousAction(_:)):
-            // Gate on an ACTIVE search, not on a non-empty match cache. A regex
-            // rescan empties `findMatches` synchronously and republishes from a
-            // background scan (up to its 250 ms deadline) on every streamed
-            // snapshot, and `advanceFind` defers a ⌘G pressed in that gap via
-            // `pendingRegexAdvance`. A substring query can likewise be stale-
-            // empty until `advanceFind`'s `refreshFindMatchesIfStale` re-scans.
-            // Disabling the item here would stop the key before `advanceFind`
-            // ever ran and lose the keystroke.
+            // Gate on an active search, not a non-empty match cache: a rescan empties `findMatches`
+            // transiently, and a disabled item would drop a ⌘G that `advanceFind` would have deferred.
             let find = findController
             return !find.findMatches.isEmpty || (find.findBar != nil && !find.findQuery.isEmpty)
         case #selector(toggleFindCaseSensitive(_:)):
@@ -54,10 +30,6 @@ extension TerminalView: NSMenuItemValidation {
         case #selector(clearBufferAndScrollback(_:)):  return session != nil
         case #selector(jumpToPreviousPrompt(_:)),
              #selector(jumpToNextPrompt(_:)):
-            // Same pattern: disabling until OSC 133 marks exist is more
-            // honest in the menu. (A disabled ⌘ chord falls through to
-            // `keyDown`, which hands it to `super` and ends in the standard
-            // unhandled-key beep, so the keyboard path still beeps.)
             return (session?.promptMarks.isEmpty == false)
         case #selector(increaseFontSize(_:)),
              #selector(decreaseFontSize(_:)),
@@ -68,10 +40,6 @@ extension TerminalView: NSMenuItemValidation {
 
     public override func menu(for event: NSEvent) -> NSMenu? {
         let m = NSMenu()
-        // Surface "Open Link" / "Copy Link" when the right-click lands on
-        // a resolvable URL (OSC 8 hyperlink or regex-detected). Safari-
-        // parity affordance; without it users can only reach URLs via
-        // ⌘-click which is hidden UI. Audit terminal-view-2 F27.
         let p = bufferPointFromEvent(event)
         let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
         if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
@@ -89,11 +57,7 @@ extension TerminalView: NSMenuItemValidation {
             m.addItem(copyLinkItem)
             m.addItem(NSMenuItem.separator())
         } else if let blockedHref = blockedDivergentOSC8Href(screenRow: screenRow, col: p.col) {
-            // The ⌘-click anti-phishing gate blocks this OSC 8 link because the
-            // visible anchor's host differs from the href. Offer a deliberate,
-            // clearly-labelled COPY (not open) so a legitimate divergent link
-            // isn't permanently unreachable — the user pastes into the browser
-            // and sees the real destination host before committing.
+            // An OSC 8 link whose visible host differs from its href: offer copy only, never open.
             let copyMismatch = NSMenuItem(title: "Copy Link (host mismatch)",
                                           action: #selector(copyResolvedLink(_:)),
                                           keyEquivalent: "")
@@ -124,8 +88,7 @@ extension TerminalView: NSMenuItemValidation {
     }
 }
 
-/// Receives Ctrl+Return from `ContextMenuKeyInterceptor`, which AppKit would
-/// otherwise swallow (it opens the right-click menu and skips `keyDown`).
+/// AppKit swallows Ctrl+Return (it opens the context menu and skips `keyDown`); the interceptor forwards it here.
 extension TerminalView: ContextMenuKeyReceiving {
     func receiveContextMenuChord(_ event: NSEvent) -> Bool {
         guard session != nil else { return false }

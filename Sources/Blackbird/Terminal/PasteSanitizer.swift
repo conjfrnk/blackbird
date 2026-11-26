@@ -1,18 +1,8 @@
 import Foundation
 
-/// The paste/copy/drop sanitization chain — the app's defense against
-/// paste-injection (CVE-2026-26982 class), Trojan-Source bidi, and
-/// bracketed-paste breakout. Six pure byte/string transforms extracted verbatim
-/// from the TerminalView+Paste NSView extension (REFACTOR.md Part III §3): they
-/// are view-independent and security-critical, so they belong in one
-/// fuzz/unit-testable type rather than welded to a 3,000-line view. The
-/// pipeline order is load-bearing (normalize → control-scrub → bidi-strip, then
-/// bracketed vs LF→CR); Variation Selectors are stripped only from *display*
-/// (scrubURLForDisplay), never from paste/drop bytes.
+/// Paste/copy/drop sanitization chain. The pipeline order is load-bearing: normalize → control-scrub → bidi-strip, then
+/// bracketed vs LF→CR. Variation Selectors are stripped only from display (`scrubURLForDisplay`), never from paste/drop bytes.
 enum PasteSanitizer {
-    /// Finish a copy-on-first-hit rewrite: if no hit was recorded the input is
-    /// returned untouched (clean text allocates nothing); otherwise the clean
-    /// tail after the last hit is appended and the result wrapped once.
     private static func finishRewrite(
         _ input: Data, _ out: inout [UInt8], dirty: Bool,
         _ p: UnsafeRawBufferPointer, from runStart: Int
@@ -22,9 +12,6 @@ enum PasteSanitizer {
         return Data(out)
     }
 
-    /// Record a hit at `i`: bulk-copy the clean run `runStart..<i` into `out`
-    /// (allocating it on the first hit) so the scan loops stay copy-free until
-    /// something actually needs rewriting.
     private static func flushRun(
         _ out: inout [UInt8], dirty: inout Bool,
         _ p: UnsafeRawBufferPointer, from runStart: Int, to i: Int
@@ -36,21 +23,8 @@ enum PasteSanitizer {
         out.append(contentsOf: UnsafeRawBufferPointer(rebasing: p[runStart..<i]))
     }
 
-    /// Replace every LF (0x0A) with CR (0x0D), the byte a keyboard Return
-    /// sends and what xterm / alacritty / kitty deliver for each line break of
-    /// a non-bracketed paste. CR-LF pairs are already collapsed to LF by
-    /// `normalizePasteLineEndings`, so each line break is one LF (or one lone
-    /// CR, which stays as is) and comes out as exactly one CR.
-    ///
-    /// Why CR and not LF: a raw-mode program without bracketed paste that
-    /// binds only CR to Enter (macOS's built-in `/usr/bin/nano`, UW Pico, where
-    /// ^J is Justify) merges the lines of an LF paste into one paragraph.
-    /// Cooked-mode programs are unaffected, since ICRNL maps the CR back to NL,
-    /// and readline / ZLE / fish take CR as Enter just as they take LF.
-    ///
-    /// Like every transform below, this scans `withUnsafeBytes` with integer
-    /// indices (Data's per-byte `index(after:)` / `append` is ~20x slower) and
-    /// returns `input` untouched when nothing needs rewriting.
+    /// CR, not LF: a raw-mode program without bracketed paste that binds only CR to Enter (`/usr/bin/nano`, Pico, where
+    /// ^J is Justify) merges the lines of an LF paste. Cooked mode is unaffected: ICRNL maps the CR back to NL.
     static func convertLFToCR(_ input: Data) -> Data {
         guard input.contains(0x0A) else { return input }
         return input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
@@ -63,11 +37,7 @@ enum PasteSanitizer {
         }
     }
 
-    /// Collapse CRLF → LF in pasted content. Cross-platform clipboards (Windows,
-    /// web copy) often carry CRLF; the PTY's ICRNL flag then maps the CR to an
-    /// extra LF, so a two-line paste becomes four shell prompts. Matches
-    /// Terminal.app / iTerm2 behaviour. Lone CR is left alone — it's rare in
-    /// real paste content and some applications still want it as Enter.
+    /// CRLF → LF: the PTY's ICRNL flag would otherwise map the CR to an extra LF. A lone CR is left alone.
     static func normalizePasteLineEndings(_ input: Data) -> Data {
         guard input.contains(0x0D) else { return input }
         return input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
@@ -77,8 +47,6 @@ enum PasteSanitizer {
             var runStart = 0
             var i = 0
             while i < n {
-                // Single left-to-right pass: a CR LF pair drops its CR, and
-                // the LF is part of the run (CR CR LF → CR LF).
                 if p[i] == 0x0D, i + 1 < n, p[i + 1] == 0x0A {
                     flushRun(&out, dirty: &dirty, p, from: runStart, to: i)
                     i += 1
@@ -90,28 +58,8 @@ enum PasteSanitizer {
         }
     }
 
-    /// Replace C0 + C1 control bytes (other than TAB / LF / CR) and DEL
-    /// with a space. Applied before *every* paste, whether bracketed or
-    /// not.
-    ///
-    /// Rationale: a pasted payload can carry `0x03` (Ctrl+C), `0x1A`
-    /// (Ctrl+Z), `0x1B` (ESC), or `0x7F` (DEL) in the C0 set, each of
-    /// which — delivered raw to the shell — either interrupts the
-    /// current line and runs the bytes that follow (the iTerm2 /
-    /// Ghostty CVE-2026-26982 class) or drives the remote into an
-    /// unexpected mode via escape sequences embedded in plain text.
-    ///
-    /// The same applies to the **C1 set** (0x80–0x9F), which xterm's
-    /// `allowC1Printable` default treats as control bytes. Encoded in
-    /// UTF-8 as `0xC2 0x80 … 0xC2 0x9F`, these include 0x9B (CSI),
-    /// 0x9D (OSC), 0x90 (DCS) — ESC-free alternate forms of the same
-    /// attack surface. A sanitizer that only strips ESC leaves the
-    /// door open; we strip both lead bytes of the C1 UTF-8 sequence
-    /// so the decoded scalar never reaches the parser.
-    ///
-    /// Replacing with space keeps byte offsets stable so column-
-    /// formatted paste still lines up. Matches Ghostty ≥1.3.0 and
-    /// xterm's default paste sanitizer.
+    /// Replaces C0 (except TAB / LF / CR), DEL and the C1 set with a space, before every paste, bracketed or not.
+    /// C1 (0x80–0x9F) is UTF-8 `C2 80`…`C2 9F` and holds ESC-free CSI (0x9B), OSC (0x9D) and DCS (0x90).
     static func sanitizePasteControls(_ input: Data) -> Data {
         input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
             let n = p.count
@@ -121,35 +69,23 @@ enum PasteSanitizer {
             var i = 0
             while i < n {
                 let b = p[i]
-                // Common case first: printable ASCII / high bytes that are
-                // neither C0, DEL, nor the C1 lead 0xC2.
                 if b >= 0x20, b != 0x7F, b != 0xC2 {
                     i += 1
                     continue
                 }
-                // TAB / LF / CR pass through — legitimate whitespace in paste.
-                // (CR is normalised to LF upstream, but a lone CR arriving
-                // from an old-Mac-encoded file is still valid input.)
                 if b == 0x09 || b == 0x0A || b == 0x0D {
                     i += 1
                     continue
                 }
                 var consumed = 1
                 if b == 0xC2 {
-                    // C1 controls encoded as UTF-8: lead 0xC2 followed by a
-                    // byte in 0x80–0x9F. Replace the whole two-byte scalar
-                    // with a single space so the parser never sees 0x9B /
-                    // 0x9D / 0x90. Lone continuation bytes are invalid UTF-8
-                    // and left to the parser's UTF-8 state machine; we only
-                    // match the valid C1 encoding pattern.
+                    // Only the valid C1 encoding is matched; lone continuation bytes are left to the parser.
                     guard i + 1 < n, (0x80...0x9F).contains(p[i + 1]) else {
                         i += 1
                         continue
                     }
                     consumed = 2
                 }
-                // C0 (0x00–0x1F excluding TAB/LF/CR), DEL (0x7F), or a C1
-                // scalar → one space.
                 flushRun(&out, dirty: &dirty, p, from: runStart, to: i)
                 out.append(0x20)
                 i += consumed
@@ -159,66 +95,8 @@ enum PasteSanitizer {
         }
     }
 
-    /// Drop every Unicode bidi-control / zero-width / invisible-payload
-    /// codepoint from a paste payload. Three families of attack:
-    ///
-    ///   1. Bidi reordering (Trojan Source CVE-2021-42574 + follow-ups):
-    ///      U+202A-E embedding/override, U+2066-9 isolates, U+200E/F
-    ///      directional marks, U+061C ALM, U+180E MVS.
-    ///   2. Zero-width / line-separator smuggling: U+200B (ZWSP),
-    ///      U+2060 (Word Joiner), U+FEFF (BOM/ZWNBSP),
-    ///      U+00AD (soft hyphen), U+2028 (LS), U+2029 (PS). Some shells/
-    ///      REPLs (Python, zsh `bindkey -e` paste-bracket) treat LS/PS
-    ///      as line terminators, so a "single-line" paste can sneak in
-    ///      a second command. Zero-width chars hide bytes between
-    ///      identifier-shaped tokens (tab-completion homograph, log
-    ///      injection).
-    ///   3. Tag-character invisible payload: U+E0000-E007F. The
-    ///      "Imperceptible Indicator" attack — an invisible string can
-    ///      ride along inside a benign paste and replay through a
-    ///      subsequent `pbpaste` / clipboard manager / log shipper.
-    ///   4. Variation selectors: U+FE00-FE0F (VS1-16), U+E0100-E01EF
-    ///      (VS17-256). Modify rendering of the prior glyph; pasted on
-    ///      their own they invisibly mutate adjacent characters in
-    ///      whatever surface the paste lands in (commit messages,
-    ///      issue trackers, log output).
-    ///
-    /// Full byte map (UTF-8):
-    ///
-    ///   U+00AD  SHY   C2 AD               soft hyphen (2-byte)
-    ///   U+061C  ALM   D8 9C               Arabic letter mark (2-byte)
-    ///   U+180E  MVS   E1 A0 8E            Mongolian vowel separator (3)
-    ///   U+200B   ZWSP          E2 80 8B
-    ///   U+200E/F LRM/RLM       E2 80 8E/8F
-    ///   U+202A-E LRE/RLE/PDF/LRO/RLO E2 80 AA-AE
-    ///   U+2028  LS    E2 80 A8            line separator
-    ///   U+2029  PS    E2 80 A9            paragraph separator
-    ///   U+2060  WJ    E2 81 A0            word joiner
-    ///   U+2066-9 LRI/RLI/FSI/PDI E2 81 A6-A9
-    ///   U+FEFF  BOM   EF BB BF            byte order mark (ZWNBSP)
-    ///   U+E0000-E007F tag block F3 A0 80 80 - F3 A0 81 BF (4-byte)
-    ///
-    /// These are rare in legitimate text — Unicode's bidi algorithm
-    /// handles Arabic / Hebrew automatically. Stripping is safer than
-    /// rendering. Audit M3 / M4.
-    ///
-    /// U+200C ZWNJ and U+200D ZWJ (E2 80 8C / E2 80 8D) are deliberately
-    /// NOT stripped: they are content, not noise. ZWJ glues emoji sequences
-    /// (family, technologist, rainbow flag) and selects Indic half-forms;
-    /// ZWNJ is part of Persian / Indic orthography. Stripping them silently
-    /// split every ZWJ emoji into its parts and respelled Persian words on
-    /// copy, paste, OSC 52 and dropped filenames. Like Variation Selectors
-    /// they cannot reorder text or inject a control byte.
-    /// `scrubURLForDisplay` still strips them for chrome surfaces.
-    ///
-    /// Variation Selectors (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF)
-    /// are deliberately NOT stripped: unlike the bidi / zero-width set
-    /// above, they only change how the immediately-preceding visible
-    /// glyph renders, so they cannot reorder or hide pasted text and
-    /// they are a legitimate part of pasted emoji ("❤️" = U+2764 U+FE0F,
-    /// keycaps like "1️⃣", …). Stripping them silently corrupted every
-    /// paste / drop carrying an emoji-presentation selector. See the
-    /// rationale block in `TerminalView+Dragging.sanitizeDropPath`.
+    /// Drops bidi controls, zero-width and line-separator scalars (some REPLs treat U+2028/9 as line terminators) and tag characters.
+    /// ZWNJ/ZWJ (U+200C/D) and Variation Selectors are kept: they are content (emoji sequences, Persian / Indic orthography) and cannot reorder text.
     static func stripBidiOverrides(_ input: Data) -> Data {
         input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
             let n = p.count
@@ -228,8 +106,6 @@ enum PasteSanitizer {
             var i = 0
             while i < n {
                 let b0 = p[i]
-                // Lead bytes for any tracked codepoint are C2 / D8 / E1 / E2 /
-                // EF / F3; everything else (all ASCII) can't start a match.
                 guard b0 == 0xC2 || b0 == 0xD8 || b0 == 0xE1
                     || b0 == 0xE2 || b0 == 0xEF || b0 == 0xF3
                 else {
@@ -241,9 +117,7 @@ enum PasteSanitizer {
 
                 if remaining >= 2 {
                     let b1 = p[i + 1]
-                    // 2-byte sequences:
-                    //   U+00AD soft hyphen (C2 AD)
-                    //   U+061C ALM        (D8 9C)
+                    // U+00AD soft hyphen (C2 AD), U+061C ALM (D8 9C).
                     if (b0 == 0xC2 && b1 == 0xAD) || (b0 == 0xD8 && b1 == 0x9C) {
                         matched = 2
                     }
@@ -252,16 +126,8 @@ enum PasteSanitizer {
                 if matched == 0, remaining >= 3 {
                     let b1 = p[i + 1]
                     let b2 = p[i + 2]
-                    // 3-byte sequences:
-                    //   U+180E MVS               (E1 A0 8E)
-                    //   U+200B ZWSP, U+200E/F LRM/RLM (E2 80 8B, 8E, 8F)
-                    //   U+2028/9 LS/PS           (E2 80 A8/A9)
-                    //   U+202A-E embed/override  (E2 80 AA-AE)
-                    //   U+2060 WJ                (E2 81 A0)
-                    //   U+2066-9 isolates        (E2 81 A6-A9)
-                    //   U+FEFF BOM               (EF BB BF)
-                    // (VS1-16, EF B8 80..8F, and ZWNJ/ZWJ, E2 80 8C/8D, are
-                    // deliberately preserved — see the doc comment above.)
+                    // U+180E MVS (E1 A0 8E); U+200B ZWSP, U+200E/F LRM/RLM (E2 80 8B/8E/8F); U+2028/9 LS/PS, U+202A-E
+                    // (E2 80 A8-AE); U+2060 WJ (E2 81 A0); U+2066-9 isolates (E2 81 A6-A9); U+FEFF BOM (EF BB BF).
                     if b0 == 0xE1, b1 == 0xA0, b2 == 0x8E {
                         matched = 3
                     } else if b0 == 0xE2 {
@@ -276,24 +142,12 @@ enum PasteSanitizer {
                     }
                 }
 
-                // 4-byte sequences:
-                //   U+E0000-E007F tag block   (F3 A0 80 80 - F3 A0 81 BF)
-                // (VS17-256, F3 A0 84 80 - F3 A0 87 AF, is deliberately
-                // preserved — see the doc comment above.)
                 if matched == 0, remaining >= 4, b0 == 0xF3 {
                     let b1 = p[i + 1]
                     let b2 = p[i + 2]
                     let b3 = p[i + 3]
-                    // Tag block U+E0000–E007F: F3 A0 {80|81} XX, where XX must
-                    // be a UTF-8 continuation byte (0x80–0xBF) for the four
-                    // bytes to form a valid scalar. Validate b3 so a
-                    // *malformed* lead `F3 A0 80 <non-continuation>` is NOT
-                    // mistaken for a tag-block scalar and over-consumed —
-                    // over-consuming would silently drop the byte after the
-                    // prefix. Like every other near-miss above (e.g.
-                    // `C2 <not AD>`, `E2 80 <out of range>`), an unrecognised
-                    // lead falls through and is preserved verbatim. Audit
-                    // S3-005.
+                    // Tag block U+E0000–E007F: F3 A0 {80|81} XX. XX must be a continuation byte, or a malformed
+                    // lead would be over-consumed and the byte after the prefix silently dropped.
                     if b1 == 0xA0, b2 == 0x80 || b2 == 0x81, (0x80...0xBF).contains(b3) {
                         matched = 4
                     }
@@ -311,41 +165,14 @@ enum PasteSanitizer {
         }
     }
 
-    /// Scrub a remote-controlled string for safe display in chrome
-    /// surfaces (hover tooltip, "Open in Finder" affordance, OSC 7 cwd
-    /// in the proxy icon, etc.). Stricter than `sanitizePasteControls`
-    /// + `stripBidiOverrides`: chrome surfaces are single-line and a
-    /// legitimate URL never contains TAB/LF/CR, so those pass-through
-    /// bytes get dropped here rather than preserved.
-    ///
-    /// Audit critical-1: the OSC 8 hover tooltip is the user's
-    /// "verify before clicking" affordance. A hostile remote that
-    /// emits `ESC]8;;https://evil.tld/login\u{202E}moc.elppa//:sptth\x07`
-    /// stores the bidi override in the link table; `URL(string:)`
-    /// accepts the percent-encoded form so the click target stays
-    /// `https://evil.tld/...`, but if the tooltip renders the bidi
-    /// override the user reads `https://apple.com/login` and the
-    /// affordance is defeated. The same pattern applies to any
-    /// snapshot-derived string we surface in chrome.
+    /// For single-line chrome surfaces (hover tooltip, OSC 7 cwd in the proxy icon). The OSC 8 tooltip is the user's
+    /// "verify before clicking" affordance: a bidi override surviving into it makes a hostile URL read as a trusted one.
     static func scrubURLForDisplay(_ s: String) -> String {
         var bytes = sanitizePasteControls(Data(s.utf8))
-        // sanitizePasteControls keeps TAB/LF/CR (legitimate in paste);
-        // a chrome surface is single-line, so drop them. Replace with
-        // nothing rather than space — a fake space could survive
-        // truncation and look like part of the URL host.
+        // Dropped, not replaced with a space: a fake space could survive truncation and look like part of the URL host.
         bytes = bytes.filter { $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }
         bytes = stripBidiOverrides(bytes)
-        // `stripBidiOverrides` deliberately PRESERVES Variation Selectors
-        // (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF) and ZWNJ/ZWJ
-        // (U+200C/U+200D) — they're legitimate in pasted/dropped *data*
-        // (see its doc comment). But this is a *display* scrubber for the
-        // "verify before clicking" affordance, where exact glyph fidelity
-        // is a non-goal and an invisible scalar riding a host character
-        // must not survive into the tooltip. So strip them here, matching
-        // the display posture of `DiagnosticFileLoader.stripControlCharacters`.
-        // They only restyle/join the neighbouring glyphs and can't reorder
-        // a host, so this is defense-in-depth, not the primary bidi guard
-        // above.
+        // Display only: also strip the Variation Selectors and ZWNJ/ZWJ that `stripBidiOverrides` preserves.
         let scrubbed = String(decoding: bytes, as: UTF8.self)
         return String(scrubbed.unicodeScalars.filter {
             !((0xFE00...0xFE0F).contains($0.value)
@@ -354,18 +181,8 @@ enum PasteSanitizer {
         })
     }
 
-    /// Strip any literal `ESC [ 2 0 1 ~` terminators from a bracketed-paste
-    /// payload so they can't prematurely close the paste window and let
-    /// subsequent bytes execute as shell input — the classic paste-injection
-    /// attack. Copying another terminal's output that happens to include
-    /// that exact sequence is the realistic trigger. We only redact the
-    /// closing marker (ESC[200~ inside a paste is harmless — bracketed paste
-    /// doesn't nest).
-    ///
-    /// Post-`sanitizePasteControls` this is largely redundant (ESC is
-    /// already stripped), but we keep the second-stage defence so a future
-    /// refactor that loosens the controls pass doesn't silently re-open the
-    /// nested-paste attack surface.
+    /// Removes literal `ESC [ 2 0 1 ~` terminators so a payload cannot close the paste window early (`ESC [ 200 ~` is harmless: bracketed
+    /// paste does not nest). Largely redundant after `sanitizePasteControls` strips ESC; kept as a second stage in case that pass is loosened.
     static func sanitizeBracketedPaste(_ input: Data) -> Data {
         let terminator: [UInt8] = [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]
         let tlen = terminator.count
@@ -376,8 +193,6 @@ enum PasteSanitizer {
             var dirty = false
             var runStart = 0
             var i = 0
-            // Only an ESC can start the terminator, so the common (ESC-free)
-            // case is a single byte compare per position.
             while i + tlen <= n {
                 guard p[i] == terminator[0] else {
                     i += 1
@@ -400,24 +215,11 @@ enum PasteSanitizer {
         }
     }
 
-    /// Wrap a file path in single quotes, stepping outside the quotes for
-    /// the only two characters that can't live inside them on every shell
-    /// we ship integration for: `'` becomes `'\''` and `\` becomes `'\\'`.
-    /// Single-quoted strings in sh/bash/zsh/fish suppress *all* other
-    /// metacharacter interpretation (spaces, `$`, backticks, newlines,
-    /// globs), so this is safe against arbitrary filesystem paths.
-    ///
-    /// The backslash rewrite is for fish: inside fish single quotes `\\` and
-    /// `\'` are escapes, so a name like `a\' ; cmd #` would swallow the
-    /// quote of a bare `'\''` and run the tail as a command. Keeping every
-    /// backslash outside the quotes, where `\\` and `\'` are a literal `\`
-    /// and `'` in POSIX shells and fish alike, makes one quoting valid
-    /// everywhere. (Drop-path shell-quoting, co-located with the
-    /// paste/drop sanitizers — REFACTOR.md Part III §3.)
+    /// Single quotes, stepping outside them for `'` (`'\''`) and `\` (`'\\'`). The backslash rewrite is for fish,
+    /// where `\\` and `\'` are escapes inside single quotes: a bare `'\''` after a `\` would run the tail as a command.
     static func shellQuote(_ path: String) -> String {
         var quoted = "'"
-        // Single pass over scalars: replacing `'` first would feed the
-        // backslash of `'\''` back into a second `\` rewrite.
+        // Single pass over scalars: replacing `'` first would feed the backslash of `'\''` into the `\` rewrite.
         for scalar in path.unicodeScalars {
             switch scalar {
             case "'": quoted += "'\\''"
@@ -428,10 +230,6 @@ enum PasteSanitizer {
         return quoted + "'"
     }
 
-    /// Join N dropped file paths into a single space-separated, shell-quoted
-    /// string. Matches Terminal.app / iTerm2 behaviour: no trailing slash on
-    /// directories, no trailing newline, no per-file prompt. The caller feeds
-    /// the result through `pasteText(_:)`.
     static func joinedDroppedPaths(_ paths: [String]) -> String {
         paths.map(shellQuote).joined(separator: " ")
     }

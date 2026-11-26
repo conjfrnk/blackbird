@@ -1,81 +1,27 @@
 import BBCore
 import simd
 
-/// VT-cell → GPU-instance translation, hoisted out of `MetalRenderer` so the
-/// cell-row → `CellInstance` responsibility lives in one unit-testable value
-/// type instead of being smeared across the renderer's stateful methods.
-///
-/// The builder captures the per-frame visual inputs BY VALUE (theme colours,
-/// insets, ⌘-hover range, hovered link id, metrics) plus a REFERENCE to the
-/// live `GlyphAtlas` (glyph lookup mutates it on a miss — rasterize-and-store —
-/// and `GlyphAtlas` is a `final class`, so the by-value capture is a reference
-/// to the same instance the renderer holds; the rasterized slot is therefore
-/// visible to the encoder that runs after the build).
-///
-/// BOUNDARY: the builder NEVER touches the triple-buffer ring, the inflight
-/// semaphore, the slot lifecycle, the command buffer, or the renderer's
-/// skip-cache. `MetalRenderer.buildInstances` constructs the builder once per
-/// non-skipped frame, hands it each row's target `[CellInstance]` array to
-/// fill, and then owns the flatten-into-GPU-buffer + slot-grow step itself.
-/// The builder only reads its captured inputs and appends to the `out` array.
+/// VT-cell → GPU-instance translation for `MetalRenderer`.
 struct CellInstanceBuilder {
-    /// Cell geometry (cellWidth / cellHeight). The builder reads only those two
-    /// fields, but holds the whole value for parity with the renderer's call
-    /// sites — `metrics` only ever changes through `MetalRenderer.reconfigure`,
-    /// never mid-build.
     let metrics: CellMetrics
-    /// OSC 8 link id currently under the pointer. Cells with matching `link_id`
-    /// receive the accent underline via the `linkHover` attribute bit. Zero
-    /// means "no hovered link".
+    /// Zero means "no hovered link".
     let hoveredLinkID: UInt16
-    /// ⌘-held regex URL range under the pointer, keyed on *buffer* line so the
-    /// underline survives scrollback motion. `cmdHoverStartCol < 0` disables the
-    /// branch entirely (the "no range" sentinel).
+    /// Keyed on *buffer* line. `cmdHoverStartCol < 0` means "no range".
     let cmdHoverBufferLine: Int32
     let cmdHoverStartCol: Int32
     let cmdHoverEndCol: Int32
-    /// Theme-derived colour inputs consumed by `resolveColors` + the block-cursor
-    /// inversion path. `defaultBgRgb` is the "treat as transparent" sentinel bg;
-    /// `keepBgOpaque` / `backgroundOpacity` drive the explicit-bg alpha policy;
-    /// `cursorColor` paints the focused block-cursor body (forced opaque).
     let defaultBgRgb: UInt32
     let keepBgOpaque: Bool
     let backgroundOpacity: Float
     let cursorColor: SIMD4<Float>
-    /// Theme-derived selection highlight and the foreground substituted for
-    /// selected cells whose own fg lacks contrast against it (v0.8.1; the
-    /// highlight was a hard-coded blue and fg was left as-is).
     let selectionColor: SIMD4<Float>
     let selectionForeground: SIMD4<Float>
-    /// Layout offsets in points added to every cell quad — the same values
-    /// TerminalView feeds the renderer via `setTopInsetPoints` /
-    /// `setLeftInsetPoints` on each `layout()`.
     let leftInsetPoints: Float
     let topInsetPoints: Float
-    /// Live glyph atlas (REFERENCE — `GlyphAtlas` is a class). `emitCell` calls
-    /// `lookupOrInsert`, which rasterises a missing glyph into the atlas in
-    /// place; because this is the same instance the renderer holds, the new slot
-    /// is visible to `encodeCells` later in the same frame. MUST stay a
-    /// reference (never copied) so the rasterize-on-miss is not lost.
+    /// Must be the instance the renderer holds: `lookupOrInsert` rasterises a missing glyph into it in place.
     let atlas: GlyphAtlas
 
-    /// Rebuild instances for a single visible row into `out`, consulting
-    /// snapshot cells, selection, hover, and cursor-inversion state. Pure
-    /// apart from the output parameter and the atlas mutation-on-miss — does
-    /// not touch GPU buffers or renderer cache state. Called by
-    /// `MetalRenderer.buildInstances` for every row on a full rebuild, or only
-    /// for the damaged rows on a partial rebuild.
-    ///
-    /// Appends to `out` in place (pre-cleared by the caller with
-    /// `removeAll(keepingCapacity: true)`) instead of returning a fresh
-    /// `[CellInstance]`: rows emit a variable count of instances (blank
-    /// cells contribute nothing; wide-glyph rows emit fewer than cols;
-    /// selection/link-hover may push to 1-per-cell), and on a partial
-    /// rebuild the caller would otherwise free the prior array's storage
-    /// and allocate a new one each frame. Keeping the backing buffer
-    /// eliminates up to 80 heap alloc/free pairs per full rebuild, which
-    /// at 120 Hz is ~9 600 heap operations/sec off the CPU. Audit
-    /// metal-renderer F5.
+    /// Appends to `out`, which the caller pre-clears.
     func buildRow(
         snapshot: BBSnapshot,
         row: Int,
@@ -89,60 +35,25 @@ struct CellInstanceBuilder {
         let cellsPtr = snapshot.cellsPointer
         let cols = snapshot.cols
         let hoveredID = hoveredLinkID
-        // Row in *buffer* space (scrollback-adjusted) — the ⌘-hover range
-        // is keyed on buffer line so the underline survives scrolling
-        // without the caller re-resolving the pointer on every snapshot.
-        // `Int32(clamping:)` for parity with the M-16 sites: the
-        // subtraction operates on `Int`s sourced from BBCore, and a
-        // future regression that lets either operand exceed Int32's
-        // range (or pushes the difference negative-overflow) would
-        // trap the renderer mid-frame. Clamping keeps the contract
-        // pinned at the cast site. Audit UR-2 (2026-04-29).
         let rowBufferLine = Int32(clamping: row - snapshot.displayOffset)
         let cmdHoverActiveOnThisRow =
             cmdHoverStartCol >= 0
             && cmdHoverBufferLine == rowBufferLine
-        // Upper bound: every cell emits at most one instance. Reserve so
-        // the common case avoids growing the array — a no-op when `out`
-        // already has >= cols capacity from the prior frame.
         out.reserveCapacity(cols)
 
-        // Both of these are row-invariant but were being re-read per cell.
-        // They resolve to loads through `handle.pointee` — Rust-owned memory
-        // the optimizer can't prove unchanged across `out.append` (may
-        // realloc), the `isSelected` closure call, or an atlas miss reaching
-        // CoreText — so they really were re-issued every iteration.
-        // `BBSnapshot` wraps an immutable retained snapshot, so hoisting is
-        // bit-identical.
         let cellCount = snapshot.cellCount
-        // `Int32(clamping:)` per UR-2 — same defense-in-depth rationale as
-        // the `rowBufferLine` site above. Deliberately NOT reusing that
-        // value: it clamps the difference, this clamps each operand and then
-        // subtracts, and they diverge in overflow corners.
+        // Not `rowBufferLine`: that clamps the difference, this clamps each operand, and they
+        // diverge in overflow corners.
         let bufferLine = Int32(clamping: row) - Int32(clamping: snapshot.displayOffset)
 
         for col in 0..<cols {
             let idx = row * cols + col
-            // `cellsPtr` is a raw pointer; reading past `cellCount` would
-            // be UB, not a trap. Same invariant alacritty guarantees but
-            // re-checked here so a buggy snapshot can't cascade.
+            // `cellsPtr` is a raw pointer: reading past `cellCount` is UB, not a trap.
             if idx >= cellCount { break }
             let cell = cellsPtr[idx]
 
-            // The spacer right of a WIDE_CHAR is already covered by that
-            // glyph's 2x quad, which paints the leading cell's bg / selection
-            // tint / decorations across both columns (a selection edge that
-            // splits the pair follows the leading cell). Instances draw in
-            // column order with opaque (ONE / ONE_MINUS_SRC_ALPHA) blending,
-            // so a bg quad emitted here lands AFTER the glyph and overpaints
-            // its right half (日 -> E). The one exception is a block cursor
-            // parked on the spacer that is NOT selected: it paints its
-            // cursor-coloured quad (selection wins over the cursor, so a
-            // selected spacer draws no cursor and is skipped like any other).
-            // `MetalRenderer` never hands it that cell for a WIDE_CHAR pair
-            // (it moves the cursor to the leading cell), so this is a
-            // defensive path for callers that pass a raw column.
-            // An orphan spacer (no WIDE_CHAR to its left) falls through.
+            // The spacer right of a WIDE_CHAR is covered by that glyph's 2x quad; a quad emitted here draws
+            // after the glyph and overpaints its right half. Exception: an unselected block cursor on the spacer.
             if col > 0,
                Self.isSpacerCoveredByWideGlyph(cell: cell, leftNeighbor: cellsPtr[idx - 1]) {
                 let cursorOnSpacer = blockCursorCell?.row == row && blockCursorCell?.col == col
@@ -157,8 +68,6 @@ struct CellInstanceBuilder {
                 cmdHoverEndCol: cmdHoverEndCol,
                 col: col
             )
-            // Base fg/bg after reverse/dim/default-bg resolution (pre-selection,
-            // pre-cursor). `var fg` because the block-cursor path overwrites it.
             let resolved = Self.resolveColors(
                 cell: cell,
                 defaultBg: defaultBgRgb,
@@ -168,10 +77,8 @@ struct CellInstanceBuilder {
             var fg = resolved.fg
             let hasBg = resolved.hasBg
 
-            // A selection that starts on the right half of a wide glyph (its
-            // spacer) already copies the glyph (`extract_text_range` backs up
-            // onto the leading cell), and the spacer's own quad is skipped
-            // above, so the leading cell's 2x quad must carry the tint too.
+            // The spacer's own quad is skipped above, so the leading cell's 2x quad carries a
+            // selection that starts on the spacer.
             let selected = isSelected(bufferLine, col)
                 || ((cell.flags & UInt16(WIDE_CHAR)) != 0
                     && col + 1 < cols
@@ -179,22 +86,14 @@ struct CellInstanceBuilder {
             var effectiveBg = selected ? selectionTint : resolved.bg
             var effectiveHasBg = selected ? true : hasBg
             if selected, Self.contrastRatio(fg, selectionTint) < Self.minSelectedContrast {
-                // A foreground close to the highlight (light-blue prompt on
-                // a blue selection) disappeared when selected.
                 fg = selectionForeground
             }
 
-            // Invert at the cursor cell so the block cursor shows the
-            // underlying glyph in reverse-video. Selection wins over
-            // the cursor (matches iTerm2: selection highlight spans a
-            // cell even if the cursor is on it).
+            // Selection wins over the cursor.
             if !selected,
                let bc = blockCursorCell,
                bc.row == row,
                bc.col == col {
-                // Use whatever the cell's bg *would* have been (explicit
-                // or theme-default) as the glyph colour, so the
-                // character reads against the cursor's body.
                 let resolvedBg: UInt32 = hasBg ? cell.bg : defaultBgRgb
                 fg = Self.rgbToSIMD(resolvedBg)
                 effectiveBg = cursorColor
@@ -212,11 +111,6 @@ struct CellInstanceBuilder {
         }
     }
 
-    /// Pack one resolved cell into the instance buffer: position the quad,
-    /// skip wide-char spacers (unless a leading/orphan spacer needs a highlight),
-    /// double the quad for wide glyphs, look the glyph up in the atlas, and
-    /// append a `CellInstance` (glyph, accent-only, or bg-only as applicable).
-    /// `bg` / `hasBg` are the post-selection / post-cursor effective values.
     private func emitCell(
         cell: BBCell, col: Int, row: Int,
         cellW: Float, cellH: Float,
@@ -227,14 +121,7 @@ struct CellInstanceBuilder {
         let xPx = Float(col) * cellW + leftInsetPoints
         let yPx = Float(row) * cellH + topInsetPoints
 
-        // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right of (or
-        // on the wrapped-leading col before) a wide glyph. A spacer that
-        // follows its WIDE_CHAR only gets here as the unselected block-cursor
-        // cell (`buildRow` skips every other one: the 2x quad covers the
-        // column; this cursor quad does overpaint the glyph's right half).
-        // The rest have no glyph quad to their left (wrapped-leading or
-        // orphan spacer). Skip unless the selection highlight (or bg/accent)
-        // needs a bg quad.
+        // A spacer reaching here is the unselected block-cursor cell or has no glyph quad to its left.
         let isSpacer = (cell.flags &
             (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
         if isSpacer {
@@ -252,23 +139,16 @@ struct CellInstanceBuilder {
             return
         }
 
-        // WIDE_CHAR cells carry a CJK / wide-emoji glyph that logically spans
-        // two cells. The atlas rasterises them into a 2x-wide slot and reports
-        // a doubled uvSize.x; we draw a 2x-wide quad so the full glyph lands.
+        // The atlas rasterises WIDE_CHAR glyphs into a 2x-wide slot and reports a doubled uvSize.x.
         let isWide = (cell.flags & UInt16(WIDE_CHAR)) != 0
-        // EMOJI_PRESENTATION: a text-default base + VS16 (⚠️ ‼️ ❤️) — the atlas
-        // must rasterise the colour emoji from the base + VS16 grapheme rather
-        // than the monochrome base scalar.
+        // Text-default base + VS16: the atlas rasterises the colour emoji from the grapheme, not the base scalar.
         let isEmojiPresentation = (cell.flags & UInt16(EMOJI_PRESENTATION)) != 0
         let quadW = isWide ? cellW * 2.0 : cellW
         let quadSize = SIMD2<Float>(quadW, cellH)
 
         let scalar = cell.ch
-        // HIDDEN (SGR 8) cells keep their scalar in the grid but never get a
-        // glyph quad; they take the bg/accent-only path below like a space, so
-        // the selection tint and block cursor can't reveal them either.
+        // HIDDEN (SGR 8) cells never get a glyph quad, so the selection tint and block cursor cannot reveal them.
         let isConcealed = (cell.flags & UInt16(HIDDEN)) != 0
-        // Render cell if it has a glyph OR a non-default background.
         if scalar != 0 && scalar != 0x20 /* space */ && !isConcealed {
             let glyphStyle = GlyphAtlas.Style(
                 bold: (cell.flags & UInt16(BOLD)) != 0,
@@ -278,9 +158,6 @@ struct CellInstanceBuilder {
                let entry = atlas.lookupOrInsert(
                    scalar: us, wide: isWide, style: glyphStyle,
                    emojiPresentation: isEmojiPresentation) {
-                // Tell the fragment shader to sample the color atlas (texture 1)
-                // instead of the mono coverage atlas (texture 0) for this cell.
-                // Atlas `Entry.isColor` is the single source of truth.
                 var colorAttrs = attrs
                 if entry.isColor {
                     colorAttrs.x |= CellAttributeMask.isColorGlyph.rawValue
@@ -296,10 +173,7 @@ struct CellInstanceBuilder {
                 ))
             }
         } else if hasBg || attrs.x != 0 {
-            // Space with colored background (status lines, vim highlights),
-            // inside an active selection, or carrying an accent attribute (link
-            // hover). Draw a full-cell quad with zero coverage so the shader's
-            // bg/accent paths still fire.
+            // Zero-coverage quad so the shader's bg/accent paths still fire.
             out.append(CellInstance(
                 cellPosPx: SIMD2<Float>(xPx, yPx),
                 quadSizePx: quadSize,
@@ -312,12 +186,6 @@ struct CellInstanceBuilder {
         }
     }
 
-    /// Translate a cell's link-hover state + `cell_flags` into the
-    /// renderer-side attribute bitset the shader consumes: `attrs.x` is the
-    /// flag mask (link-hover, strike, the five underline variants), `attrs.z`
-    /// carries the CSI 58 underline colour forwarded as-is (the shader treats
-    /// `UNDERLINE_COLOR_UNSET` as "fall back to fg"). Pure — depends only on
-    /// its arguments. `internal` so `CellRenderHelpersTests` can pin the mapping.
     static func attributeBits(
         cell: BBCell,
         hoveredLinkID: UInt16,
@@ -330,20 +198,12 @@ struct CellInstanceBuilder {
         if hoveredLinkID != 0 && cell.link_id == hoveredLinkID {
             flags |= CellAttributeMask.linkHover.rawValue
         }
-        // ⌘-held regex URL highlight: the same accent underline the OSC 8
-        // hover uses, but gated on a buffer-line range instead of a link id.
-        // Applies only when the cell falls inside the active range on the
-        // active buffer line.
         if cmdHoverActiveOnRow {
             let c = Int32(col)
             if c >= cmdHoverStartCol && c <= cmdHoverEndCol {
                 flags |= CellAttributeMask.linkHover.rawValue
             }
         }
-        // Translate cell_flags bits that the shader needs to render into our
-        // flat renderer-side bitset. Cell flags live in Rust-stable constants
-        // (BBCore bridging header); mapping here keeps the shader ignorant of
-        // the Rust layout so a future cell_flags reshuffle stays local.
         let cf = cell.flags
         if (cf & UInt16(STRIKE)) != 0 { flags |= CellAttributeMask.strike.rawValue }
         if (cf & UInt16(UNDERLINE)) != 0 { flags |= CellAttributeMask.underline.rawValue }
@@ -351,18 +211,11 @@ struct CellInstanceBuilder {
         if (cf & UInt16(UNDERCURL)) != 0 { flags |= CellAttributeMask.undercurl.rawValue }
         if (cf & UInt16(UNDERLINE_DOTTED)) != 0 { flags |= CellAttributeMask.underlineDotted.rawValue }
         if (cf & UInt16(UNDERLINE_DASHED)) != 0 { flags |= CellAttributeMask.underlineDashed.rawValue }
-        // Pack CSI 58 underline colour into attrs.z. The shader treats
-        // UNDERLINE_COLOR_UNSET as "fall back to fg", so the cheapest path is
-        // to forward the u32 as-is.
+        // attrs.z carries the CSI 58 underline colour; the shader treats UNDERLINE_COLOR_UNSET as "fall back to fg".
         return SIMD4<UInt32>(flags, 0, cell.underline_color, 0)
     }
 
-    /// Resolve a cell's foreground / background colours and whether it needs a
-    /// background quad, applying REVERSE (SGR 7), DIM (SGR 2), default-bg
-    /// transparency, and the `keepBgOpaque` / `backgroundOpacity` alpha policy.
-    /// Returns the base colours BEFORE selection tint and block-cursor
-    /// inversion (the caller layers those). Pure — `internal` so the colour
-    /// resolution is unit-testable without a GPU.
+    /// Returns the base colours before selection tint and block-cursor inversion.
     static func resolveColors(
         cell: BBCell,
         defaultBg: UInt32,
@@ -371,53 +224,23 @@ struct CellInstanceBuilder {
     ) -> (fg: SIMD4<Float>, bg: SIMD4<Float>, hasBg: Bool) {
         var fg = rgbToSIMD(cell.fg)
         var bg = rgbToSIMD(cell.bg)
-        // Reverse video (SGR 7): swap the cell's fg and bg so the glyph reads
-        // against the inverted highlight. Forces a bg quad (we can't skip
-        // drawing into the clearColor because the "new bg" is the original fg,
-        // which is a real colour).
         let reverse = (cell.flags & UInt16(REVERSE)) != 0
         if reverse {
             let orig = fg
             fg = bg
             bg = orig
         }
-        // DIM (SGR 2): fade the fg halfway toward the cell's own bg so dimmed
-        // text reads softer without affecting bg. Applied after REVERSE so the
-        // resulting glyph colour (against the post-swap bg) is what's visibly
-        // dimmed. Fading toward the bg, not toward black: halving the fg only
-        // lowers contrast on a dark bg and RAISES it on a light theme, where
-        // faint text became the most contrasty text on screen.
-        //
-        // Audit L13. The blend happens on sRGB-encoded float components
-        // (matching `rgbToSIMD` which divides bytes by 255 without
-        // linearization). Strictly correct "perceived half luminance" would
-        // gamma-decode → blend linear → gamma-encode, which on a midgray maps
-        // to roughly 0.73 in sRGB-encoded space rather than 0.50. We
-        // deliberately keep the sRGB-encoded blend so DIM is consistent with
-        // the rest of the pipeline (cell composition, alpha blending, selection
-        // overlay) which all operate in sRGB-encoded space — gamma-correcting
-        // just DIM would visually clash. iTerm2 makes the same choice.
-        // Re-evaluate as a unit if the renderer ever moves to a fully-linear
-        // pipeline.
+        // DIM (SGR 2), applied after REVERSE, fades fg toward the cell's bg: halving toward black raises
+        // contrast on a light theme. Blended in sRGB-encoded space like the rest of the pipeline.
         if (cell.flags & UInt16(DIM)) != 0 {
             fg.x = (fg.x + bg.x) * 0.5
             fg.y = (fg.y + bg.y) * 0.5
             fg.z = (fg.z + bg.z) * 0.5
         }
-        // Treat the theme's default bg as "no bg" so the transparent clearColor
-        // can show through. Cells with explicit colors (vim highlights, status
-        // lines, syntax bg) still draw their bg quad; whether they stay solid
-        // or become translucent is a user choice (keepBgOpaque). The decision
-        // compares against the active theme's `defaultBg`, NOT literal
-        // 0x000000 — see `shouldPaintBgQuad` (audit H2).
         let isDefaultBg = !reverse && cell.bg == defaultBg
         let hasBg = shouldPaintBgQuad(cellBg: cell.bg, defaultBg: defaultBg, reverse: reverse)
 
-        // Determine the bg alpha to write into CellInstance:
-        //   - Default bg → alpha 0 so the shader's mix() produces a transparent
-        //     result where the glyph doesn't cover — clearColor shows through.
-        //   - Explicit bg, keepBgOpaque on → alpha 1 (unchanged).
-        //   - Explicit bg, keepBgOpaque off → alpha = opacity.
+        // Default bg gets alpha 0 so the transparent clearColor shows through.
         let bgAlpha: Float
         if isDefaultBg {
             bgAlpha = 0.0
@@ -430,34 +253,13 @@ struct CellInstanceBuilder {
         return (fg, bg, hasBg)
     }
 
-    /// True when `cell` is the `WIDE_CHAR_SPACER` right of a `WIDE_CHAR`
-    /// (`leftNeighbor`): its column is already covered by that glyph's 2x
-    /// quad, so a quad of its own would be drawn after (on top of) the glyph's
-    /// right half. A leading spacer (`LEADING_WIDE_CHAR_SPACER`) or an orphan
-    /// spacer (no `WIDE_CHAR` to its left) has no such quad and is not covered.
-    /// Pure; internal so tests can pin the decision table.
     static func isSpacerCoveredByWideGlyph(cell: BBCell, leftNeighbor: BBCell) -> Bool {
         (cell.flags & UInt16(WIDE_CHAR_SPACER)) != 0
             && (leftNeighbor.flags & UInt16(WIDE_CHAR)) != 0
     }
 
-    /// Pure decision: should `buildRow` emit a background quad for this cell?
-    ///
-    /// `true` when:
-    ///   - the cell has REVERSE attribute (the swapped-in fg is a real
-    ///     palette colour the user wants painted), OR
-    ///   - the cell's `bg` differs from the active theme's
-    ///     `defaultBgRgb` (an explicit `\x1b[4Nm` SGR set this cell's
-    ///     background to a palette colour, and even palette black on a
-    ///     non-black theme is "explicit" — the user wants it painted).
-    ///
-    /// Pre-fix this compared `cell.bg` to literal `0x000000`, which on
-    /// non-black themes (Atom dark, Catppuccin, Solarized …) silently
-    /// dropped every `\x1b[40m` quad: vim status lines, htop column
-    /// shading, syntax highlights using ANSI black all leaked the
-    /// theme bg through. Audit H2.
-    ///
-    /// Internal so MetalRendererTests can pin the decision table.
+    /// Compares against the active theme's default bg, not literal 0x000000: palette black on a
+    /// non-black theme is an explicit background.
     static func shouldPaintBgQuad(
         cellBg: UInt32, defaultBg: UInt32, reverse: Bool
     ) -> Bool {
@@ -465,19 +267,11 @@ struct CellInstanceBuilder {
         return cellBg != defaultBg
     }
 
-    /// `1.0 / 255.0` precomputed so `rgbToSIMD` can multiply instead of
-    /// dividing. Called up to `2 * cols * rows` times per full rebuild
-    /// (fg + bg per cell) — at 200x80 that's 32 000 calls/frame. FP-div
-    /// is ~15 cycles on modern cores; multiplying by a constant is ~4.
-    /// Audit metal-renderer F6. Internal (not private) so
-    /// `MetalRenderer.setCursorColor` shares the same constant.
     static let inv255: Float = 1.0 / 255.0
 
-    /// WCAG-style contrast floor under which selected text swaps to the
-    /// theme's selection foreground.
     static let minSelectedContrast: Float = 1.8
 
-    /// Relative luminance (sRGB, WCAG 2 formula) of an RGBA colour.
+    /// Relative luminance (sRGB, WCAG 2 formula).
     static func relativeLuminance(_ c: SIMD4<Float>) -> Float {
         func lin(_ v: Float) -> Float {
             v <= 0.03928 ? v / 12.92 : powf((v + 0.055) / 1.055, 2.4)
@@ -485,18 +279,12 @@ struct CellInstanceBuilder {
         return 0.2126 * lin(c.x) + 0.7152 * lin(c.y) + 0.0722 * lin(c.z)
     }
 
-    /// WCAG contrast ratio, ≥ 1.
     static func contrastRatio(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> Float {
         let la = relativeLuminance(a), lb = relativeLuminance(b)
         return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
     }
 
     static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
-        // Unpack the 24-bit colour into a 4-lane SIMD so the float
-        // conversion and scaling are vectorised as a single op. `1.0`
-        // in the alpha lane lands in the default fully-opaque result;
-        // callers that need a different alpha (e.g. background-opacity
-        // plumbing) mutate `.w` after the call.
         let bytes = SIMD4<UInt32>(
             (rgb >> 16) & 0xFF,
             (rgb >> 8) & 0xFF,

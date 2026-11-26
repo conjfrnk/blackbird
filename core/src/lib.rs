@@ -9,18 +9,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use alacritty_terminal::vte::Parser;
 
-/// Dimensions struct required by `Term::new`.
-///
-/// `total_lines` returns only the visible rows here, not `rows + scrollback`.
-/// In 0.26's grid model, `Dimensions::total_lines` is the number of lines
-/// currently allocated in the ring buffer (screen + accumulated history). When
-/// sizing a *new* terminal the buffer starts at `screen_lines` rows; the grid
-/// grows into the scrollback region lazily as output scrolls off-screen.
-/// `Term::new` reads `scrolling_history` from `Config` (not from
-/// `Dimensions::total_lines`) to set `Grid::max_scroll_limit`.  The only
-/// methods `Term::new` calls on `Dimensions` are `screen_lines()` and
-/// `columns()`, which is confirmed by alacritty's own internal `TermSize`
-/// test helper (term/mod.rs:2436-2439) doing the same thing.
+/// `total_lines` is only the visible rows: `Term::new` reads the scrollback size from `Config`.
 #[derive(Clone, Copy)]
 struct TermSize {
     cols: usize,
@@ -38,12 +27,6 @@ impl Dimensions for TermSize {
         self.rows
     }
 }
-
-// ---------------------------------------------------------------------------
-// Submodules — extracted from the original monolith (REFACTOR.md Wave 1).
-// Each is re-exported below so `blackbird_core::*` and the cbindgen header
-// stay byte-identical.
-// ---------------------------------------------------------------------------
 
 mod callback;
 mod color;
@@ -67,26 +50,12 @@ pub use snapshot::{bb_mode, cell_flags, BBCell, BBGridState, BBSnap};
 use snapshot::{extract_mode_with_extras, grid_state, snapshot, BBSnapOwned};
 use text::extract_text_range;
 
-// NB: kept at the crate root (not in `snapshot`) purely so cbindgen emits this
-// `#define` ahead of `BB_STRING_MAGIC`, keeping the generated header byte-for-
-// byte identical. The doc below is verbatim from its former snapshot.rs home.
-/// Sentinel for `BBCell::underline_color` meaning "no explicit underline
-/// colour set; use the cell's fg". Chosen as u32::MAX because alacritty's
-/// RGB representation tops out at 0x00FF_FFFF and 0xFF000000 bits are
-/// otherwise unused — picking a sentinel outside the valid RGB range avoids
-/// a flag bit.
+// Kept at the crate root so cbindgen emits this `#define` ahead of `BB_STRING_MAGIC`.
+/// Sentinel for `BBCell::underline_color`: no explicit underline colour, use the cell's fg.
 pub const UNDERLINE_COLOR_UNSET: u32 = 0xFFFF_FFFF;
 
-/// Shape of the OSC 133 prompt/command mark the shell emitted.
-///
-/// Values match the C enum layout — Swift casts these integers directly.
-/// A / B / C / D are the four standard kinds in the de-facto prompt-marks
-/// spec (Apple Terminal, iTerm2, kitty, Ghostty):
-///   A = prompt start     — "I'm about to draw my prompt"
-///   B = command start    — "prompt done, user is typing the command"
-///   C = command output   — "user pressed enter, command is running"
-///   D = command end      — "command finished, exit code follows"
-/// Numeric values start at 1 so 0 stays reserved for "no mark".
+/// OSC 133 mark kind: A = prompt start, B = command start, C = command output, D = command end
+/// (exit code follows). Values start at 1 so 0 stays reserved for "no mark".
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum BBPromptMarkKind {
@@ -96,14 +65,7 @@ pub enum BBPromptMarkKind {
     D = 4,
 }
 
-// ---------------------------------------------------------------------------
-// BBTerm
-// ---------------------------------------------------------------------------
-
-/// Set element for `BBTerm::uri_cstr_cache`: the interned `Arc<CStr>` is the
-/// only copy of the URI bytes. Hashing and equality go through `to_bytes()`
-/// (no NUL), and `Borrow<[u8]>` matches `<[u8] as Hash>`, so
-/// `set.get(uri_str.as_bytes())` finds an entry without a `String` key copy.
+/// Hashing and equality go through `to_bytes()` (no NUL) to match `Borrow<[u8]>`.
 #[derive(Debug)]
 pub(crate) struct UriKey(Arc<std::ffi::CStr>);
 
@@ -138,265 +100,69 @@ impl std::borrow::Borrow<[u8]> for UriKey {
 }
 
 /// Opaque handle exposed to Swift.
-///
-/// `callback` and `color_queue` are shared with the owned `Term`'s
-/// `RoutingListener` via `Arc`. Field drop order between `term` and the
-/// cells is no longer load-bearing for memory safety (rust-core-1 F3):
-/// each Arc keeps its inner cell alive as long as any clone exists, so an
-/// event firing during `Term`'s destruction still lands on live memory.
 pub struct BBTerm {
-    /// Set by `guard_with_term` after a caught panic. A panic mid-
-    /// `processor.advance` can leave alacritty's grid / cursor invariants
-    /// broken; before this flag the core kept accepting input on that
-    /// `Term`, producing a Fatal per chunk from then on. Every mutating
-    /// entry point checks it and becomes a no-op; the Swift side stops
-    /// feeding on the first Fatal. `Cell` so the read-only guard path can
-    /// set it through `&*term`.
+    /// Set after a caught panic; mutating entry points then no-op. `Cell` so `&*term` can set it.
     pub(crate) poisoned: std::cell::Cell<bool>,
     pub(crate) term: Term<RoutingListener>,
     pub(crate) processor: Processor,
-    /// How many consecutive parser advances (`bb_term_input` chunks and
-    /// sync-flush replays) have ended with `processor` still inside an
-    /// OSC / DCS / SOS / PM / APC string; zero whenever one ended outside
-    /// any. A string split across two reads reads 1 at the chunk boundary; a
-    /// string its sender never closed keeps counting. `bb_term_clear_all`
-    /// uses it to tell the two apart (`WEDGED_STRING_CHUNKS`).
+    /// Consecutive parser advances that ended inside an OSC / DCS / SOS / PM / APC string.
     pub(crate) string_state_chunks: u32,
-    /// Parallel `vte::Parser` that drives `OscScanner` for OSC 7 (cwd) and
-    /// OSC 133 (prompt marks). Stateful across `bb_term_input` calls so
-    /// fragmented sequences resolve to a single event. Kept separate from
-    /// alacritty's internal parser so we never perturb the grid-mutation
-    /// path. Consolidated from two parsers into one on 2026-04-19 —
-    /// throughput tests showed running bytes through three parsers
-    /// (alacritty + 2 parallels) cost ~15 % versus two parsers.
     pub(crate) osc_parser: Parser,
-    /// Deferred queue of OSC 10/11/12 color-query responses — see
-    /// ColorRequestQueue. Drained after every `processor.advance` call in
-    /// `bb_term_input` so the response writes land in the same input
-    /// batch that emitted the query. Responses are actually emitted only
-    /// when `color_query_enabled` is true.
+    /// Deferred OSC 10/11/12 replies, drained after every `processor.advance`.
     pub(crate) color_queue: Arc<ColorRequestQueue>,
-    /// Whether OSC 10 / 11 / 12 `?` queries produce a reply. Off by
-    /// default: historically, replying leaked the palette back into the
-    /// PTY, which zsh-vi-mode could interpret as commands (CVE class on
-    /// older shells). Users who want nvim / tmux auto-theming on a
-    /// modern shell can opt in via Preferences. See
-    /// `core/tests/terminal_replies.rs::osc_10_11_color_queries_are_silent`
-    /// for the default-off pinning.
     pub(crate) color_query_enabled: bool,
-    /// The host's theme, as last pushed through `bb_term_set_named_color`.
-    /// `term.colors()` holds the same writes, but OSC 104 / 110 / 111 / 112
-    /// (`Term::reset_color`) clear those slots to `None`, which would drop
-    /// colour resolution to the hard-coded xterm tables. This shadow is the
-    /// fallback between a program's OSC override and those tables, so a
-    /// reset returns to the theme (xterm semantics: reset to the
-    /// terminal's configured default), not to black / 0xEEEEEE.
+    /// The host's theme. OSC 104 / 110 / 111 / 112 clear `term.colors()` slots to `None`; this
+    /// shadow makes a reset return to the theme, not to the hard-coded xterm tables.
     pub(crate) theme_colors: alacritty_terminal::term::color::Colors,
-    /// Latch: "the prior `bb_term_input` chunk contained an ESC byte and
-    /// may have left the OSC parser mid-sequence." When this is set, we
-    /// advance the OSC parser regardless of whether the current chunk has
-    /// ESC/BEL, so a split sequence (`\x1b]7;file://pa` + `th\x1b\\`)
-    /// resolves correctly. Cleared when we advance on a chunk with NO
-    /// ESC — which means either the prior sequence terminated in-chunk
-    /// (BEL seen, or ESC\ fully present) or we had a false latch. For
-    /// pure-text streams (no ESC anywhere), both bits stay false and we
-    /// skip the osc_parser entirely — the dominant case for `yes(1)`,
-    /// `cat` on logs, and pipe output. Saves ~10-15 % on plain_text.
+    /// The prior chunk had an ESC and may have left the OSC parser mid-sequence, so the next one
+    /// is advanced through it regardless. ESC-free streams skip that parser entirely.
     pub(crate) osc_possibly_pending: bool,
-    /// DCS (XTGETTCAP / DECRQSS), chunked OSC 99 and `modifyOtherKeys`
-    /// state that persists across `bb_term_input` calls. See `OscTapState`.
     pub(crate) osc_tap: crate::osc::OscTapState,
-    /// App version advertised by XTVERSION; empty until
-    /// `bb_term_set_terminal_version` is called.
     pub(crate) terminal_version: String,
-    /// OSC 133 A/B/C rate-limit window (audit synthesis #10). See
-    /// `PROMPT_MARK_PER_SECOND`. Persisted across `bb_term_input` calls so
-    /// the sliding window covers prompt marks that arrive in different
-    /// PTY chunks.
     pub(crate) prompt_mark_rate: EventRateState,
-    /// OSC 7 (CWD) ingest rate-limit window (audit M-7). See
-    /// `OSC7_INGEST_PER_SECOND`. Persisted across `bb_term_input` calls — same
-    /// rationale as `prompt_mark_rate`.
     pub(crate) osc7_rate: EventRateState,
-    /// `gethostname(3)` read in `bb_term_new`, just before the host spawns
-    /// the shell. OSC 7 accepts it as "this machine" next to the live name:
-    /// the shell's own copy goes stale when macOS renames the host. Never
-    /// reset (a shell keeps its startup copy through ⌘K).
     pub(crate) startup_hostname: Vec<u8>,
-    /// Budget for the live `gethostname(3)` read OSC 7 makes when an
-    /// authority does not match `startup_hostname`. Separate from
-    /// `osc7_rate`, which rejected sequences must not consume (audit S4-001),
-    /// so a flood of foreign-host sequences still costs at most
-    /// `OSC7_INGEST_PER_SECOND` syscalls a second, not one each.
+    /// Separate from `osc7_rate`, which rejected sequences must not consume.
     pub(crate) osc7_hostname_rate: EventRateState,
-    /// Scanner-side one-shot reject-log latches (OSC 7 / OSC 133). See
-    /// `OscLatches`; `bb_term_clear_all` leaves them alone.
     pub(crate) osc_latches: crate::osc::OscLatches,
-    /// OSC 10/11/12 color-query reply tumbling-window state (bug #17). The
-    /// `ColorRequestQueue` cap bounds one drain interval, not a chunk: an
-    /// ESC-delimited segment outside a DEC 2026 synchronized update (where
-    /// the cap is only a backstop), the whole replayed buffer inside one
-    /// (where it is the live bound). A hostile stream can still fan queries
-    /// across many segments, replays and chunks. Gating each `PtyWrite`
-    /// reply in `drain_color_requests` by this 1-second window with
-    /// `COLOR_QUERY_REPLY_PER_SECOND` cap makes the rate limit total, not
-    /// per-call. Tumbling: the count resets wholesale when the window
-    /// rolls. Persisted across `bb_term_input` calls for the same reason as
-    /// `prompt_mark_rate`.
+    /// Tumbling window: the `ColorRequestQueue` cap bounds one drain interval, not the total.
     pub(crate) color_query_reply_window_start: std::time::Instant,
     pub(crate) color_query_reply_window_count: u32,
-    /// One-shot-per-window latch for the breadcrumb logged when the gate
-    /// above first drops a reply; re-armed whenever the window rolls.
     pub(crate) color_query_reply_drop_logged: bool,
     pub(crate) callback: Arc<CallbackCell>,
-    /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
-    /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
-    /// appearing frame after frame is interned exactly once (not per-snapshot).
-    /// A new snapshot pushes `Arc::clone(&cstr)` into its local `links` Vec —
-    /// cheap (one atomic increment) vs. the old `CString::new(uri.to_owned())`
-    /// per appearance.
-    ///
-    /// Bounded globally by `uri_cache_bytes` against
-    /// `OSC8_TOTAL_INTERN_BYTES_CAP` (1 MiB) so a hostile TUI writing
-    /// distinct 4 KiB URIs cannot retain arbitrary megabytes of CStrings.
-    /// When the budget would be exceeded, new URIs silently drop to
-    /// `link_id = 0` (no link) rather than evicting older entries —
-    /// eviction would invalidate the `*const c_char` returned by
-    /// `bb_snap_link_url` on still-live snapshots that reference those
-    /// Arcs.
+    /// Persistent OSC 8 URI intern store, shared across snapshots. Over the `uri_cache_bytes`
+    /// budget new URIs drop to `link_id = 0` rather than evicting older entries.
     pub(crate) uri_cstr_cache: std::collections::HashSet<UriKey>,
-    /// Total bytes currently retained by `uri_cstr_cache` (sum of URI byte
-    /// lengths, excluding the terminating NUL; each URI is stored once,
-    /// inside its `Arc<CStr>`). Drives the
-    /// `OSC8_TOTAL_INTERN_BYTES_CAP` gate in `bb_term_take_snapshot`.
     pub(crate) uri_cache_bytes: usize,
-    /// One-shot latch: have we already emitted the per-snapshot
-    /// `id-exhaustion` breadcrumb? OSC 8 link-id space is u16, leaving
-    /// 65 534 distinct URIs per snapshot before attribution is silently
-    /// dropped (lib.rs phase-1 link-build). The cap is essentially
-    /// unreachable on any realistic TUI but reachable by a hostile
-    /// remote emitting unique per-cell URIs; without an observability
-    /// hook, support engineers triaging "my OSC 8 links stopped working"
-    /// have no breadcrumb. Latch keeps the log one-shot per session to
-    /// avoid eprintln spam on a streaming hostile payload. Audit S2-014.
     pub(crate) osc8_id_exhaustion_logged: bool,
-    /// One-shot latch for the sibling of `osc8_id_exhaustion_logged`: the
-    /// `OSC8_TOTAL_INTERN_BYTES_CAP` (1 MiB) budget on `uri_cstr_cache`. Past
-    /// it, every NEW URI drops to `link_id = 0` — same user-visible symptom
-    /// ("links stopped working"), but this is the reachable one: ~16 400
-    /// distinct 64-byte URIs, and the cache never shrinks except on
-    /// `bb_term_clear_all` (⌘K). Neither RIS nor an alt-screen switch clears
-    /// it. That path had no breadcrumb at all, which would make a real report
-    /// unresolvable; the id-exhaustion path it sits next to has had one since
-    /// audit S2-014.
     pub(crate) osc8_intern_cap_logged: bool,
-    /// One-shot latch for the third OSC 8 silent-drop path: the per-terminal
-    /// live-byte budget on retained hyperlink strings (`HYPERLINK_LIVE_MAX`,
-    /// vendored alacritty_terminal). Past it the grid refuses every new link
-    /// until the cells holding links are overwritten, scroll out of the
-    /// retained scrollback, or are erased (`Term::free_purged_hyperlinks` truncates
-    /// while a link is charged, so the rows an erase reaches are released at
-    /// once). A plain erase reaches only the screen that is showing; ⌘K also erases both grids' history
-    /// and, with the primary screen up, the alt grid's visible cells too, but
-    /// not the shell's visible rows while the alt screen is up. Cells print
-    /// with no attribution and nothing says why. Re-armed by
-    /// `bb_term_clear_all`, like `osc8_intern_cap_logged`.
+    /// Latch for the live-byte budget on retained hyperlink strings (`HYPERLINK_LIVE_MAX`).
     pub(crate) osc8_live_cap_logged: bool,
 }
 
-// ---------------------------------------------------------------------------
-// FFI entry points
-// ---------------------------------------------------------------------------
-
-/// One-shot latch for the dim-clamp warning. Sibling of the Swift-side
-/// `BBTerm.didLogDimClamp` (audit follow-up 2026-04-29). Fires the first
-/// time `bb_term_new` or `bb_term_resize2` clamps a caller-supplied
-/// dimension — captures Swift wrappers / future direct C consumers that
-/// hand the FFI an out-of-envelope value. Single global latch (not
-/// per-callsite) so a sustained regression doesn't flood the log.
 static DIM_CLAMP_LOGGED: Once = Once::new();
 
-/// Minimum grid dimension (cells per row/column). Below 2 alacritty's reflow
-/// math degenerates: a 1-col grid with scrollback becomes millions of 1-cell
-/// rows on shrink. Shared between `bb_term_new` (init clamp, audit H-7) and
-/// `bb_term_resize2` (resize clamp) so both paths agree.
+/// Below 2 alacritty's reflow math degenerates (a 1-col grid becomes millions of 1-cell rows).
 const MIN_DIM: u16 = 2;
-/// Maximum grid dimension. A caller passing `u16::MAX` would otherwise allocate
-/// `rows × (cols + scrollback) × cell_size` bytes — at 65535 × (65535 + 200000)
-/// × 32B that's ~520 GB, enough to freeze any machine. 1000 × 1000 × 32B ≈
-/// 32 MB grid, comfortable.
+/// A caller passing `u16::MAX` would otherwise allocate hundreds of GB.
 const MAX_DIM: u16 = 1000;
-/// Scrollback ceiling. Alacritty allocates lazily, so the realistic memory
-/// cost of `MAX_DIM × SCROLLBACK_MAX × ~16B = ~3.1 GB` worst-case never
-/// materialises in practice — but the cap is real defence against a runaway
-/// caller. 200k lines covers dense Claude Code / build-log workloads.
 const SCROLLBACK_MAX: u32 = 200_000;
-/// Per-call row cap on `bb_term_text_range`. Retained purely as a backstop
-/// against absurd-range callers (the fuzzer passing i32::MIN..i32::MAX) —
-/// sized so it can NEVER truncate a real buffer: the largest possible
-/// span is `SCROLLBACK_MAX + MAX_DIM = 201 000` rows, comfortably under
-/// the cap.
-///
-/// History (audit M-1, 2026-05-03 → audit S5-010, 2026-06-09): M-1 set
-/// this to 65 536 reasoning that "whole-history copies are typically
-/// capped by SCROLLBACK_MAX so 65 536 leaves a generous margin over
-/// plausible interactive selections" — but Select All is a first-class
-/// menu action and sessions default to 100 000 lines of scrollback, so
-/// ⌘A+⌘C on a full buffer silently returned only the OLDEST 65 536 rows
-/// and dropped the newest ~34 000 (usually the part the user wanted),
-/// with no log, error, or UI signal anywhere on the path. The transient
-/// allocation the cap bounds is proportional to content the terminal
-/// already retains in cell form (~32 B/cell vs ≤4 B/char extracted), so
-/// a content-sized extraction is strictly smaller than the grid backing
-/// it and the M-1 DoS-amplification concern doesn't apply to in-range
-/// requests; only the absurd-range case needs the bound.
+/// Backstop only: must exceed `SCROLLBACK_MAX + MAX_DIM` so it never truncates a real buffer.
 pub(crate) const MAX_TEXT_RANGE_ROWS: u32 = 262_144;
 
-/// Create a new terminal. Returns null on invalid input or internal error.
-///
-/// # Thread safety
-/// The returned handle is NOT Sync / Sendable. Once created, every subsequent
-/// `bb_term_*` call on this handle MUST happen on the same thread; the handle
-/// may never be accessed concurrently from two threads. In Swift, restrict
-/// the handle to the @MainActor or confine it to a single dedicated serial
-/// queue — serial-queue confinement means calls may arrive on DIFFERENT
-/// threads over time (GCD provides no stable thread identity), which is
-/// fine: the contract is mutual exclusion plus the queue's memory ordering,
-/// not thread identity. Debug builds panic on OVERLAPPING access (two
-/// threads inside the handle simultaneously) — rust-core-1 F2/F10, reworked
-/// per audit S1-004.
-///
+/// Create a terminal; null on a zero dimension or internal error. `cols` / `rows` are clamped to
+/// `[2, 1000]`, `scrollback` to 200 000 lines. The handle is NOT thread-safe: every `bb_term_*`
+/// call on it must be mutually exclusive (one thread, or one serial queue).
 /// # Safety
 /// The returned pointer must be freed exactly once via `bb_term_free`.
-///
-/// Panics inside this function are caught by `catch_unwind` and swallowed
-/// silently (no `BBTerm` context is available yet to deliver a Fatal event).
-/// The function returns null as the fallback value.
-///
-/// # Clamping
-/// `cols` and `rows` are clamped to `[MIN_DIM, MAX_DIM]` (currently `[2, 1000]`)
-/// — symmetric with `bb_term_resize2`. A `0` on either axis still returns null
-/// (treated as "no terminal requested"), matching pre-2026-04-29 behaviour.
-/// `scrollback` is capped at `SCROLLBACK_MAX` (200 000 lines). Pre-H-7 a 1×1
-/// grid was constructable and silently grew to 2×2 on the next resize; now
-/// the clamp lands at construction time so the grid the caller observes via
-/// snapshot matches what they asked for (modulo the public `[MIN_DIM, MAX_DIM]`
-/// envelope).
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *mut BBTerm {
     guard_no_term(std::ptr::null_mut(), || {
         if cols == 0 || rows == 0 {
             return std::ptr::null_mut();
         }
-        // Audit H-7: clamp BOTH bounds, symmetric with `bb_term_resize2`.
-        // Pre-H-7 the floor was missing here, so `bb_term_new(1, 1, …)`
-        // succeeded and then silently grew on the next resize call.
         let clamped_cols = cols.clamp(MIN_DIM, MAX_DIM);
         let clamped_rows = rows.clamp(MIN_DIM, MAX_DIM);
-        // Audit follow-up (2026-04-29): one-shot warning when the clamp
-        // engages. Sibling of the Swift-side `BBTerm.didLogDimClamp`
-        // pattern. Captures direct C consumers (and Swift wrappers
-        // whose own clamp regresses) that feed out-of-envelope dims.
         if clamped_cols != cols || clamped_rows != rows {
             DIM_CLAMP_LOGGED.call_once(|| {
                 breadcrumb!(
@@ -412,24 +178,9 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         let scrollback = scrollback.min(SCROLLBACK_MAX);
         let config = Config {
             scrolling_history: scrollback as usize,
-            // Opt into alacritty's kitty keyboard protocol dispatch. Without
-            // this, push_keyboard_mode / pop_keyboard_modes / set_keyboard_mode
-            // handlers early-return and the TermMode bits never light, even
-            // when the TUI asks for disambiguated escape codes via ESC[>1u.
-            // Claude Code, nvim 0.10+, WezTerm shells all expect this.
+            // Without this alacritty's kitty keyboard handlers early-return (`ESC[>1u` is ignored).
             kitty_keyboard: true,
-            // Disable alacritty's in-term OSC 52 clipboard handling. The
-            // alacritty default is `Osc52::OnlyCopy`, which lets any PTY
-            // program silently stuff the macOS clipboard on write. Blackbird
-            // owns the Swift-side clipboard gate (see `Osc52Clipboard` event
-            // in `MainWindowController.swift`); disabling the alacritty
-            // handler entirely gives defence-in-depth: even if the Swift
-            // gate regresses, a hostile remote can't fall through to the
-            // built-in `ClipboardStore` event. `Event::ClipboardStore` is
-            // only emitted when alacritty accepts the OSC 52 write, so
-            // `Osc52::Disabled` also stops the forwarding path at the
-            // source. Users who want the historical behaviour must re-enable
-            // via a future Preferences toggle.
+            // alacritty's default `Osc52::OnlyCopy` lets any PTY program write the clipboard.
             osc52: alacritty_terminal::term::Osc52::Disabled,
             ..Default::default()
         };
@@ -473,27 +224,9 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
     })
 }
 
-/// Free a terminal handle created by `bb_term_new`.
-///
+/// Free a terminal. No-op for null and from inside an event callback (the handle leaks instead).
 /// # Safety
 /// `term` must have been returned by `bb_term_new` and not previously freed.
-/// Passing null is a no-op.
-///
-/// Calling this from inside a user event callback (registered via
-/// `bb_term_set_event_cb`) violates the contract documented in BBCore.h
-/// ("must not call any bb_term_* function on the same term handle"). The
-/// header gates every other term-* entry point on `ffi_reentry_blocked`,
-/// turning the violation into a silent no-op; `bb_term_free` was the lone
-/// exception and would unconditionally `drop(Box::from_raw(term))` while
-/// alacritty's `processor.advance(&mut bb.term, …)` was still on the outer
-/// `bb_term_input` stack — a use-after-free. Audit fix-#01 (2026-05-21):
-/// engage the same gate here so a handler-driven free becomes a contained
-/// leak (the BBTerm box stays alive but the Swift wrapper nilled its
-/// handle, so it's unreachable) instead of UAF. Leak >> UAF.
-///
-/// Panics inside this function are caught by `catch_unwind` and swallowed
-/// silently (no safe `BBTerm` context is available during teardown to deliver
-/// a Fatal event). The function returns unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
     guard_no_term((), || {
@@ -507,62 +240,23 @@ pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
     })
 }
 
-/// Feed `len` bytes from `bytes` into the terminal's VT parser.
-///
+/// Feed `len` bytes into the VT parser. A panic is caught and delivered as a `Fatal` event.
 /// # Safety
-/// - `term` must be non-null, properly aligned (obtained from `bb_term_new`),
-///   and not freed for the duration of this call.
-/// - `bytes` must be non-null when `len > 0` and point to a readable region of
-///   at least `len` bytes. Passing `bytes = null, len = 0` is safe (no-op).
-/// - No two threads may call any `bb_term_*` function concurrently on the same
-///   `term`; interior state is mutated and `Term`/`Processor` are not `Sync`.
-/// - `len` must be `<= isize::MAX as usize`. Larger values are rejected up
-///   front (no input processed) with a Fatal event dispatched — defense-in-
-///   depth against `slice::from_raw_parts`'s safety precondition (audit
-///   L-11). Swift's BBTerm wrapper can't construct such an input, but C-ABI
-///   consumers (fuzzers, native bindings, pre-Swift-conversion test harnesses)
-///   can.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// unit as the fallback value.
+/// `term` must be a live handle from `bb_term_new` with no concurrent `bb_term_*` call on it.
+/// `bytes` must be readable for `len` bytes (`null, 0` is a no-op); `len <= isize::MAX`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len: usize) {
     guard_with_term(term, (), || {
         if term.is_null() || len == 0 || bytes.is_null() {
             return;
         }
-        // Audit M-9 follow-up (2026-04-29) + H-5 (2026-05-03): re-entry
-        // catch one frame earlier than the Swift-side
-        // `BBTerm.isInsideEventDispatch` precondition. If the user
-        // callback (currently on stack via `CallbackCell::fire`)
-        // synchronously called back into `bb_term_input`, the outer
-        // `&mut Term` borrow held by the outer call is still live.
-        // Bailing here drops the input bytes silently (they're already
-        // bytes the parser saw) but critically prevents the second
-        // `&mut *term` reborrow below from aliasing.
-        //
-        // One-shot warning + early return is the right shape: a panic
-        // here would be caught by `guard_with_term` and dispatched back
-        // to the same callback we're trying to protect, defeating the
-        // purpose. Audit H-5 extended the same gate to every other
-        // entry point that reborrows `&mut *term` / `&*term`; the
-        // helper centralises the latch read and one-shot log.
+        // A re-entering callback must bail before `&mut *term` below aliases the outer borrow.
         if ffi_reentry_blocked("bb_term_input") {
             return;
         }
         if poison_blocked(term) {
             return;
         }
-        // Audit L-11 (2026-04-29): defense-in-depth against
-        // `slice::from_raw_parts`'s safety precondition that the slice
-        // length fit in an isize (`len * mem::size_of::<u8>()` must be
-        // representable as `isize`). The Swift wrapper can't reach this
-        // path because Swift `Data.count` is `Int = isize`; a C ABI
-        // consumer (fuzzer, native binding) can. `panic!` here is
-        // caught by `guard_with_term` and surfaced as a Fatal event so
-        // the host learns about the contract violation instead of
-        // silently UB'ing.
         if len > isize::MAX as usize {
             panic!(
                 "bb_term_input: len {len} exceeds isize::MAX (slice::from_raw_parts precondition)"
@@ -572,76 +266,42 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
     })
 }
 
-/// Resize the terminal grid. Out-of-range (zero) dimensions are ignored.
-///
+/// Resize the grid; zero dimensions are ignored. Prefer `bb_term_resize2`, which reports clamping.
 /// # Safety
-/// `term` must be a valid non-null pointer from `bb_term_new`, properly
-/// aligned, not freed for the duration of the call. No concurrent calls on
-/// the same term.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// unit as the fallback value.
-///
-/// Callers that need to know whether the requested dimensions were clamped
-/// should prefer `bb_term_resize2`, which returns the actually-applied dims
-/// and a `clamped` flag. The void-returning form here is retained for ABI
-/// stability; it internally delegates to the same clamp logic.
+/// Same preconditions as `bb_term_input`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16) {
     let _ = bb_term_resize2(term, cols, rows);
 }
 
-/// Result of `bb_term_resize2`. `applied_cols` / `applied_rows` report the
-/// dimensions the grid was actually resized to after clamping (floor = 2,
-/// ceiling = 1000 on each axis); `clamped` is non-zero when either requested
-/// dim differed from the applied value. On a no-op call (null term, or zero
-/// in either dim) all three fields are `0`.
+/// Dimensions the grid was actually resized to after clamping to `[2, 1000]`; `clamped` is
+/// non-zero when either differs from the request. All zero on a no-op call.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BBResizeResult {
     pub applied_cols: u16,
     pub applied_rows: u16,
-    /// Non-zero when the request was rewritten by the clamp; zero when the
-    /// grid now holds exactly the requested dims (or on no-op).
     pub clamped: u8,
     pub _pad: [u8; 3],
 }
 
-/// State of the parser's DEC mode 2026 (synchronized output) buffer.
-///
-/// Between BSU (`CSI ?2026h`) and ESU (`CSI ?2026l`) vte buffers every byte
-/// instead of mutating the grid, and arms a private abort deadline. vte does
-/// NOT self-abort: `Processor::advance` only consults that deadline when MORE
-/// bytes arrive, so the EMBEDDER must notice expiry and call `stop_sync`.
-/// This struct is how Swift learns that a deadline exists and when it lands.
-///
-/// Layout note (same discipline as `BBResizeResult`): the two `u64`s lead so
-/// `repr(C)` introduces no implicit padding — 24 bytes, align 8, explicit
-/// `_pad` tail.
+/// State of the DEC mode 2026 (synchronized output) buffer. vte does NOT self-abort: it only
+/// consults its deadline when more bytes arrive, so the embedder must notice expiry and abort.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BBSyncStatus {
-    /// Nanoseconds until the core's own abort deadline. `0` when
-    /// `pending == 0` or when the deadline has already elapsed.
+    /// Nanoseconds until the core's abort deadline; `0` when not pending or already elapsed.
     pub remaining_ns: u64,
     /// Bytes currently held in the parser's sync buffer (`0 ..= 2 MiB`).
     pub buffered_bytes: u64,
-    /// Non-zero while a synchronized update is open (BSU seen, ESU not yet).
     pub pending: u8,
-    /// Non-zero when `pending != 0` AND the core's deadline has elapsed —
-    /// i.e. it is now legal to abort. THIS IS THE ONLY EXPIRY VERDICT ANY
-    /// CALLER MAY USE; do not recompute it from a host-side clock, and do not
-    /// hardcode vte's timeout (it is a private const in the vendored crate
-    /// and can change on a bump).
+    /// Non-zero when pending AND the core's deadline has elapsed. The only expiry verdict a
+    /// caller may use: do not recompute it from a host clock or hardcode vte's timeout.
     pub expired: u8,
     pub _pad: [u8; 6],
 }
 
 impl BBSyncStatus {
-    /// The "nothing pending" value, also the fail-safe fallback for a null
-    /// handle or a caught panic: it preserves the status quo rather than
-    /// licensing a flush we can't reason about.
     pub(crate) const fn idle() -> Self {
         Self {
             remaining_ns: 0,
@@ -653,18 +313,8 @@ impl BBSyncStatus {
     }
 }
 
-/// Resize the terminal grid and report the actually-applied dimensions.
-///
-/// Dimensions are clamped to `[2, 1000]` on each axis to avoid the reflow
-/// explosion on tiny grids and the 100+ GB allocation on huge grids
-/// (documented in the floor/ceiling comment inside this function and in
-/// `MEMORY`). Zero on either axis is a no-op and returns
-/// `BBResizeResult { 0, 0, 0 }`.
-///
-/// `clamped` is the signal to Swift that `TIOCSWINSZ` should be told the
-/// APPLIED size, not the requested one — otherwise the shell and the grid
-/// disagree about the viewport (rust-core-3 F4).
-///
+/// Resize the grid and report the applied dimensions (see `BBResizeResult`). When `clamped`, tell
+/// `TIOCSWINSZ` the APPLIED size, or the shell and the grid disagree about the viewport.
 /// # Safety
 /// Same as `bb_term_resize`.
 #[no_mangle]
@@ -689,16 +339,10 @@ pub unsafe extern "C" fn bb_term_resize2(
         if poison_blocked(term) {
             return fallback;
         }
-        // Floor + ceiling on dimensions. See module-level `MIN_DIM` /
-        // `MAX_DIM` for rationale. Symmetric with `bb_term_new` (audit H-7).
         let bb = &mut *term;
         let applied_cols = cols.clamp(MIN_DIM, MAX_DIM);
         let applied_rows = rows.clamp(MIN_DIM, MAX_DIM);
         let clamped_flag = applied_cols != cols || applied_rows != rows;
-        // Audit follow-up (2026-04-29): one-shot warning when the clamp
-        // engages. Shares `DIM_CLAMP_LOGGED` with `bb_term_new` so a
-        // single sustained regression produces exactly one log line
-        // regardless of which entry point trips first.
         if clamped_flag {
             DIM_CLAMP_LOGGED.call_once(|| {
                 breadcrumb!(
@@ -721,26 +365,10 @@ pub unsafe extern "C" fn bb_term_resize2(
     })
 }
 
-/// Register (or clear) the event callback for a terminal.
-///
-/// Pass `cb = None` to disable event delivery.  `ctx` is an opaque pointer
-/// forwarded verbatim to every callback invocation; pass `null` if unused.
-///
+/// Register the event callback (`cb = None` clears it); `ctx` is forwarded verbatim. Null no-ops.
 /// # Safety
-/// - `term` must be non-null, valid, and not freed while the callback is
-///   registered.
-/// - `ctx` must remain valid for all subsequent `bb_term_input` calls until
-///   the callback is cleared or the terminal is freed.
-/// - The callback may be invoked synchronously from within `bb_term_input`;
-///   it must not call any `bb_term_*` function on the same `term` handle
-///   (no re-entrant use).
-/// - All access must occur on the same thread (no concurrent calls on the
-///   same term).
-/// - Passing `term = null` is a no-op.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// unit as the fallback value.
+/// `term` and `ctx` must stay valid while the callback is registered. The callback may run
+/// synchronously inside `bb_term_input` and must not call any `bb_term_*` function on that handle.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_set_event_cb(
     term: *mut BBTerm,
@@ -758,22 +386,9 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
     })
 }
 
-/// Register the process-wide diagnostic sink for the core's one-shot
-/// breadcrumbs (OSC 8 intern budget, rate caps, OSC 133 / 7 rejects, dim
-/// clamp, handler re-entry) and for the `file:line` of any core panic.
-/// Without a sink these go to stderr, which is `/dev/null` for an app
-/// launched from Finder / Dock.
-///
-/// `cb` receives a UTF-8 message (not NUL-terminated, never empty) valid only
-/// for the duration of the call. It may run on any thread that drives the
-/// core, including from inside an event callback, so it must not call any
-/// `bb_term_*` function. Call before the first `bb_term_new` so that
-/// function's own breadcrumb is captured.
-///
-/// Process-wide and set-once: the first non-null registration wins and also
-/// chains a panic hook ahead of the existing one; later calls are no-ops.
-/// Passing null is a no-op.
-///
+/// Register the process-wide diagnostic sink (breadcrumbs, panic `file:line`). Set-once: the first
+/// non-null registration wins. `cb` receives a UTF-8 message (not NUL-terminated) valid only for
+/// the call, on any thread, and must not call any `bb_term_*` function.
 /// # Safety
 /// `cb` must stay valid for the life of the process.
 #[no_mangle]
@@ -785,16 +400,10 @@ pub unsafe extern "C" fn bb_set_log_cb(cb: Option<unsafe extern "C" fn(*const u8
     })
 }
 
-/// Take an immutable snapshot of the current grid state.
-///
+/// Take an immutable snapshot of the grid. Returns null on null input.
 /// # Safety
-/// Same preconditions as `bb_term_input`. Returns null on null input.
-/// The returned pointer must be released by exactly one `bb_snap_release` per
-/// successful call (plus one per `bb_snap_retain`).
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// null as the fallback value.
+/// Same preconditions as `bb_term_input`. The result must be released by exactly one
+/// `bb_snap_release` per successful call (plus one per `bb_snap_retain`).
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSnap {
     guard_with_term(term, std::ptr::null(), || {
@@ -808,16 +417,9 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
     })
 }
 
-/// Increment refcount. Returns the input pointer for fluent usage.
-///
+/// Increment the refcount and return `snap`. Null is a no-op. Safe to call from any thread.
 /// # Safety
-/// `snap` must be a pointer returned by `bb_term_take_snapshot` or previously
-/// retained, and not yet released to zero. Null is a no-op (returns null).
-/// Safe to call from any thread.
-///
-/// Panics inside this function are caught by `catch_unwind` and swallowed
-/// silently (no `BBTerm` context is available). The function returns the input
-/// `snap` pointer as the fallback value.
+/// `snap` must come from `bb_term_take_snapshot` / `bb_snap_retain` and not be released to zero.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_retain(snap: *const BBSnap) -> *const BBSnap {
     guard_no_term(snap, || {
@@ -830,16 +432,9 @@ pub unsafe extern "C" fn bb_snap_retain(snap: *const BBSnap) -> *const BBSnap {
     })
 }
 
-/// Decrement refcount; free when it reaches zero.
-///
+/// Decrement the refcount; free at zero. Null is a no-op. Safe to call from any thread.
 /// # Safety
-/// Each `snap` must be released exactly once per acquire (new or retain).
-/// Null is a no-op. Safe to call from any thread, but each concrete handle
-/// follows the acquire/release discipline documented above.
-///
-/// Panics inside this function are caught by `catch_unwind` and swallowed
-/// silently (no `BBTerm` context is available). The function returns unit as
-/// the fallback value.
+/// Each `snap` must be released exactly once per acquire (take or retain).
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
     guard_no_term((), || {
@@ -855,18 +450,9 @@ pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
     })
 }
 
-/// Look up the OSC 8 link id at a snapshot cell. Returns 0 when `snap` is
-/// null, `(row, col)` is outside the grid, or the cell has no OSC 8
-/// attribution.
-///
-/// Pass the returned non-zero id to `bb_snap_link_url` to get the URL.
-///
-/// Safe to call from any thread (the snapshot's link table is immutable
-/// post-construction). Audit L-10 (2026-04-29).
-///
+/// OSC 8 link id at a snapshot cell; 0 for null, out-of-grid or no link. Safe from any thread.
 /// # Safety
-/// `snap` must be non-null and returned by `bb_term_take_snapshot` /
-/// `bb_snap_retain`, not yet released to zero.
+/// Same as `bb_snap_retain`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_link_id_at(snap: *const BBSnap, row: u16, col: u16) -> u32 {
     guard_no_term(0u32, || {
@@ -886,17 +472,10 @@ pub unsafe extern "C" fn bb_snap_link_id_at(snap: *const BBSnap, row: u16, col: 
     })
 }
 
-/// Resolve an OSC 8 link id to its UTF-8 URL. Returns null when `snap` is
-/// null, `link_id == 0`, or the id is unknown. The returned pointer is
-/// valid for the snapshot's lifetime (until the matching `bb_snap_release`
-/// drops the refcount to zero).
-///
-/// Safe to call from any thread (the snapshot's URL table is immutable
-/// post-construction). Audit L-10 (2026-04-29).
-///
+/// Resolve an OSC 8 link id to its UTF-8 URL; null for a null `snap`, id 0 or an unknown id. The
+/// pointer is valid for the snapshot's lifetime. Safe to call from any thread.
 /// # Safety
-/// `snap` must be non-null and returned by `bb_term_take_snapshot` /
-/// `bb_snap_retain`, not yet released to zero.
+/// Same as `bb_snap_retain`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_link_url(
     snap: *const BBSnap,
@@ -909,29 +488,17 @@ pub unsafe extern "C" fn bb_snap_link_url(
         let owned = BBSnapOwned::from_snap_ptr(snap);
         let links = &(*owned).links;
         match links.get(link_id as usize) {
-            // Index 0 is the empty-string sentinel, already filtered above.
             Some(cstr) => cstr.as_ptr(),
             None => std::ptr::null(),
         }
     })
 }
 
-/// Copy the zero-width scalars (combining marks, VS16, ZWJ, Thai/Indic vowel
-/// signs, conjoining jamo) of the snapshot cell at `(row, col)` into the
-/// caller's buffer. `BBCell.ch` carries only the cell's base scalar; these
-/// follow it, in the order they were printed (at most 32 per cell).
-///
-/// Returns the TOTAL number of scalars (which may exceed `out_cap`); at most
-/// `min(total, out_cap)` are written. Passing `out = null` probes the count
-/// without writing. Returns 0 when `snap` is null, `(row, col)` is outside the
-/// grid, or the cell has none (the overwhelmingly common case).
-///
+/// Copy the zero-width scalars (combining marks, VS16, ZWJ) of the cell at `(row, col)` into
+/// `out`. Returns the TOTAL count, which may exceed `out_cap`; `out = null` probes the count.
 /// # Safety
-/// - `snap` must be a pointer from `bb_term_take_snapshot` or retained from one
-/// - `out` must either be null OR point to at least `out_cap * 4` bytes of
-///   writable memory. No u32 alignment is required (byte-wise copy, as in
-///   `bb_snap_damage_rows`).
-/// - Safe to call from any thread (the table is immutable post-construction).
+/// `snap` as for `bb_snap_retain`. `out` must be null or writable for `out_cap * 4` bytes; no
+/// u32 alignment is required. Safe to call from any thread.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_zerowidth_at(
     snap: *const BBSnap,
@@ -965,12 +532,7 @@ pub unsafe extern "C" fn bb_snap_zerowidth_at(
     })
 }
 
-/// Toggle OSC 10 / 11 / 12 `?` reply behaviour. Disabled by default so
-/// a hostile remote can't round-trip the palette back into the PTY
-/// (mitigates the zsh-vi-mode command-injection class). Pass `1` to
-/// enable replies when running a known-safe shell that wants nvim /
-/// tmux auto-theming.
-///
+/// Toggle OSC 10 / 11 / 12 `?` replies. Off by default: a reply puts the palette back into the PTY.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
 #[no_mangle]
@@ -989,13 +551,10 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
     })
 }
 
-/// Set the version string XTVERSION replies carry (`DCS > | Blackbird <v> ST`).
-/// ASCII printable only; anything else is rejected and the reply stays
-/// name-only. Capped at 32 bytes.
-///
+/// Set the version string XTVERSION replies carry (`DCS > | Blackbird <v> ST`). ASCII printable
+/// only, capped at 32 bytes; anything else is rejected. Null clears it.
 /// # Safety
-/// Same preconditions as `bb_term_input`; `version` must be a valid NUL-
-/// terminated C string or null (null clears it).
+/// Same preconditions as `bb_term_input`; `version` must be a NUL-terminated C string or null.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_set_terminal_version(term: *mut BBTerm, version: *const c_char) {
     guard_with_term(term, (), || {
@@ -1021,14 +580,8 @@ pub unsafe extern "C" fn bb_term_set_terminal_version(term: *mut BBTerm, version
     })
 }
 
-/// Allow (`enabled != 0`) or refuse OSC 52 clipboard WRITES (the `c;<base64>`
-/// store form). Reads (`?`) are never answered regardless. Off at
-/// `bb_term_new`; the Swift preference `bb.osc52Enabled` drives it. When
-/// on, an accepted write reaches the callback as
-/// `BBEventKind::Osc52Clipboard` with the decoded text, where the Swift
-/// side applies its own size cap and control-scrub before touching the
-/// pasteboard.
-///
+/// Allow (`enabled != 0`) or refuse OSC 52 clipboard WRITES; reads (`?`) are never answered. Off
+/// at `bb_term_new`. An accepted write arrives as `BBEventKind::Osc52Clipboard`, decoded.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
 #[no_mangle]
@@ -1052,20 +605,9 @@ pub unsafe extern "C" fn bb_term_set_osc52_write_enabled(term: *mut BBTerm, enab
     })
 }
 
-/// Read the current terminal mode bitfield as a `bb_mode::*` union.
-/// O(1) — no snapshot allocation. Use when a caller needs to branch on
-/// a single mode bit (e.g., focus-event emission must check
-/// `FOCUS_IN_OUT` before writing `\x1b[I` / `\x1b[O` to the PTY, since
-/// emitting those bytes when the TUI hasn't enabled mode 1004 would be
-/// interpreted as `HPA` / a cursor move).
-///
+/// Current terminal mode as a `bb_mode::*` union. O(1), no snapshot. Null returns 0.
 /// # Safety
-/// Same preconditions as `bb_term_input`. Null returns 0 (no bits set),
-/// which is the correct default for "don't emit".
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// 0 as the fallback value.
+/// Same preconditions as `bb_term_input`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
     guard_with_term(term, 0u32, || {
@@ -1080,18 +622,9 @@ pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
     })
 }
 
-/// Read the live grid's frame facts (`BBGridState`) WITHOUT taking a snapshot.
-/// O(1), pure read: unlike `bb_term_take_snapshot` it does not drain the
-/// damage set and walks no cells, so it is safe to call from a path that is
-/// not the frame pipeline (copy, Services) between two published frames.
-///
+/// Read `BBGridState` without a snapshot: O(1), no damage drain. Null returns all-zero (`cols` 0).
 /// # Safety
-/// Same preconditions as `bb_term_input`. Null returns an all-zero
-/// `BBGridState` (`cols == 0`).
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// an all-zero `BBGridState` as the fallback value.
+/// Same preconditions as `bb_term_input`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_grid_state(term: *mut BBTerm) -> BBGridState {
     guard_with_term(term, BBGridState::default(), || {
@@ -1105,19 +638,9 @@ pub unsafe extern "C" fn bb_term_grid_state(term: *mut BBTerm) -> BBGridState {
     })
 }
 
-/// Read the parser's DEC 2026 synchronized-update state. O(1), pure read —
-/// no grid mutation, no snapshot allocation, no events fired.
-///
-/// Use it to decide whether a stalled synchronized update needs aborting (see
-/// `bb_term_flush_sync_update`) and how long to wait before re-checking.
-///
+/// Read the DEC 2026 sync state: O(1), no mutation, no events. Null returns "nothing pending".
 /// # Safety
-/// Same preconditions as `bb_term_input`. Null returns an all-zero
-/// `BBSyncStatus` ("nothing pending").
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// an all-zero `BBSyncStatus` as the fallback value.
+/// Same preconditions as `bb_term_input`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_sync_status(term: *mut BBTerm) -> BBSyncStatus {
     guard_with_term(term, BBSyncStatus::idle(), || {
@@ -1131,14 +654,9 @@ pub unsafe extern "C" fn bb_term_sync_status(term: *mut BBTerm) -> BBSyncStatus 
     })
 }
 
-/// True once a caught panic has poisoned this terminal (see
-/// `BBTerm::poisoned`). Read-only. Returns 0 when called re-entrantly from
-/// inside an event callback (same H-5 latch as every other entry: the read
-/// would alias the outer `&mut BBTerm`).
-///
+/// Non-zero once a caught panic has poisoned this terminal; 0 for null or a re-entrant call.
 /// # Safety
-/// `term` must be null or a handle returned by `bb_term_new` that has not
-/// been freed.
+/// `term` must be null or a handle returned by `bb_term_new` that has not been freed.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_is_poisoned(term: *const BBTerm) -> u8 {
     if term.is_null() {
@@ -1150,33 +668,11 @@ pub unsafe extern "C" fn bb_term_is_poisoned(term: *const BBTerm) -> u8 {
     u8::from(poison_blocked(term))
 }
 
-/// Terminate a pending DEC 2026 synchronized update, replaying the parser's
-/// buffered bytes into the grid.
-///
-/// Returns `1` iff an update was open, was terminated, and its buffered bytes
-/// were replayed. Returns `0` for: null term, re-entrant call, panic caught,
-/// no update open, or `force == 0` with the core's deadline not yet elapsed.
-/// Idempotent — an immediate second call returns `0`.
-///
-/// `force == 0` is the only value non-test callers should pass: the core
-/// re-checks its own deadline, so the call physically cannot tear a frame a
-/// TUI legitimately asked for. `force == 1` aborts unconditionally and exists
-/// for `core/tests` (so flush mechanics can be pinned without a 150 ms sleep)
-/// and for callers that must guarantee the grid is reachable right now —
-/// `bb_term_clear_all` uses the internal equivalent for exactly that reason.
-///
-/// This is NOT a thin passthrough: the replay drives alacritty's `Term` and
-/// can synchronously fire Title / Bell / Osc52 / PtyWrite events through the
-/// registered callback, and it resolves deferred OSC 10/11/12 replies and a
-/// rate-suppressed title exactly as `bb_term_input` does. Treat a call to it
-/// as an input-processing event.
-///
+/// Terminate a pending DEC 2026 synchronized update, replaying its buffered bytes into the grid
+/// (the replay can fire events, as `bb_term_input` does). Returns `1` iff one was terminated.
+/// `force == 0` acts only once the core's own deadline has elapsed; `force == 1` always aborts.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op returning `0`.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// `0` as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_flush_sync_update(term: *mut BBTerm, force: u8) -> u8 {
     guard_with_term(term, 0u8, || {
@@ -1193,26 +689,10 @@ pub unsafe extern "C" fn bb_term_flush_sync_update(term: *mut BBTerm, force: u8)
     })
 }
 
-/// Re-attempt delivery of an OSC 52 clipboard write the 32/s rate cap held
-/// back (coalesced to the latest), without needing more PTY input.
-///
-/// `bb_term_input` only retries a held-back write at the end of the NEXT
-/// chunk, so after a burst and silence the write would sit until some later
-/// output (a prompt redraw, minutes on) and then replace whatever the user
-/// copied in the meantime. The embedder calls this from a timer instead.
-///
-/// Returns `0` when nothing is held back (including: the write was just
-/// delivered through the registered callback as an `Osc52Clipboard` event).
-/// Otherwise returns the nanoseconds until the cap's window rolls and the
-/// write can be delivered; call again after that long. Early calls are
-/// harmless: they deliver nothing and return the remaining time.
-///
+/// Re-attempt delivery of an OSC 52 write the rate cap held back, without more PTY input. Returns
+/// `0` when nothing is held back, else the nanoseconds to wait before calling again.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null returns `0`.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// `0` as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_flush_suppressed_osc52(term: *mut BBTerm) -> u64 {
     guard_with_term(term, 0u64, || {
@@ -1233,14 +713,9 @@ pub unsafe extern "C" fn bb_term_flush_suppressed_osc52(term: *mut BBTerm) -> u6
     })
 }
 
-/// Report whether the snapshot's damage set is "full" (all rows need a
-/// redraw — scroll, insert-mode, viewport scrollback change). When true,
-/// the renderer must treat every row as damaged regardless of
-/// `bb_snap_damage_rows`.
-///
+/// Non-zero when every row needs a redraw, regardless of `bb_snap_damage_rows`. Null returns 1.
 /// # Safety
-/// `snap` must be a pointer from `bb_term_take_snapshot` or retained from
-/// one. Null returns 1 (the safe default: repaint everything).
+/// Same as `bb_snap_retain`.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_damage_is_full(snap: *const BBSnap) -> u8 {
     guard_no_term(1u8, || {
@@ -1256,29 +731,11 @@ pub unsafe extern "C" fn bb_snap_damage_is_full(snap: *const BBSnap) -> u8 {
     })
 }
 
-/// Copy the snapshot's damaged-row indices into the caller's buffer. Returns
-/// the TOTAL number of damaged rows (which may exceed `out_cap`); the
-/// function writes at most `min(total, out_cap)` rows into `out`.
-///
-/// Truncation detection: callers compare the return value against `out_cap`.
-/// If `return_value > out_cap`, the buffer was too small and the caller
-/// should re-allocate at `return_value` slots and retry to avoid leaving
-/// stale pixels on the undrawn rows.
-///
-/// Length probe: passing `out = null` with any `out_cap` returns the
-/// total count without writing anything, so a caller can size a buffer
-/// before allocating.
-///
-/// If the damage is `Full`, returns 0 — callers must check
-/// `bb_snap_damage_is_full` first and treat "full" as "all rows need
-/// redraw" regardless of this function's return value.
-///
+/// Copy the damaged-row indices into `out`. Returns the TOTAL count (may exceed `out_cap`;
+/// `out = null` probes it), or 0 when the damage is full: check `bb_snap_damage_is_full` first.
 /// # Safety
-/// - `snap` must be a pointer from `bb_term_take_snapshot` or retained
-/// - `out` must either be null OR point to at least `out_cap * 2` bytes of
-///   writable memory. No u16 alignment is required on `out` — the body
-///   copies byte-wise (rust-core-4 F3).
-/// - Safe to call from any thread.
+/// `snap` as for `bb_snap_retain`. `out` must be null or writable for `out_cap * 2` bytes; no
+/// u16 alignment is required. Safe to call from any thread.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_damage_rows(
     snap: *const BBSnap,
@@ -1295,40 +752,22 @@ pub unsafe extern "C" fn bb_snap_damage_rows(
         }
         let rows = &(*owned).damaged_rows;
         let total = rows.len();
-        // Length probe: caller passed null to size a buffer without writing.
         if out.is_null() || out_cap == 0 {
             return total;
         }
         let n = total.min(out_cap);
-        // Copy as raw bytes (not u16) so an unaligned `out` — e.g. a caller
-        // that cast a u8 buffer via `.cast::<u16>()` at an odd address — is
-        // well-defined on every target, not just those that forgive
-        // unaligned stores. Each u16 is 2 bytes, so `n * 2` bytes total
-        // (rust-core-4 F3).
         std::ptr::copy_nonoverlapping(
             rows.as_ptr() as *const u8,
             out as *mut u8,
             n * std::mem::size_of::<u16>(),
         );
-        // Truncation signal: callers compare the returned `total` against
-        // `out_cap`; `total > out_cap` means the buffer was too small and
-        // the caller should re-allocate at `total` and retry. We don't
-        // `debug_assert` here because truncation is a legitimate API shape
-        // when the caller is size-probing — the log is routed via Swift
-        // when the caller wants diagnostics.
         total
     })
 }
 
-/// Scroll the display by `delta` lines. Positive = scroll up (show older
-/// content), negative = scroll down (show newer content, towards bottom).
-///
+/// Scroll the display by `delta` lines: positive shows older content, negative newer.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Passing null or delta == 0 is a no-op.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
     guard_with_term(term, (), || {
@@ -1347,16 +786,9 @@ pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
     })
 }
 
-/// Snap the viewport back to the live grid (display_offset = 0). Called after
-/// any user keystroke so typing/Enter always brings them back from scrollback
-/// history. A no-op if already at the bottom.
-///
+/// Snap the viewport back to the live grid (display_offset = 0).
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
     guard_with_term(term, (), || {
@@ -1375,24 +807,9 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
     })
 }
 
-/// Clear the visible screen AND the scrollback, moving the cursor to the
-/// top-left. Equivalent to `clear -x` (BSD) / iTerm2's "⌘K" wipe — NOT
-/// what `clear(1)` emits, which is viewport-only (a plain `\x1b[H\x1b[2J`
-/// that leaves scrollback intact). The terminal palette is intentionally
-/// preserved (the user's theme survives ⌘K). The rate-limiter / cache state
-/// and the parallel OSC / DCS scanner ARE reset so a pre-clear adversarial
-/// flood can't degrade the post-clear session — see audit H-3 (2026-04-29).
-///
-/// The grid parser is deliberately NOT reset, because ⌘K can land between any
-/// two PTY reads: a CSI, a UTF-8 character or a short OSC / DCS / APC string
-/// that the program split across the clear is completed as if the clear had
-/// not been there (no stray tail text, SGR colour kept, OSC 8 link intact).
-/// The one exception is an OSC / DCS / SOS / PM / APC string that has stayed
-/// open across more than one chunk: that is a wedged sender, not a split, and
-/// it is dropped undispatched so output renders again. A string opened in the
-/// very last chunk before the clear is indistinguishable from a split one and
-/// is kept; if it stays open as more output arrives, the next ⌘K drops it.
-///
+/// Clear the visible screen AND the scrollback and home the cursor. The palette is preserved;
+/// rate-limiter, cache and OSC / DCS scanner state are reset. The grid parser is NOT reset, so a
+/// sequence split across the clear completes; a string open across more than one chunk is dropped.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
 #[no_mangle]
@@ -1408,151 +825,49 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
             return;
         }
         let bb = &mut *term;
-        // A pending DEC 2026 synchronized update would otherwise stay pending
-        // across the wipe: ⌘K — the user's only manual escape from a tab
-        // wedged by an unterminated BSU — would leave it wedged, and up to
-        // 2 MiB of adversary-controlled bytes would survive the wipe, exactly
-        // the retained-state class audit H-3 enumerates below.
-        //
-        // Abort unconditionally FIRST: the replay draws into the grid, so it
-        // has to land before the clear, not after. Replay-then-clear rather
-        // than discard is deliberate: the buffered bytes may carry mode
-        // changes (?1049h, DECSTBM, SGR) the running program's later output
-        // depends on, and vte exposes no public buffer-discard. The clear
-        // below erases whatever the replay drew. No-op when nothing is
-        // pending, so every existing clear_all test is unaffected.
+        // Abort a pending DEC 2026 update FIRST: its replay draws into the grid the clear erases.
         let _ = flush_sync_update(bb, true);
-        // Home, erase display, erase scrollback (the handler calls behind
-        // `ESC[H` / `ESC[2J` / `ESC[3J`). Deliberately NOT those bytes pushed
-        // through `bb.processor`: ⌘K lands between arbitrary PTY chunk
-        // boundaries, so the parser may be mid-sequence, and the injected ESC
-        // would abort a pending CSI (its tail then prints as text and its SGR
-        // is lost) or terminate a pending OSC and dispatch it truncated (OSC 8
-        // links a prefix of the URL). Handler calls leave the parser alone, so
-        // a sequence cut by the clear finishes on the cleared screen. The one
-        // thing the ESC did right, ending a string the sender never closed, is
-        // done explicitly below.
+        // Handler calls, deliberately NOT `ESC[H` / `ESC[2J` / `ESC[3J` through `bb.processor`:
+        // the parser may be mid-sequence, and an injected ESC would abort or truncate it.
         {
             use alacritty_terminal::vte::ansi::{ClearMode, Handler};
             bb.term.goto(0, 0);
             bb.term.clear_screen(ClearMode::All);
             bb.term.clear_screen(ClearMode::Saved);
         }
-        // 3J only reaches the ACTIVE grid; with the alt screen up (Claude
-        // Code holds it for its whole session) that is the alt grid's empty
-        // history, and the primary scrollback returned on exit. With the
-        // primary screen up, the other grid is the alt screen: whatever a TUI
-        // left on it after `?1049l` stays charged to the OSC 8 byte budget
-        // until the next `?1049h`, so it is erased too.
         bb.term.clear_inactive_grid();
-        // A string (OSC / DCS / SOS / PM / APC) that was already open when the
-        // PREVIOUS chunk ended is no read-boundary split: its sender never
-        // closed it, and `bb.processor` would keep swallowing every byte that
-        // is not ESC / CAN / SUB / BEL, so the prompt after the clear would
-        // never render. Worse, the buffered payload (up to 8 MiB) would survive
-        // the wipe and be dispatched with post-clear output as its body (audit
-        // H-3 class). Drop it undispatched. A string opened in the LAST chunk
-        // is kept: it may be a split OSC 8 / title whose tail is still coming.
+        // A string open since before the PREVIOUS chunk is a wedged sender, not a split: drop it.
         if bb.string_state_chunks >= WEDGED_STRING_CHUNKS && bb.processor.abort_string() {
             bb.string_state_chunks = 0;
         }
-        // Audit RC-02 + P2-02 — also reset our parallel-parser state and
-        // rate-limit windows. Without this, a mid-sequence parser
-        // continues into post-clear bytes (most dangerous: a mid-DCS
-        // XTGETTCAP that accumulates post-clear bytes into its reply).
-        // This resets only our scanner, a separate vte::Parser tracked
-        // alongside the grid parser, so a tap-only sequence (OSC 7 / OSC 133 /
-        // XTGETTCAP) cut by the clear is dropped, while the grid parser above
-        // finishes the sequence it was in.
+        // Reset the tap's own parser: a mid-DCS XTGETTCAP must not accumulate post-clear bytes.
         bb.osc_parser = Parser::new();
         bb.osc_possibly_pending = false;
-        // (also zeroes `modify_other_keys`; see H-3 item 3 below)
         bb.osc_tap.reset();
-        // Rate-limit budgets are session state. A pre-clear OSC 11 flood
-        // shouldn't leave the post-clear session unable to answer
-        // legitimate color queries for the rest of the 1s window.
         bb.color_query_reply_window_start = std::time::Instant::now();
         bb.color_query_reply_window_count = 0;
         bb.color_query_reply_drop_logged = false;
 
-        // Audit H-3 (2026-04-29): five sibling state slots survived the
-        // pre-existing reset list, leaving these adversarial-state
-        // primitives carryable across ⌘K:
-        //
-        //   1. `prompt_mark_rate` — pre-clear OSC 133 flood degraded
-        //      post-clear prompt navigation for up to 1 s.
-        //   2. `osc7_rate` — pre-clear OSC 7 flood ate the 1-s ingest
-        //      budget, so post-clear `cd` events dropped silently.
-        //   3. `modify_other_keys` — xterm modifyOtherKeys mode persisted
-        //      across the wipe (reset above via `osc_tap.reset()`).
-        //   4. `pty_write_rate` (Arc on the callback) — pre-clear OSC 11
-        //      flood ate the 1-s PTY-write budget.
-        //   5. `uri_cstr_cache` / `uri_cache_bytes` — pre-clear OSC 8
-        //      cache flood blocked legitimate post-clear OSC 8 links
-        //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
         bb.prompt_mark_rate = EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW);
         bb.osc7_rate = EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW);
         bb.osc7_hostname_rate = EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW);
         bb.callback.pty_write_rate.reset();
         bb.callback.reset_event_rates();
 
-        // OSC 8 URI intern cache: drain unconditionally. Audit S5-002.
-        //
-        // The previous shape used
-        // `retain(|_uri, arc| Arc::strong_count(arc) > 1)` to keep
-        // entries still referenced by a live snapshot. That semantics
-        // sounds safe but breaks the documented H-3 invariant in
-        // production: Swift's `TerminalSession.clearAll` runs the FFI
-        // call while `TerminalView.currentSnapshot` still pins the
-        // pre-clear snapshot. Every cache entry's Arc has
-        // strong_count > 1, retain keeps everything, and a pre-clear
-        // adversarial flood permanently disables OSC 8 attribution for
-        // the rest of the BBTerm lifetime (or until a SECOND clearAll
-        // happens after the snapshot was released — but Swift always
-        // re-pins on publish).
-        //
-        // Memory safety of the unconditional clear: each snapshot's
-        // `links: Vec<Arc<std::ffi::CStr>>` holds its own Arc clones
-        // (cf. `bb_term_take_snapshot` at the cache-resolve path).
-        // Dropping the cache's Arc only decrements; the snapshot's
-        // clone keeps the CStr alive for the lifetime of the snapshot.
-        // The `*const c_char` pointers returned by `bb_snap_link_url`
-        // come from the snapshot's own Arc, not the cache's, so they
-        // do not dangle. (The "would dangle" caveat in the prior
-        // comment was incorrect — the snapshot's links table owns its
-        // Arc independently.)
-        //
-        // The reachability test `osc8_link_cap_resets_on_clear_all_even_with_live_snapshot`
-        // pins this invariant; the original
-        // `osc8_link_cap_resets_on_clear_all` (which released
-        // snap_pre BEFORE clearAll) continues to pass for the same
-        // reason — clear() always drops references, regardless of
-        // whether external owners exist.
+        // Clear unconditionally, not `retain(strong_count > 1)`: Swift still pins the pre-clear
+        // snapshot here, so retain would keep everything. Snapshots hold their own Arc clones.
         bb.uri_cstr_cache.clear();
-        // …and re-arm the intern-cap breadcrumb. Its message tells the user
-        // ⌘K is the recovery, so a session that exhausts the budget a second
-        // time after clearing must be able to say so. The live-byte budget's
-        // breadcrumb names ⌘K too, with the cases where it does not free links.
         bb.osc8_intern_cap_logged = false;
         bb.osc8_live_cap_logged = false;
         bb.uri_cache_bytes = 0;
     })
 }
 
-/// Update one slot of the terminal's color palette. Slot indices match
-/// alacritty's `NamedColor` ordering (vte-0.15.0/src/ansi.rs): 0..=15 =
-/// 16 ANSI colors, 16..=255 = extended 256-palette, 256 = Foreground,
-/// 257 = Background, 258 = Cursor, 259..=266 = DimBlack..DimWhite,
-/// 267 = BrightForeground, 268 = DimForeground. `rgb` is packed
-/// 0xRRGGBB. Slot count is alacritty's `term::color::COUNT` (269 in
-/// 0.26); slots ≥ COUNT are silently ignored.
-/// (Pre-fix-#24 this doc said "259 = BrightForeground" — wrong; that
-/// slot is DimBlack. The correct mapping was confirmed against
-/// vte-0.15.0 source on 2026-05-11.)
-///
+/// Update one palette slot; `rgb` is packed 0xRRGGBB. Slots follow alacritty's `NamedColor`:
+/// 0..=255 = palette, 256 = Foreground, 257 = Background, 258 = Cursor, 259..=266 =
+/// DimBlack..DimWhite, 267 = BrightForeground, 268 = DimForeground. Other slots are ignored.
 /// # Safety
-/// Same preconditions as `bb_term_input`. Null `term` is a no-op. Slots
-/// beyond alacritty's palette length are silently ignored.
+/// Same preconditions as `bb_term_input`. Null `term` is a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, rgb: u32) {
     guard_with_term(term, (), || {
@@ -1566,15 +881,7 @@ pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, r
             return;
         }
         let bb = &mut *term;
-        // alacritty's Term::set_color indexes its Colors array directly; any
-        // slot ≥ the array length panics with an index-out-of-bounds. The
-        // Colors layout is `[Option<Rgb>; COUNT]` with COUNT = 269 in 0.26
-        // (256 palette + 13 named). The Swift side only uses 0..=258, but
-        // the FFI must survive arbitrary input (fuzzer, misbehaving API
-        // user) without panicking — libFuzzer's panic hook aborts the
-        // process before `guard_with_term`'s `catch_unwind` ever runs, so
-        // "catch the panic" is not a substitute for "don't panic". Gate
-        // against the constant COUNT from alacritty's public API.
+        // `Term::set_color` panics out of range; libFuzzer aborts before `catch_unwind` runs.
         if (slot as usize) >= alacritty_terminal::term::color::COUNT {
             return;
         }
@@ -1587,104 +894,27 @@ pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, r
     })
 }
 
-/// Owned UTF-8 byte buffer returned from text-extraction FFIs.
-///
-/// `bytes`/`len` describe a read-only view into the heap buffer whose raw
-/// parts are stored in `_owned_ptr` / `_owned_cap`. The Rust side
-/// heap-allocates a `Box<BBString>`, builds the payload as a `Vec<u8>`, then
-/// decomposes the vec (ptr + capacity) and installs the pointer into
-/// `bytes`. Callers must free via `bb_string_release` exactly once; nothing
-/// else keeps the backing allocation alive.
-///
-/// The `_owned_*` fields are intentionally present in the C-visible layout
-/// to keep the struct self-contained (one `Box<BBString>` + one `Vec<u8>`
-/// buffer, freed together by `bb_string_release`). Consumers on the C side
-/// should read only `bytes` and `len` and otherwise treat the struct as
-/// opaque — never poke into the owned fields. Using raw pointer + capacity
-/// instead of a literal `Vec<u8>` field lets cbindgen emit a complete,
-/// FFI-safe layout that Swift can import: `Vec<u8>` is not `repr(C)`, so a
-/// `Vec` field would surface as an incomplete type in the generated header.
-///
-/// `_magic` is a sentinel set by `bb_string_new` (to `BB_STRING_MAGIC`) and
-/// zeroed by `bb_string_release` before the heap buffer is reconstructed.
-/// It gives `bb_string_release` a cheap defence against double-free and
-/// wild-pointer input: a mismatching `_magic` short-circuits without
-/// calling `Vec::from_raw_parts` (which would be UB on stale pointers).
-/// Safety belt for Swift callers — still single-free by contract.
+/// Owned UTF-8 buffer returned from text-extraction FFIs. Read only `bytes` and `len`
+/// (`bytes == NULL ⇔ len == 0`); free exactly once via `bb_string_release`.
 #[repr(C)]
 pub struct BBString {
     pub bytes: *const u8,
     pub len: usize,
     _owned_ptr: *mut u8,
     _owned_cap: usize,
-    /// Magic sentinel: `BB_STRING_MAGIC` when live, `0` after release.
-    /// Double-free and wild-pointer input are rejected cheaply.
+    /// `BB_STRING_MAGIC` when live, `0` after release.
     _magic: u64,
 }
 
-/// Magic sentinel stamped into `BBString::_magic` on construction. Any
-/// 64-bit constant unlikely to appear on the heap by accident. Also
-/// invariant-encodes the string "BlackbirdStr" via the low byte pattern.
 pub const BB_STRING_MAGIC: u64 = 0xB1AC_5BBD_5721_57E0;
 
-/// Extract UTF-8 text from the terminal buffer between two buffer-relative
-/// points. `start_line`/`end_line` are grid lines where 0 is the top of the
-/// visible viewport and negative values reach into scrollback (buffer-relative,
-/// matching alacritty's `Line(i32)` convention).
-///
-/// `flags` is a bit set; undefined bits are ignored.
-///
-/// Bit 0 (`1`) clear selects prose mode: the first line is emitted from
-/// `start_col` to the end of the row, the last line from column 0 to
-/// `end_col`, and middle lines are taken in full. Trailing spaces are trimmed
-/// from every line to avoid pulling the grid's blank fill into copied output;
-/// the last line (or a single-line range) is trimmed only when `end_col` sits
-/// in the row's blank tail, so a selection ending inside the text keeps the
-/// spaces it covers. Only a one-cell pick of a blank on a single line keeps
-/// its lone space; a wider all-blank span (a triple-click on an empty line)
-/// yields an empty string.
-///
-/// Bit 0 (`1`) set selects rectangular mode: every line is clipped to
-/// `[start_col, end_col]` with no trimming.
-///
-/// A tab (HT) is stored as `\t` in the first cell of its span; the cells it
-/// skipped over stay blank. By default the blank fill up to the next tab stop
-/// is dropped, so `a<TAB>b` copies as `a\tb`; spaces that were typed (on or
-/// after a stop) are kept. Bit 1 (`2`) set keeps the fill, giving exactly one
-/// output char per grid cell (before wide-char spacer skipping and zero-width
-/// scalars): the find bar reads string offsets as grid columns, so it sets it.
-///
-/// Bit 2 (`4`) set reports soft wraps: every line, the last included, is
-/// followed by a terminator, `\r` if it soft-wrapped onto the next line and
-/// `\n` if not (instead of joining lines with `\n` only at hard breaks). The
-/// find bar passes `7` (rectangular, keep the tab fill, report soft wraps) to
-/// rejoin wrapped scrollback rows while keeping a 1:1 row mapping.
-///
-/// `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
-/// spaces come through as-is. Wide-char spacer cells (alacritty's
-/// `WIDE_CHAR_SPACER` / `LEADING_WIDE_CHAR_SPACER` flags) are SKIPPED entirely
-/// — the preceding primary cell already held the wide glyph's character, and
-/// emitting a space for the spacer would double-count columns and break paste
-/// round-trip for CJK/emoji (e.g. "中文" would emit as "中 文 "). Lines outside
-/// `[topmost_line, bottommost_line]` are skipped silently. Points are
-/// normalized so `(start_line, start_col) <= (end_line, end_col)` before
-/// iterating.
-///
-/// Returns a heap-allocated `BBString` the caller must free with
-/// `bb_string_release`. Returns null on (a) null `term` or (b) a panic
-/// during text extraction (caught by `catch_unwind` and reported as a
-/// `BBEventKind::Fatal` event before this function returns null).
-/// Zero-area ranges return an empty `BBString`, not null. Callers
-/// cannot distinguish (a) from (b) by the return value alone; wire a
-/// Fatal event handler if you need to learn about extraction panics.
-/// Audit L-9 (2026-04-29).
-///
+/// Extract UTF-8 text between two points; line 0 is the top of the viewport and negative lines
+/// reach into scrollback. `flags`: bit 0 = rectangular (clip every line to `[start_col, end_col]`,
+/// no trimming), bit 1 = keep a tab's blank fill (one char per cell), bit 2 = end every line with
+/// `\r` if it soft-wrapped and `\n` if not. Returns a `BBString` to free with `bb_string_release`;
+/// null on a null `term` or a caught panic. A zero-area range returns an empty `BBString`.
 /// # Safety
 /// Same preconditions as `bb_term_input`. Caller owns the returned pointer.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback. The function returns
-/// null as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_text_range(
     term: *mut BBTerm,
@@ -1707,30 +937,11 @@ pub unsafe extern "C" fn bb_term_text_range(
     })
 }
 
-/// Allocate a `BBString` wrapping `bytes`. The vec's heap buffer is stolen
-/// (via `Vec::into_raw_parts`-style decomposition) and held in `_owned_ptr` +
-/// `_owned_cap` so `bb_string_release` can rebuild and drop it.
-///
-/// Stamps `_magic` with `BB_STRING_MAGIC` so `bb_string_release` can detect
-/// a double-free or wild-pointer input before invoking `Vec::from_raw_parts`
-/// (which would be UB on stale parts).
-///
-/// For an empty payload (`bytes.is_empty()`), both `bytes` and `_owned_ptr`
-/// are set to null so a C consumer can rely on `bytes == NULL ⇔ len == 0`.
-/// `Vec::new().as_mut_ptr()` would otherwise hand back `NonNull::dangling()`
-/// (a non-null sentinel equal to `align_of::<u8>()`), which (a) breaks that
-/// invariant for Swift/C callers and (b) is UB if passed to `memcpy` with
-/// `n == 0` under strict C11 semantics. `bb_string_release` mirrors the
-/// null check and skips `Vec::from_raw_parts` for the empty case
-/// (rust-core-4 F1).
-///
+/// An empty payload publishes null `bytes`, never `Vec`'s `NonNull::dangling()`.
 /// # Safety
 /// The returned pointer must be released exactly once via `bb_string_release`.
 unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
     if bytes.is_empty() {
-        // Drop the vec eagerly; we know its capacity is irrelevant once we
-        // publish null. Any residual heap buffer (non-zero cap on an empty
-        // vec) deallocates with the Vec's own allocator, not ours to track.
         drop(bytes);
         let boxed = Box::new(BBString {
             bytes: std::ptr::null(),
@@ -1745,8 +956,6 @@ unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
     v.shrink_to_fit();
     let len = v.len();
     let cap = v.capacity();
-    // SAFETY: leaking the vec is safe; its raw parts are recorded below and
-    // will be reconstituted in bb_string_release.
     let ptr = v.as_mut_ptr();
     std::mem::forget(v);
     let boxed = Box::new(BBString {
@@ -1759,71 +968,27 @@ unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
     Box::into_raw(boxed)
 }
 
-/// Free a `BBString` returned by `bb_term_text_range`.
-///
-/// Rebuilds the owned `Vec<u8>` from `_owned_ptr`/`_owned_cap`/`len` so its
-/// heap buffer is deallocated with the matching `Vec` allocator, then drops
-/// the `Box<BBString>`.
-///
-/// Defends against double-free and wild-pointer input by checking
-/// `_magic` against `BB_STRING_MAGIC` before touching the owned parts. A
-/// mismatching magic returns early (with a one-line log) without calling
-/// `Vec::from_raw_parts` — that would be UB on stale/invalid raw parts and
-/// the null guard can't catch it. Successful releases zero the magic so a
-/// subsequent double-release is detected cheaply.
-///
-/// Audit fix-#25 (2026-05-11): the magic check + zero is performed via
-/// `AtomicU64::compare_exchange` (`AcqRel`/`Acquire`), so two threads
-/// racing release on the same pointer cannot both observe
-/// `BB_STRING_MAGIC` before either's zero-write lands. Exactly one
-/// thread's CAS succeeds and proceeds to `Box::from_raw`; the loser
-/// observes the zeroed sentinel and short-circuits, avoiding the
-/// double-free that the previous non-atomic `ptr::read` + `ptr::write`
-/// sequence permitted. The struct field stays `u64` (no cbindgen header
-/// churn) and is accessed atomically via `AtomicU64::from_ptr`.
-///
+/// Free a `BBString`. Null is a no-op. A `_magic` mismatch (double free, wild pointer) returns
+/// without freeing; concurrent releases of the SAME pointer are tolerated (one CAS wins).
 /// # Safety
-/// `s` must have been returned by `bb_term_text_range` and not previously
-/// released. Passing null is a no-op. Concurrent calls from multiple
-/// threads on the SAME pointer are tolerated: the CAS singles out one
-/// caller as the actual freer.
-///
-/// Panics inside this function are caught by `catch_unwind` and swallowed
-/// silently (no `BBTerm` context is available). The function returns unit as
-/// the fallback value.
+/// `s` must have been returned by `bb_term_text_range` and not previously released.
 #[no_mangle]
 pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
     guard_no_term((), || {
         if s.is_null() {
             return;
         }
-        // Atomic compare-exchange on the magic sentinel. AtomicU64::from_ptr
-        // (stable since Rust 1.84) creates a borrowed AtomicU64 view over
-        // the existing u64 field — no struct-layout change, so the cbindgen
-        // header and the `bb_string_magic_layout_pinned` test stay valid.
-        //
-        // SAFETY (from_ptr): the caller's contract requires `s` to point
-        // to a live BBString allocation. _magic was initialised
-        // non-atomically by bb_string_new BEFORE the pointer was published
-        // (Box::into_raw + return-across-FFI synchronizes-with any later
-        // observer). For the lifetime of this release call, every access
-        // to _magic on this pointer is through AtomicU64::from_ptr, so
-        // the "no non-atomic access during the borrow" rule holds.
+        // SAFETY (from_ptr): `_magic` was initialised before the pointer was published, and for
+        // the lifetime of this call every access to it goes through `AtomicU64::from_ptr`.
         let magic_ptr = std::ptr::addr_of!((*s)._magic) as *mut u64;
         let magic_atomic = AtomicU64::from_ptr(magic_ptr);
         match magic_atomic.compare_exchange(BB_STRING_MAGIC, 0, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
-                // We claimed the deallocation. Any concurrent release on
-                // the same pointer observes magic=0 and falls into the
-                // Err branch below.
+                // We claimed the deallocation; a concurrent release observes magic=0.
             }
             Err(found) => {
-                // Zero magic => already released (double-free or lost CAS
-                // race). Any other value => wild/uninitialized pointer.
-                // Either way, don't touch the owned parts. Logging through
-                // breadcrumb! is acceptable: this is a development-side
-                // signal, not a hot path.
+                // Zero magic => already released. Any other value => wild/uninitialized pointer.
                 breadcrumb!(
                     "bb_string_release: magic mismatch (got {:#x}, expected {:#x}); \
                      refusing to free possibly-invalid BBString",
@@ -1834,11 +999,7 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
             }
         }
         let boxed = Box::from_raw(s);
-        // Reconstitute the owned vec so its heap buffer is freed via the
-        // matching `Vec<u8>` allocator. `bb_string_new` short-circuits
-        // empty payloads to `_owned_ptr = null`, so skip `from_raw_parts`
-        // there — calling it with a null pointer is UB even when cap is 0
-        // (rust-core-4 F1).
+        // `_owned_ptr` is null for an empty payload; `from_raw_parts` on null is UB even at cap 0.
         if !boxed._owned_ptr.is_null() {
             let _ = Vec::from_raw_parts(boxed._owned_ptr, boxed.len, boxed._owned_cap);
         }
@@ -1846,11 +1007,7 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
     })
 }
 
-/// FFI: true when `scalar` (a Unicode code point) is a bidi-control /
-/// zero-width / invisible scalar per the core's canonical set. The single
-/// source of truth the Swift HyperlinkResolver percent-encoded blocklist is
-/// pinned against (drift detection). Invalid code points (surrogates / out of
-/// range) return false.
+/// True for a bidi-control / zero-width / invisible scalar; false for invalid code points.
 #[no_mangle]
 pub extern "C" fn bb_is_bidi_or_invisible_scalar(scalar: u32) -> bool {
     match char::from_u32(scalar) {
@@ -1859,32 +1016,21 @@ pub extern "C" fn bb_is_bidi_or_invisible_scalar(scalar: u32) -> bool {
     }
 }
 
-/// FFI: how many grid cells `Term::input` gives `scalar` when printed: 0 for
-/// zero-width marks, joiners and variation selectors (they attach to the
-/// previous cell), 1, or 2 for wide glyphs. Control characters and invalid code
-/// points (surrogates / out of range) are never printed, so they report 0.
-/// The single source of truth Swift's IME preedit width model
-/// (`CellWidth.width(for:)`) reads, so its overlay and candidate anchor cannot
-/// drift from where the grid lays the committed text.
+/// Grid cells `Term::input` gives `scalar` when printed: 0 for zero-width marks, joiners,
+/// variation selectors, control characters and invalid code points; 1; or 2 for wide glyphs.
 #[no_mangle]
 pub extern "C" fn bb_scalar_cell_width(scalar: u32) -> u8 {
     use unicode_width::UnicodeWidthChar;
     match char::from_u32(scalar).and_then(|c| c.width()) {
-        // `Term::input` treats any width other than 0 or 1 as a wide glyph
-        // (2 cells); unicode-width reports U+FDFD as 3.
+        // `Term::input` treats any width other than 0 or 1 as 2 cells; U+FDFD reports 3.
         Some(width) => width.min(2) as u8,
         None => 0,
     }
 }
 
 /// Test-only: force a panic inside the FFI boundary to verify Fatal event delivery.
-///
 /// # Safety
-/// Same as other guarded FFI functions. `term` must be a valid non-null pointer
-/// from `bb_term_new`, not freed for the duration of the call.
-///
-/// Panics inside this function are caught by `catch_unwind` and delivered as a
-/// `BBEventKind::Fatal` event to the registered callback.
+/// `term` must be a valid non-null pointer from `bb_term_new`, not freed during the call.
 #[no_mangle]
 #[cfg(any(test, feature = "test-only"))]
 pub unsafe extern "C" fn bb_term_test_only_panic(term: *mut BBTerm) {
@@ -1899,24 +1045,10 @@ pub unsafe extern "C" fn bb_term_test_only_panic(term: *mut BBTerm) {
 #[cfg(test)]
 mod tests;
 
-/// True when a caught panic has poisoned this terminal (see
-/// `BBTerm::poisoned`). Every MUTATING entry consults this right after its
-/// null check AND its `ffi_reentry_blocked` check so the "no-op after a
-/// panic" invariant holds by construction rather than per call site.
-/// Read-only entries (snapshot, text range, mode) stay open so the Swift
-/// side can still show and copy what was on screen when the core died.
-///
-/// Ordering is load-bearing: this reads through `*term`, and while the
-/// outer `bb_term_input` is inside `process_input(&mut *term, …)` that
-/// `&mut BBTerm` is a protected Unique borrow. A callback that re-enters
-/// any entry point must bail on the thread-local latch (no `*term` deref)
-/// BEFORE this read, or the read itself is the aliasing access Stacked
-/// Borrows rejects (nightly miri, 2026-09-09 → 2026-09-15 regression).
-///
+/// Mutating entries call this AFTER their `ffi_reentry_blocked` check (read-only entries stay
+/// open): it reads through `*term`, which would alias the outer `&mut BBTerm` on re-entry.
 /// # Safety
-/// `term` must be non-null and point at a live `BBTerm`, and no `&mut
-/// BBTerm` derived from it may be live on this thread (guaranteed by
-/// checking `ffi_reentry_blocked` first).
+/// `term` must point at a live `BBTerm` with no `&mut BBTerm` derived from it live on this thread.
 unsafe fn poison_blocked(term: *const BBTerm) -> bool {
     (*term).poisoned.get()
 }

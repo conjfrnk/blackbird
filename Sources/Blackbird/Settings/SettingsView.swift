@@ -1,33 +1,15 @@
 import SwiftUI
 import AppKit
 
-/// Shared chrome for the Settings + Diagnostics surfaces — one definition of
-/// the version string and the grouped-Form section-footer layout, consumed by
-/// both `SettingsView` and `DiagnosticsView` (REFACTOR.md Part III §4; was
-/// duplicated across the two files).
 enum SettingsChrome {
-    /// Human-readable "short (build)" version string. Read once per launch;
-    /// neither Info.plist value changes at runtime. (The "—" fallback is
-    /// unreachable in a built bundle — both keys are always present.)
     static let versionString: String = {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
         return short == build ? short : "\(short) (\(build))"
     }()
 
-    /// Section-footer helper. SwiftUI's grouped Form on macOS treats a bare
-    /// `Text` in a footer as label-column content: it gets the narrow left
-    /// column and defaults `multilineTextAlignment` to `.center`, producing
-    /// the ragged centered column the user sees. `.frame(maxWidth: .infinity,
-    /// alignment: .leading)` alone doesn't fix it — that only says "accept
-    /// up to ∞ if offered," and the parent never offers more than the label
-    /// column. The HStack with a trailing `Spacer(minLength: 0)` is the
-    /// standard workaround: HStack is a flexible-width container the footer
-    /// parent does propose the full row to, and the Spacer absorbs whatever
-    /// is left of the Text so the Text pins leading.
-    /// `.multilineTextAlignment(.leading)` is the explicit override of the
-    /// Form's centered default — the HStack on its own would still leave
-    /// wrapped lines center-aligned within the Text's frame.
+    /// A bare `Text` in a grouped-Form footer gets the narrow label column and centers; the HStack with a
+    /// trailing Spacer is offered the full row and pins the text leading.
     static func footer(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 0) {
             Text(text)
@@ -38,31 +20,15 @@ enum SettingsChrome {
     }
 }
 
-/// Monospaced font families installed on the system, for the Settings Family
-/// picker. Built once per process and reused across SettingsView renders —
-/// without the cache, SwiftUI would re-enumerate on every body re-eval (every
-/// slider drag, every toggle). Fonts rarely change at runtime; a user who
-/// installs one can restart Settings to see it.
-///
-/// The enumeration costs hundreds of ms cold (one font lookup per installed
-/// family), so `prewarm()` runs it on a utility queue after launch instead of
-/// letting the first Cmd-, pay for it on the main thread. Uses CoreText, whose
-/// font APIs are thread-safe (NSFontManager is not documented as such). `all`
-/// is a `static let` (`swift_once`): a main-thread read that races the prewarm
-/// simply blocks until the one computation finishes, and never sees a partial
-/// or empty list.
+/// Enumerated with CoreText, whose font APIs are thread-safe (NSFontManager is not documented as such),
+/// so `prewarm()` can run it off the main thread.
 enum MonospaceFontFamilies {
     static let all: [String] = compute()
 
-    /// Kick `all` onto a background queue. Idempotent and safe to call from any
-    /// thread.
     static func prewarm() {
         DispatchQueue.global(qos: .utility).async { _ = all }
     }
 
-    /// Same result as filtering `NSFontManager.availableFontFamilies` on
-    /// `NSFont(name:size:)?.isFixedPitch`, via CoreText. Exposed (internal)
-    /// so tests can pin that parity.
     static func compute() -> [String] {
         let names = (CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? []
         return names
@@ -70,8 +36,7 @@ enum MonospaceFontFamilies {
                 // NSFontManager hides the dot-prefixed system families.
                 guard !name.hasPrefix(".") else { return false }
                 let font = CTFontCreateWithName(name as CFString, 12, nil)
-                // CTFontCreateWithName substitutes a default font for an
-                // unresolvable name where NSFont(name:) returned nil.
+                // CTFontCreateWithName substitutes a default font for an unresolvable name.
                 guard CTFontCopyFamilyName(font) as String == name else { return false }
                 return CTFontGetSymbolicTraits(font).contains(.traitMonoSpace)
             }
@@ -80,15 +45,8 @@ enum MonospaceFontFamilies {
 }
 
 public struct SettingsView: View {
-    // `Preferences.shared` is a long-lived singleton; using `@ObservedObject`
-    // (rather than `@StateObject`) makes it explicit that SettingsView doesn't
-    // own the object's lifecycle — the view just observes a pre-existing one.
-    // `@StateObject` would still function here because its init closure is
-    // evaluated once, but it adds lifecycle semantics SettingsView doesn't
-    // need and reads wrong at a glance.
     @ObservedObject private var prefs = Preferences.shared
 
-    /// The Settings sections, in strip order.
     private enum Pane: String, CaseIterable, Identifiable {
         case appearance = "Appearance"
         case behavior = "Behavior"
@@ -106,28 +64,8 @@ public struct SettingsView: View {
         sections.frame(minWidth: 520, minHeight: 520)
     }
 
-    // A segmented `Picker` + content switch, deliberately NOT SwiftUI's
-    // `TabView`. On macOS 27 the AppKit-backed `TabView` leaves its
-    // `NSTabViewSegmentedControl` at 0×0 after the first layout pass — all
-    // four labels draw on top of each other in a tiny box ("DiB…") until
-    // something changes the view's bounds (a window resize). Proven with a
-    // standalone harness: the 0×0 strip is independent of this window's
-    // chrome (`fullSizeContentView`, transparent titlebar, the blur
-    // wrapper), and `needsLayout` / `invalidateIntrinsicContentSize` /
-    // re-showing the window do not recover it — only a bounds change does.
-    // The segmented `Picker` sizes itself on first layout. Content is
-    // switched lazily (only the selected pane is built), as `TabView` did.
-    //
-    // The `.frame(maxHeight: .infinity, alignment: .top)` pins the strip to
-    // the top: short panes (Updates, the empty Diagnostics state) would
-    // otherwise let the VStack shrink-wrap and center vertically in the
-    // window, floating the strip mid-window.
-    //
-    // `.containerBackground(for: .window)` is macOS 15+. On older systems
-    // the NSVisualEffectView installed behind the hosting controller
-    // (see SettingsWindowController) already shows through any non-
-    // opaque SwiftUI layers, so the guard is purely to adopt the
-    // explicit-clear-window API when available.
+    // A segmented `Picker`, not `TabView`: on macOS 27 the AppKit-backed `TabView` leaves its
+    // `NSTabViewSegmentedControl` at 0×0 until the window is resized.
     @ViewBuilder
     private var sections: some View {
         let base = VStack(spacing: 0) {
@@ -206,12 +144,6 @@ public struct SettingsView: View {
                 Toggle("Blink cursor", isOn: $prefs.cursorBlink)
             }
 
-            // Translucency lives in its own "Window" section — the previous
-            // layout left it as a headerless row that visually floated below
-            // the Cursor section. Pairing it with the explanatory footer under
-            // a proper header also matches how every other pref group in this
-            // file is organized. SwiftUI's titleKey+footer convenience doesn't
-            // exist on macOS 14, so we spell out header:/footer: builders.
             Section {
                 LabeledContent("Translucency") {
                     HStack(spacing: 10) {
@@ -234,9 +166,6 @@ public struct SettingsView: View {
         .scrollContentBackground(.hidden)
     }
 
-    /// Live validation for the Shell field: nil when empty (login shell) or
-    /// an executable absolute path; otherwise the reason the value will be
-    /// ignored. A typo here used to fall back to zsh with only a log line.
     static func shellPathProblem(_ raw: String) -> String? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.isEmpty { return nil }
@@ -300,25 +229,8 @@ public struct SettingsView: View {
             }
 
             Section {
-                // The "Allow remote clipboard writes (OSC 52)" toggle was
-                // removed (audit S4-001): the Rust core hardcodes
-                // `Osc52::Disabled` with no FFI to change it, so OSC 52 writes
-                // never reach the Swift side — the toggle advertised a
-                // capability that could never take effect. The `osc52Enabled`
-                // preference and the Swift-side scrub / size-cap handler are
-                // retained as dormant defence-in-depth (and stay unit-tested)
-                // for if the core ever opts back in, but they are no longer
-                // user-exposed.
                 Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
-                // v0.8.1: the core gained a runtime switch
-                // (`bb_term_set_osc52_write_enabled`), so the toggle removed
-                // in audit S4-001 is back and now does what it says. Writes
-                // only — reads (`OSC 52 ; c ; ?`) are never answered.
                 Toggle("Allow programs to write the clipboard (OSC 52)", isOn: $prefs.osc52Enabled)
-                // The preference existed (registered, sanitized, honoured by
-                // the paste path) but had no control — the one paste-jacking
-                // mitigation a user could turn on was reachable only via
-                // `defaults write`.
                 Toggle("Confirm multi-line pastes at a shell prompt", isOn: $prefs.confirmMultiLinePaste)
             } header: {
                 Text("Security")

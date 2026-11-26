@@ -2,19 +2,6 @@ import Foundation
 import os
 import SwiftUI
 
-/// Surfaces hang reports (written by `MainThreadWatchdog`) and macOS-emitted
-/// crash reports for Blackbird. Used by the Settings → Diagnostics tab.
-///
-/// Why @MainActor: every consumer is SwiftUI bound; bouncing across queues
-/// for a feature whose hot path is "user opened the tab" buys nothing and
-/// would expose us to publishing races on `reports`. The actual file
-/// enumeration is a synchronous `contentsOfDirectory` call — fast on the
-/// directories involved (handful of files in normal use).
-///
-/// Why no FSEvents / DispatchSource watcher: `reload()` is cheap, the user
-/// reaches this tab infrequently, and a watcher would require an actor or
-/// a DispatchQueue with an extra boundary for almost no win. The view
-/// re-loads on appear and whenever the Settings window is re-shown.
 @MainActor
 final class DiagnosticReportStore: ObservableObject {
 
@@ -28,20 +15,11 @@ final class DiagnosticReportStore: ObservableObject {
         let modificationDate: Date
         let byteSize: Int64
 
-        /// File URL doubles as identifier — unique per file, stable across
-        /// reloads as long as the file isn't moved/renamed. Computed so we
-        /// don't store the same URL twice (a duplicated `id` field is a
-        /// future-refactor trap: a refactor that updates `url` without `id`
-        /// silently breaks deduplication in `ForEach`).
         var id: URL { url }
     }
 
-    /// Path RELATIVE to the user's home directory where `MainThreadWatchdog`
-    /// writes hang reports.
     static let defaultHangDirectoryName = "Library/Logs/Blackbird"
 
-    /// Path RELATIVE to the user's home directory where macOS's
-    /// ReportCrash service writes per-app crash reports.
     static let defaultCrashDirectoryName = "Library/Logs/DiagnosticReports"
 
     @Published private(set) var reports: [Report] = []
@@ -50,9 +28,6 @@ final class DiagnosticReportStore: ObservableObject {
     private let crashDirectory: URL
     private let log = Logger(subsystem: "dev.conjfrnk.blackbird", category: "diagnostics")
 
-    /// Pass `nil` for either argument to use the user-default location.
-    /// Tests inject temp directories so they don't read or write the
-    /// real `~/Library/Logs` tree.
     init(hangDirectory: URL? = nil, crashDirectory: URL? = nil) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.hangDirectory =
@@ -61,13 +36,8 @@ final class DiagnosticReportStore: ObservableObject {
             crashDirectory ?? home.appendingPathComponent(Self.defaultCrashDirectoryName)
     }
 
-    /// Re-enumerate both directories and update `reports`. Sorted by
-    /// modification date descending — newest first.
     func reload() {
-        // Hang reports (`MainThreadWatchdog`) are `hang-<ts>.txt`. Crash
-        // reports (macOS ReportCrash) are `Blackbird-<ts>-<random>.ips`
-        // (modern) or `.crash` (legacy); the crash directory holds reports for
-        // every crashed process, so the app prefix filters to just ours.
+        // The crash directory holds reports for every crashed process; the app prefix filters to ours.
         let hangs = enumerate(directory: hangDirectory, kind: .hang) {
             Self.acceptsReport($0, prefix: "hang-", suffixes: [".txt"])
         }
@@ -77,13 +47,7 @@ final class DiagnosticReportStore: ObservableObject {
         reports = (hangs + crashes).sorted { $0.modificationDate > $1.modificationDate }
     }
 
-    /// True when `name` is `<prefix><non-empty body><suffix>` for one of
-    /// `suffixes`. The strict `>` length check rejects degenerate
-    /// prefix+suffix-only filenames (`hang-.txt`, `Blackbird-.ips`,
-    /// `Blackbird-.crash`) that carry no timestamp/body and would otherwise
-    /// render as zero-content rows. The matched suffix's own length is used,
-    /// so `.ips` (4) and `.crash` (6) each gate correctly. `suffixes` are
-    /// mutually exclusive tails here, so match order is irrelevant.
+    /// Requires a non-empty body between the prefix and the suffix.
     private static func acceptsReport(_ name: String, prefix: String, suffixes: [String]) -> Bool {
         guard name.hasPrefix(prefix),
               let suffix = suffixes.first(where: { name.hasSuffix($0) }) else { return false }
@@ -105,14 +69,7 @@ final class DiagnosticReportStore: ObservableObject {
                 options: [.skipsHiddenFiles]
             )
         } catch let error as NSError {
-            // ENOENT (directory missing) is the normal "no reports yet"
-            // state — first-launch users have no Logs/Blackbird/ until the
-            // first hang gets written. Stay silent in that case.
-            // EPERM/EACCES (TCC denial, parent dir permissions) and other
-            // failures are NOT normal — log so a user reporting "the
-            // Diagnostics tab is empty but I have hangs" can be diagnosed
-            // via `log show --predicate 'subsystem == "dev.conjfrnk.blackbird"
-            // && category == "diagnostics"'`.
+            // A missing directory is the normal "no reports yet" state; anything else is logged.
             if error.domain != NSCocoaErrorDomain || error.code != NSFileReadNoSuchFileError {
                 log.error("enumerate \(directory.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -129,32 +86,13 @@ final class DiagnosticReportStore: ObservableObject {
                     .isSymbolicLinkKey,
                 ])
             } catch {
-                // S2-008: prior code wrapped the call in `try?`, silently
-                // dropping a legitimate report whose stat raced
-                // contentsOfDirectory (transient EBUSY on a slow disk, a
-                // TCC re-evaluation, etc.). Users reporting "I hit a hang
-                // but Diagnostics is empty" had no breadcrumb. Log at
-                // error level so the directory-level + per-file failures
-                // both surface in `log stream --predicate 'subsystem ==
-                // "dev.conjfrnk.blackbird" && category == "diagnostics"'`.
                 log.error(
                     "stat \(url.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public) — dropping from diagnostics list"
                 )
                 return nil
             }
-            // SECURITY: drop symlinks. Any process running as the user can
-            // place `~/Library/Logs/DiagnosticReports/Blackbird-foo.ips` →
-            // `/etc/passwd` (or any user-readable file). Without this guard,
-            // clicking Email Diagnostics on a planted symlink exfiltrates
-            // its target's contents to `conjfrnk@gmail.com` and Copy puts
-            // them on the user's pasteboard. The legitimate ReportCrash /
-            // MainThreadWatchdog writers always emit regular files, so
-            // symlink-named reports are inherently suspicious.
-            //
-            // Both checks use explicit `== true` / `== false` (not `!= true`)
-            // so that a `nil` resource value — which means "stat succeeded
-            // but the key wasn't populated", possible on edge filesystems —
-            // is treated as suspicious-by-default and dropped.
+            // SECURITY: drop symlinks. A planted report symlink would send its target's contents to Copy / Email.
+            // `== true` / `== false` (not `!= true`) so a nil resource value is dropped too.
             guard values?.isRegularFile == true, values?.isSymbolicLink == false else {
                 return nil
             }

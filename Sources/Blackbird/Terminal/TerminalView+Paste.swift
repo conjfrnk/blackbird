@@ -2,18 +2,6 @@ import AppKit
 import Foundation
 import BBCore
 
-/// Paste pipeline: CRLF normalisation, C0/DEL scrubbing, Unicode
-/// bidi-override stripping (Trojan Source defence), bracketed-paste
-/// sanitization. Called from two places: the ⌘V menu action via
-/// `paste(_:)` on the main class, and the drag-and-drop path via
-/// `pasteText(_:)` after file URLs are joined + shell-quoted.
-///
-/// Why extracted: the paste pipeline is a cluster of pure / mostly-
-/// static sanitizers that doesn't touch mutable view state beyond
-/// `session.send` and `currentSnapshot.termMode`. Splitting it out
-/// keeps the main `TerminalView.swift` focused on event loop +
-/// rendering + first-responder glue. Audit K5 — sanitizer bugs are
-/// security issues, and a focused file makes them easier to audit.
 extension TerminalView {
 
     // MARK: - Paste
@@ -23,19 +11,8 @@ extension TerminalView {
         pasteText(str)
     }
 
-    /// Shared paste implementation: applies CRLF normalisation, wraps in
-    /// bracketed-paste markers when the app has enabled mode 2004, and sends
-    /// to the session. Used by both the menu/keyboard paste action and the
-    /// drag-and-drop code path (file URLs are shell-quoted into a single
-    /// string which is then fed through here).
     func pasteText(_ text: String) {
         #if DEBUG
-        // Test seam: DragDropTests captures the *pre-encoding* pasted
-        // string here so it can assert that drop integration produces
-        // the expected shell-quoted command-line text. Real PTY bytes
-        // are encoded later (CRLF normalisation, control sanitisation,
-        // bracketed-paste wrap) — those have separate sanitiser tests;
-        // the drop integration only needs the text-level invariant.
         if let recorder = pasteTextRecorderForTests {
             recorder(text)
         }
@@ -45,19 +22,10 @@ extension TerminalView {
             session.scrollToBottom()
         }
         let normalized = PasteSanitizer.normalizePasteLineEndings(Data(text.utf8))
-        // Strip C0 controls (except TAB/LF) and DEL unconditionally. Pasted
-        // payload is "user typing" — Ctrl+C, Ctrl+Z, ESC inside the content
-        // can break out of bracketed paste (CVE-2026-26982 class in Ghostty
-        // <1.3.0) and execute arbitrary bytes as shell input. The sanitizer
-        // replaces blocked bytes with space so column-formatted paste still
-        // lines up.
+        // C0 controls (except TAB/LF) and DEL are stripped unconditionally: ESC or Ctrl+C
+        // inside the payload can break out of bracketed paste and run as shell input.
         let cleaned = PasteSanitizer.sanitizePasteControls(normalized)
-        // Drop explicit bidi control characters — Trojan Source (Boucher &
-        // Anderson 2021). An adversarial webpage / remote can render as
-        // `rm -rf harmless` while the copied bytes are `rm -rf ~`, exploiting
-        // LRO / RLO overrides to hide the real command. Legitimate RTL
-        // (Arabic / Hebrew) text never needs explicit overrides; Unicode
-        // bidi algorithm handles it implicitly. Stripping is safe.
+        // Explicit bidi overrides are dropped (Trojan Source); legitimate RTL text never needs them.
         let bytes = PasteSanitizer.stripBidiOverrides(cleaned)
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
@@ -67,17 +35,6 @@ extension TerminalView {
             session.send(wrapped)
             return
         }
-        // Audit L19. Non-bracketed paste of multi-line content sends line
-        // breaks that the shell treats as Enter — each line executes
-        // immediately. A hostile clipboard with `\nrm -rf ~/Desktop\n`
-        // is the textbook paste-jacking primitive. Bracketed paste
-        // (handled above) protects modern TUIs; this guard catches the
-        // unprotected case at a bare shell prompt. Opt-in: default off
-        // preserves the long-standing terminal behaviour.
-        // Gate also matches lone CR (0x0D): a clipboard like
-        // `foo\rbar\rbaz` slips past LF detection but a lone CR is Enter
-        // too, executing each fragment as its own command. Same
-        // injection class as LF — keep the warning symmetric.
         if Preferences.shared.confirmMultiLinePaste,
            bytes.contains(0x0A) || bytes.contains(0x0D) {
             let alert = NSAlert()
@@ -86,22 +43,12 @@ extension TerminalView {
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Paste")
             alert.addButton(withTitle: "Cancel")
-            // App-modal runModal keeps the synchronous control flow we
-            // need here; window-modal `beginSheetModal` would force the
-            // function into an async / completion-handler shape just to
-            // dispatch the send(_:) on the same call site.
             let response = alert.runModal()
             guard response == .alertFirstButtonReturn else { return }
         }
-        // Every line break goes out as CR, what Return sends and what
-        // xterm / alacritty / kitty paste. An earlier L4 pass sent LF
-        // instead, but that bought no protection (a lone CR and an LF
-        // are both Enter for readline / ZLE / fish, and the confirm gate
-        // above already treats them alike) while breaking raw-mode
-        // programs that bind only CR to Enter: the macOS built-in nano
-        // (Pico) reads ^J as Justify and merged the pasted lines.
+        // Line breaks go out as CR, as Return does: raw-mode programs that bind only CR to
+        // Enter (the macOS built-in nano reads ^J as Justify) would mangle LF.
         session.send(PasteSanitizer.convertLFToCR(bytes))
     }
-
 
 }

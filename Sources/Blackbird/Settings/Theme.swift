@@ -1,53 +1,31 @@
 import Foundation
 import os
 
-/// A full theme palette. Values are 0xRRGGBB; alpha is always opaque —
-/// terminals don't composite window transparency beyond the solid bg.
+/// Values are 0xRRGGBB, always opaque.
 public struct ThemePalette: Equatable, Sendable {
     public var background: UInt32
     public var foreground: UInt32
     public var cursor: UInt32
-    /// 16 ANSI colors — 0..7 = normal, 8..15 = bright.
+    /// 16 ANSI colors: 0..7 normal, 8..15 bright.
     public var ansi: [UInt32]
 
     private static let themeLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "theme")
 
-    /// Cursor/background contrast floor. Below this the cursor snaps to the
-    /// foreground (Release) or trips a DEBUG assert — far looser than the WCAG
-    /// text bar; it only catches the degenerate "cursor == background" case.
     private static let minCursorContrast: Double = 1.25
-    /// Foreground/background contrast DEBUG-assert floor — a 3:1 bar, looser
-    /// than WCAG AA's 4.5:1 since curated palettes dip at the margins.
     private static let minForegroundContrast: Double = 3.0
-    /// Relative-luminance ceiling below which a background reads as "dark"
-    /// (WCAG 2.x midpoint) — drives titlebar/glass light-vs-dark chrome.
     private static let darkLuminanceThreshold: Double = 0.18
 
-    /// Selection highlight derived from the palette: the bright-blue ANSI
-    /// slot blended 45 % toward the background, so it reads as "this
-    /// theme's" selection rather than the hard-coded royal blue every
-    /// theme shared through v0.8.0. Opaque — a selection must stay
-    /// legible over a translucent window.
     public var selection: UInt32 {
         let blue = ansi.count > 12 ? ansi[12] : 0x4080FF
         let candidate = Self.mix(blue, background, towardSecond: 0.45)
-        // Visibility floor, like the cursor's: a theme whose bright blue sits
-        // near its background (blue-background themes, a future importer)
-        // would otherwise get an invisible highlight. Fall back to the
-        // foreground blended toward the background.
         if Self.contrastRatio(fg: candidate, bg: background) < 1.3 {
             return Self.mix(foreground, background, towardSecond: 0.6)
         }
         return candidate
     }
 
-    /// Foreground to draw selected text in when the cell's own foreground
-    /// has too little contrast against `selection` (a light-blue prompt on
-    /// a blue highlight): the palette background, i.e. dark text on a
-    /// light selection and vice versa.
     public var selectionForeground: UInt32 { background }
 
-    /// Per-channel linear interpolation of two 0xRRGGBB colours.
     static func mix(_ a: UInt32, _ b: UInt32, towardSecond t: Double) -> UInt32 {
         let t = min(1, max(0, t))
         func ch(_ shift: UInt32) -> UInt32 {
@@ -59,15 +37,8 @@ public struct ThemePalette: Equatable, Sendable {
     }
 
     public init(background: UInt32, foreground: UInt32, cursor: UInt32, ansi: [UInt32]) {
-        // fix-#14 philosophy: don't abort the process on a malformed theme.
-        // A non-16-entry `ansi` array previously hit a `precondition` that
-        // aborts in BOTH debug AND release (reachable the moment a non-literal
-        // theme source — e.g. a user-theme importer — hands in the wrong
-        // length). Normalise to exactly 16 entries instead — truncate extras,
-        // pad missing slots with `foreground` so text stays visible — and log
-        // a warning, mirroring the cursor snap-to-foreground recovery below.
-        // Downstream (renderer, color_to_rgb) indexes ansi[0..<16] and relies
-        // on this invariant. Audit S6-003.
+        // Downstream (renderer, color_to_rgb) indexes ansi[0..<16]: normalise to exactly 16 entries rather
+        // than abort on a malformed theme.
         let normalizedAnsi: [UInt32]
         if ansi.count == 16 {
             normalizedAnsi = ansi
@@ -83,16 +54,6 @@ public struct ThemePalette: Equatable, Sendable {
         }
         self.background = background
         self.foreground = foreground
-        // Audit fix-#14 (2026-05-11): the original DEBUG-only asserts ship
-        // an invisible-cursor palette in release. The author explicitly
-        // didn't want to crash on a user-supplied theme with poor contrast
-        // (see comment block below), so the release path now snaps the
-        // cursor to the foreground color when its contrast against bg
-        // falls below 1.25 — that floor is much looser than the WCAG
-        // text threshold and only catches the degenerate "cursor RGB ==
-        // background RGB" case. A warning is emitted via os.Logger so
-        // the regression is visible in the unified log without breaking
-        // the user's session.
         let cursorBg = Self.contrastRatio(fg: cursor, bg: background)
         if cursorBg < Self.minCursorContrast {
             Self.themeLogger.warning(
@@ -104,18 +65,6 @@ public struct ThemePalette: Equatable, Sendable {
         }
         self.ansi = normalizedAnsi
         #if DEBUG
-        // Check the three "first-class" colors for glaring misconfiguration
-        // so a future palette edit can't ship a theme with an invisible
-        // cursor or unreadable prompt. WCAG AA requires a 4.5:1 contrast
-        // ratio for normal text; we use a looser 3:1 threshold here because
-        // the curated palettes trip the 4.5 bar at the margins (Solarized
-        // Dark's foreground 0x839496 on 0x002B36 is ~7.0, but user-supplied
-        // themes may dip to ~3-4 and still be legible for UI-chrome text).
-        // The cursor check requires any contrast at all against the bg so
-        // a cursor that blends into the background ships a visible warning
-        // during test runs. Release builds rely on the snap-to-foreground
-        // fallback above instead of crashing — ThemePalette is value-type
-        // and re-validated on every swap. (settings F6 + fix-#14)
         let fgBg = Self.contrastRatio(fg: foreground, bg: background)
         assert(fgBg >= Self.minForegroundContrast,
                "Theme palette foreground/background contrast \(fgBg) < 3:1")
@@ -124,17 +73,9 @@ public struct ThemePalette: Equatable, Sendable {
         #endif
     }
 
-    // MARK: - Contrast helpers (settings F6)
-    //
-    // Relative luminance per WCAG 2.x: sRGB → linear-light → weighted sum.
-    // Matches what `TerminalView.setWindowAppearance` used to compute
-    // inline for the titlebar light/dark decision; lifting the math onto
-    // the palette itself lets any consumer (future user-theme importer,
-    // contrast-sanity unit test) query the same numbers without
-    // duplicating the formula.
+    // MARK: - Contrast helpers
 
-    /// Rec. 709 / sRGB relative luminance of a 0xRRGGBB color. Returns a
-    /// value in `[0, 1]` where 0 is pure black and 1 is pure white.
+    /// WCAG 2.x relative luminance of a 0xRRGGBB color, in `[0, 1]`.
     public static func relativeLuminance(_ rgb: UInt32) -> Double {
         let r = Double((rgb >> 16) & 0xFF) / 255.0
         let g = Double((rgb >>  8) & 0xFF) / 255.0
@@ -145,9 +86,7 @@ public struct ThemePalette: Equatable, Sendable {
         return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
     }
 
-    /// WCAG contrast ratio `(L1 + 0.05) / (L2 + 0.05)` where L1 is the
-    /// lighter of the two luminances. Always ≥ 1; 21 is maximum
-    /// (black-on-white or white-on-black).
+    /// WCAG contrast ratio `(L1 + 0.05) / (L2 + 0.05)`, L1 the lighter; in `[1, 21]`.
     public static func contrastRatio(fg: UInt32, bg: UInt32) -> Double {
         let a = relativeLuminance(fg)
         let b = relativeLuminance(bg)
@@ -156,25 +95,14 @@ public struct ThemePalette: Equatable, Sendable {
         return (lighter + 0.05) / (darker + 0.05)
     }
 
-    /// True when the palette's background reads as "dark" — used by
-    /// window-chrome decisions (titlebar appearance) and by the Settings
-    /// UI to pick a light/dark variant of the glass materials. Threshold
-    /// is the WCAG 2.x midpoint for "dark": any bg with linear luminance
-    /// ≤ 0.18 is classified dark. Matches what TerminalView was computing
-    /// inline.
     public var isDark: Bool {
         Self.relativeLuminance(background) <= Self.darkLuminanceThreshold
     }
 
-    /// Foreground-to-background contrast ratio of this palette. Call site
-    /// for future user-supplied-theme validation (WCAG AA requires 4.5:1
-    /// for normal-weight text; our curated palettes all exceed that).
     public var foregroundBackgroundContrast: Double {
         Self.contrastRatio(fg: foreground, bg: background)
     }
 
-    /// Cursor-to-background contrast ratio. Any value at or near 1.0
-    /// means the cursor is invisible; validator should reject < 1.25.
     public var cursorBackgroundContrast: Double {
         Self.contrastRatio(fg: cursor, bg: background)
     }
@@ -198,7 +126,6 @@ public enum Theme: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    // DEFAULT — neutral high-contrast, tuned for general use.
     static let defaultDark = ThemePalette(
         background: 0x0E0E11, foreground: 0xE5E5EA, cursor: 0xFFFFFF,
         ansi: [
@@ -216,7 +143,6 @@ public enum Theme: String, CaseIterable, Identifiable, Sendable {
             0x2188FF, 0x8A63D2, 0x0A3069, 0x24292E
         ])
 
-    // GRUVBOX — morhetz/gruvbox canonical.
     static let gruvboxDark = ThemePalette(
         background: 0x282828, foreground: 0xEBDBB2, cursor: 0xEBDBB2,
         ansi: [
@@ -234,7 +160,6 @@ public enum Theme: String, CaseIterable, Identifiable, Sendable {
             0x076678, 0x8F3F71, 0x427B58, 0x3C3836
         ])
 
-    // SOLARIZED — Ethan Schoonover canonical.
     static let solarizedDark = ThemePalette(
         background: 0x002B36, foreground: 0x839496, cursor: 0x93A1A1,
         ansi: [
@@ -252,7 +177,7 @@ public enum Theme: String, CaseIterable, Identifiable, Sendable {
             0x657B83, 0x6C71C4, 0x586E75, 0x002B36
         ])
 
-    // CATPPUCCIN — Mocha (dark) and Latte (light).
+    // Catppuccin Mocha (dark) and Latte (light).
     static let catppuccinDark = ThemePalette(
         background: 0x1E1E2E, foreground: 0xCDD6F4, cursor: 0xF5E0DC,
         ansi: [

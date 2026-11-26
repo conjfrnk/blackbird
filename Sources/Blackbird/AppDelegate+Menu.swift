@@ -1,37 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// Main-menu construction for `AppDelegate`. Extracted from `App.swift`
-/// (which had grown to ~720 lines covering startup, controllers, tab
-/// actions, Sparkle plumbing, AND the whole menu tree). Menu code only
-/// depends on `AppDelegate`'s public selectors plus shared plist-
-/// derived constants — pure view layer, no state.
-///
-/// Kept as an extension on `AppDelegate` rather than a standalone
-/// builder type so the `#selector(...)` targets continue to resolve
-/// against `self` without a delegate hop. The extension lives in the
-/// same module so file private visibility and `Self` references
-/// continue to work across the split.
 extension AppDelegate {
 
     // MARK: - Menu
 
-    /// Install the application's main menu. Internal so the
-    /// `applicationDidFinishLaunching` path in `App.swift` can call it
-    /// across the file boundary — `private` would be scoped to this
-    /// extension only.
     func installMainMenu() {
         let main = NSMenu()
 
         let appItem = NSMenuItem()
         main.addItem(appItem)
         let appSubmenu = buildAppMenu()
-        // Insert the conditional "Check for Updates…" item BEFORE we
-        // publish `mainMenu`. Mutating the menu after publish (the prior
-        // sequence — `installMainMenu()` then `installSparkleMenuItem()`)
-        // briefly exposed a half-built App submenu shape to any user
-        // who happened to be mid-⌘ when the app finished launching.
-        // (audit L-27)
+        // Insert before publishing `mainMenu`; mutating a published menu briefly exposes a half-built App submenu.
         insertSparkleMenuItem(into: appSubmenu)
         appItem.submenu = appSubmenu
 
@@ -62,14 +42,8 @@ extension AppDelegate {
             keyEquivalent: ""
         )
         menu.addItem(.separator())
-        // SwiftUI's Settings scene registers a hidden controller that handles
-        // `showSettingsWindow:`. With @NSApplicationDelegateAdaptor + a fully
-        // custom main menu, the responder chain doesn't reliably reach that
-        // controller (NSApp isn't a handler, and the hidden SwiftUI controller
-        // isn't in the chain). Route via AppDelegate.openSettings(_:) which
-        // calls NSApp.sendAction — sendAction IS what correctly dispatches
-        // to SwiftUI's registered selector handler. Fallback covers older
-        // macOS that still uses `showPreferencesWindow:`.
+        // With a custom main menu the responder chain doesn't reliably reach SwiftUI's hidden Settings
+        // controller; openSettings(_:) routes through NSApp.sendAction, which does.
         let settingsItem = NSMenuItem(
             title: "Settings…",
             action: #selector(openSettings(_:)),
@@ -78,13 +52,7 @@ extension AppDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(.separator())
-        // Services submenu. TerminalView conforms to NSServicesMenuRequestor
-        // so individual services (Dictionary, Open URL, system translate,
-        // third-party text tools) can read the current selection. Without
-        // this item the submenu doesn't get wired up — the protocol
-        // conformance is live but no user-accessible entry point. Audit
-        // app-entry F3. `servicesMenu` is a full NSMenu NSApp owns; we
-        // just need an item to host it.
+        // The Services submenu is only wired up when an item hosts `NSApp.servicesMenu`.
         let servicesItem = NSMenuItem(
             title: "Services",
             action: nil,
@@ -146,39 +114,15 @@ extension AppDelegate {
 
     private func buildEditMenu() -> NSMenu {
         let menu = NSMenu(title: "Edit")
-        // Selectors route to the first responder; TerminalView implements
-        // copy(_:), paste(_:), and selectAll(_:), plus validateMenuItem
-        // gating on whether a selection / clipboard payload exists.
-        //
-        // No Undo / Redo: a terminal has no editable document and no
-        // operation stack to walk. Wiring `Edit > Undo` to
-        // `Selector(("undo:"))` (and Redo to `redo:`) used to ship a
-        // grey, unactionable menu item — no responder implemented
-        // either selector, so AppKit disabled the items via
-        // `validateMenuItem` while still presenting them as
-        // affordances. Following Terminal.app and iTerm2 (neither has
-        // Edit > Undo/Redo), we omit the items entirely. ⌘Z / ⌘⇧Z
-        // now land in the AppKit "no menu binding, no view handler"
-        // bucket alongside ⌘B / ⌘D / etc.: TerminalView's `.command`
-        // early-return suppresses any PTY bytes, and the chord
-        // bottoms out at `super.keyDown` exactly like every other
-        // unbound ⌘-letter chord (CmdLetterInterceptMatrixTests pins
-        // the resulting `.forwardedToSuper` outcome).
         menu.addItem(withTitle: "Cut",   action: #selector(NSText.cut(_:)),   keyEquivalent: "x")
         menu.addItem(withTitle: "Copy",  action: #selector(NSText.copy(_:)),  keyEquivalent: "c")
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         menu.addItem(.separator())
-        // Find submenu. Without an explicit menu entry, AppKit won't map
-        // ⌘F / ⌘G / ⌘⇧G to TerminalView's performFind*Action selectors —
-        // the custom first responder only receives menu-dispatched actions,
-        // not raw key events (those are filtered as ⌘-prefixed at keyDown
-        // and handed to super).
+        // ⌘-prefixed key events are handed to super at keyDown, so ⌘F / ⌘G / ⌘⇧G only arrive as menu actions.
         let findSubmenu = NSMenu(title: "Find")
-        // Not `performFindPanelAction:` — NSTextView (the field editor that
-        // is first responder while the find or replace field has focus)
-        // implements that one, so it became the target and greyed ⌘F out.
-        // `showFindBar:` is implemented by no AppKit responder.
+        // Not `performFindPanelAction:`: the NSTextView field editor implements it, becomes the target
+        // and greys ⌘F out. No AppKit responder implements `showFindBar:`.
         findSubmenu.addItem(
             withTitle: "Find…",
             action: #selector(TerminalView.showFindBar(_:)),
@@ -197,7 +141,6 @@ extension AppDelegate {
         )
         findPrev.keyEquivalentModifierMask = [.command, .shift]
         findSubmenu.addItem(findPrev)
-        // Standard macOS item: seed the find field from the selection.
         let useSelection = NSMenuItem(
             title: "Use Selection for Find",
             action: #selector(TerminalView.useSelectionForFind(_:)),
@@ -212,10 +155,6 @@ extension AppDelegate {
         replaceSelection.keyEquivalentModifierMask = [.command, .option]
         findSubmenu.addItem(replaceSelection)
         findSubmenu.addItem(.separator())
-        // ⌘⌥C toggles case-sensitive find, ⌘⌥R toggles regex mode.
-        // Matches iTerm2 Find's equivalents; visible in the placeholder
-        // when enabled. Routes through the responder chain to the focused
-        // TerminalView's findBar (target=nil).
         let caseToggle = NSMenuItem(
             title: "Find: Case Sensitive",
             action: #selector(TerminalView.toggleFindCaseSensitive(_:)),
@@ -234,8 +173,6 @@ extension AppDelegate {
         findParent.submenu = findSubmenu
         menu.addItem(findParent)
         menu.addItem(.separator())
-        // ⌘K clears viewport + scrollback. Action is dispatched via the
-        // responder chain (target = nil) so the focused TerminalView handles it.
         menu.addItem(
             withTitle: "Clear Buffer",
             action: #selector(TerminalView.clearBufferAndScrollback(_:)),
@@ -246,10 +183,7 @@ extension AppDelegate {
 
     private func buildViewMenu() -> NSMenu {
         let menu = NSMenu(title: "View")
-        // ⌘+/⌘-/⌘0 adjust font size. The "+" key equivalent actually fires
-        // on ⌘⇧= on most layouts; spelling it as "+" with the default command
-        // mask matches what users expect to see in the menu and what AppKit
-        // matches against the incoming keyDown.
+        // The "+" key equivalent fires on ⌘⇧= on most layouts.
         let biggerItem = NSMenuItem(
             title: "Bigger Text",
             action: #selector(TerminalView.increaseFontSize(_:)),
@@ -276,11 +210,6 @@ extension AppDelegate {
 
         menu.addItem(.separator())
 
-        // Prompt navigation — walks the OSC 133 A marks recorded by
-        // TerminalSession whenever the user's shell integration snippet
-        // emits a prompt-start escape. Matches iTerm2's ⌘⇧↑ / ⌘⇧↓
-        // convention so muscle memory carries over. No-op when no marks
-        // have been recorded (shell integration not sourced).
         let prevPrompt = NSMenuItem(
             title: "Previous Prompt",
             action: #selector(TerminalView.jumpToPreviousPrompt(_:)),
@@ -299,20 +228,7 @@ extension AppDelegate {
 
         menu.addItem(.separator())
 
-        // Rename Tab… — routes via the responder chain to the key window's
-        // MainWindowController. Not ⌘R: that's commonly refresh/reload, and we
-        // leave it free for shells that bind it (zsh's
-        // history-incremental-search-backward is sometimes mapped to Ctrl-R —
-        // ⌘R would still reach us first).
-        //
-        // ⌃⌘R, not ⌥⌘R. This item shipped on ⌥⌘R, but the Edit ▸ Find ▸
-        // "Regular Expression" toggle above claims the same chord, and Edit is
-        // installed before View, so AppKit's depth-first key-equivalent search
-        // always found the find toggle first. The advertised shortcut here was
-        // therefore dead — and worse, pressing it slid the find bar in and
-        // flipped regex mode, silently changing the semantics of the user's
-        // next search. Ctrl-R alone still reaches the shell untouched; only
-        // the ⌘-carrying chord is claimed here.
+        // ⌃⌘R, not ⌥⌘R: Edit ▸ Find ▸ Regular Expression claims ⌥⌘R and AppKit searches Edit first.
         let rename = NSMenuItem(
             title: "Rename Tab…",
             action: #selector(MainWindowController.renameActiveTab(_:)),
@@ -350,9 +266,6 @@ extension AppDelegate {
         menu.addItem(closeWindow)
         menu.addItem(.separator())
 
-        // Next / previous tab — AppKit handles these natively on tab-grouped
-        // windows; wiring them here ensures they appear in the menu and are
-        // discoverable via ⌘⇧] / ⌘⇧[.
         let nextTab = NSMenuItem(
             title: "Show Next Tab",
             action: #selector(NSWindow.selectNextTab(_:)),
@@ -369,13 +282,6 @@ extension AppDelegate {
         prevTab.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(prevTab)
 
-        // Terminal-app convention: ⌃⇥ / ⌃⇧⇥ also cycle tabs (matches
-        // iTerm2, Terminal.app, browser tabs, and most TUIs that rebind
-        // these inside the terminal — but ours wins because the menu
-        // item swallows the key event before it reaches the PTY).
-        // Same `selectNextTab(_:)` / `selectPreviousTab(_:)` actions as
-        // the ⌘⇧] / ⌘⇧[ items above; AppKit picks the right item from
-        // the modifier mask.
         let nextTabCtrl = NSMenuItem(
             title: "Show Next Tab",
             action: #selector(NSWindow.selectNextTab(_:)),
@@ -394,7 +300,6 @@ extension AppDelegate {
 
         menu.addItem(.separator())
 
-        // ⌘1-9 jump to a specific tab by position.
         for i in 1...9 {
             let item = NSMenuItem(
                 title: "Tab \(i)",

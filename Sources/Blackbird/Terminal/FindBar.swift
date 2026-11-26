@@ -4,47 +4,26 @@ public protocol FindBarDelegate: AnyObject {
     func findBar(_ bar: FindBar, didChangeQuery query: String)
     func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction)
     func findBarDidClose(_ bar: FindBar)
-    /// Fired when the user clicks "Replace" (`.current`) or "Replace All" (`.all`).
     func findBar(_ bar: FindBar, didRequestReplace kind: FindBar.ReplaceKind, with replacement: String)
-    /// Asked before the replace delegate fires. Return `false` to refuse the
-    /// replace operation — FindBar will display a transient warning instead of
-    /// emitting bytes. Implementations should return `false` when the terminal
-    /// is in a mode that indicates a TUI is running (alt-screen, mouse
-    /// reporting, bracketed paste) because `sendReplacement` synthesises DEL
-    /// bytes + UTF-8 that a TUI would interpret as key input.
+    /// Return `false` while a TUI is running (alt-screen, mouse reporting, bracketed paste):
+    /// `sendReplacement` synthesises DEL bytes + UTF-8 that a TUI would interpret as key input.
     func findBarShouldAllowReplace(_ bar: FindBar) -> Bool
-    /// Called when the user toggles the case-sensitivity or regex-mode
-    /// state. Implementations should re-run the current search against
-    /// the new options. Default: no-op (options are ignored).
     func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options)
-    /// Called after the bar resized itself because the replace row was shown
-    /// or hidden (its frame already has the new `preferredHeight`). The bar
-    /// is opaque and overlays the grid, so a taller bar can cover a match that
-    /// was clear of the shorter one. Default: no-op.
+    /// Called after the bar resized itself; a taller bar can cover a match that was clear of the shorter one.
     func findBarDidChangeHeight(_ bar: FindBar)
 }
 
 extension FindBarDelegate {
-    /// Default: allow replace. Conformers that own terminal state should
-    /// override this and inspect `BBTermMode` before returning `true`.
     public func findBarShouldAllowReplace(_ bar: FindBar) -> Bool { true }
-    /// Default: no-op. TerminalView's conformer overrides to re-run
-    /// performSearch with the new flags.
     public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {}
-    /// Default: no-op. TerminalView's conformer re-reveals the current match.
     public func findBarDidChangeHeight(_ bar: FindBar) {}
 }
 
 public final class FindBar: NSView, NSTextFieldDelegate {
     public enum Direction { case forward, backward }
 
-    /// Whether the replace operation targets just the current match or all matches.
     public enum ReplaceKind { case current, all }
 
-    /// Search options exposed through the find bar. Case-insensitive
-    /// substring is still the default (matches Terminal.app / Safari
-    /// / VS Code "off" state) — users opt into case-sensitive and/or
-    /// regex mode via ⌘⌥C and ⌘⌥R respectively. Audit findbar-selection F1.
     public struct Options: Equatable {
         public var caseSensitive: Bool
         public var regex: Bool
@@ -54,9 +33,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         }
     }
 
-    /// Current option state. Read by the delegate when re-running
-    /// searches. Mutating either field fires the options-changed
-    /// delegate hook so the search re-runs immediately.
     public private(set) var options = Options() {
         didSet {
             guard options != oldValue else { return }
@@ -98,33 +74,14 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Replace row visibility
 
-    /// True when the replace row is shown. Defaults to `false`.
     public private(set) var isReplaceVisible: Bool = false
 
-    /// Bar height callers should use when laying out the find bar.
-    /// 32 pt when collapsed, 60 pt when the replace row is expanded.
     public var preferredHeight: CGFloat { isReplaceVisible ? 60 : 32 }
 
     // MARK: - Width priorities
 
-    /// Squeeze order when the bar is narrower than its natural width. Every
-    /// width constraint gets a DISTINCT priority: two equal-priority
-    /// constraints competing for the same shortfall are resolved arbitrarily
-    /// by the solver, so which control collapsed would depend on the bar's
-    /// resize history. Lowest priority gives way first:
-    ///
-    ///     400  find field's preferred 220 pt        shrinks first
-    ///     440  match counter / banner               truncates (tail)
-    ///     450  Replace button                       clips, then hides (see `layout()`)
-    ///     470  find/replace field's 60 pt floor     shrinks below 60 only for Replace All
-    ///     480  Replace All button                   clips only below the hard floor
-    ///     490  find/replace field's hard floor      never narrower than this
-    ///
-    /// Replace All is the last button to give way because it is the only
-    /// route to replace-all (Replace has ⌘⌥E). Everything must stay below
-    /// `windowSizeStayPut` (500), which holds the bar's own width: above it
-    /// the layout engine stretches the bar's frame instead of squeezing the
-    /// contents.
+    /// Squeeze order, lowest first. Priorities must be distinct (the solver breaks ties arbitrarily) and stay
+    /// below `windowSizeStayPut` (500), above which the layout engine stretches the bar instead of its contents.
     private static let fieldPreferredPriority = NSLayoutConstraint.Priority(rawValue: 400)
     private static let matchLabelPriority = NSLayoutConstraint.Priority(rawValue: 440)
     private static let replaceButtonPriority = NSLayoutConstraint.Priority(rawValue: 450)
@@ -134,9 +91,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Dynamic layout constraints
 
-    /// Active only while the replace row is **hidden** (collapsed state).
     private var collapsedConstraints: [NSLayoutConstraint] = []
-    /// Active only while the replace row is **visible** (expanded state).
     private var expandedConstraints:  [NSLayoutConstraint] = []
 
     // MARK: - Init
@@ -146,17 +101,13 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        // ── Find row ───────────────────────────────────────────────────────
         caretButton.translatesAutoresizingMaskIntoConstraints = false
         caretButton.bezelStyle = .inline
         caretButton.isBordered = false
         caretButton.font = .systemFont(ofSize: 11)
         caretButton.target = self
         caretButton.action = #selector(toggleReplaceRow)
-        // The glyph buttons (here and `closeButton`) are labelled on their
-        // CELL: AppKit exposes the NSButtonCell, not the NSButton view, to the
-        // accessibility tree, so a view-level label never reaches VoiceOver
-        // (which would otherwise read the glyph's Unicode name).
+        // Labels go on the cell: AppKit exposes the NSButtonCell, not the NSButton view, to accessibility.
         caretButton.cell?.setAccessibilityLabel("Show replace")
 
         field.placeholderString = "Find"
@@ -169,16 +120,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         matchLabel.translatesAutoresizingMaskIntoConstraints = false
         matchLabel.font = .systemFont(ofSize: 11)
         matchLabel.textColor = .secondaryLabelColor
-        // VoiceOver reads the count out when the query changes (Terminal.app
-        // and Safari both do this). Without a label the `NSTextField` is
-        // read as a plain string; with it the screen reader announces
-        // "Find results: 3 of 12" when the text updates. Set on the cell, the
-        // element the tree actually exposes (see `caretButton`).
         matchLabel.cell?.setAccessibilityLabel("Find results")
-        // Truncate instead of running under the close button when the bar is
-        // too narrow for the count / a transient banner (see the width
-        // priorities in the constraint block below). The full text stays in
-        // `stringValue`, which is what VoiceOver reads.
         matchLabel.lineBreakMode = .byTruncatingTail
         matchLabel.setContentCompressionResistancePriority(Self.matchLabelPriority, for: .horizontal)
 
@@ -189,7 +131,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         closeButton.action = #selector(closeAction)
         closeButton.cell?.setAccessibilityLabel("Close find bar")
 
-        // ── Replace row ────────────────────────────────────────────────────
         replaceField.placeholderString = "Replace"
         replaceField.delegate = self
         replaceField.focusRingType = .none
@@ -207,7 +148,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         replaceAllButton.target = self
         replaceAllButton.action = #selector(replaceAll)
 
-        // Clip rather than stretch the bar (see the width priorities above).
         replaceButton.setContentCompressionResistancePriority(Self.replaceButtonPriority, for: .horizontal)
         replaceAllButton.setContentCompressionResistancePriority(Self.replaceAllButtonPriority, for: .horizontal)
 
@@ -219,15 +159,8 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         addSubview(replaceButton)
         addSubview(replaceAllButton)
 
-        // The bar spans the terminal view, which can be far narrower than the
-        // controls' natural width. The find field is the flexible control: it
-        // prefers 220 pt and gives way to a 60 pt floor first, then the
-        // counter / banner truncates and Replace clips (see the width
-        // priorities above). Only on a bar too narrow for a 60 pt field plus
-        // Replace All does the field shrink below 60, down to a hard floor, so
-        // Replace All stays whole and on the bar down to the window's minimum
-        // width. The field's default compression resistance (750) is lowered
-        // so a long query can't out-vote those priorities.
+        // The field's default compression resistance (750) is lowered so a long query can't out-vote the
+        // width priorities.
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let fieldPreferredWidth = field.widthAnchor.constraint(equalToConstant: 220)
         fieldPreferredWidth.priority = Self.fieldPreferredPriority
@@ -236,32 +169,22 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         let fieldHardFloorWidth = field.widthAnchor.constraint(greaterThanOrEqualToConstant: 32)
         fieldHardFloorWidth.priority = Self.fieldHardFloorPriority
 
-        // ── Permanent constraints (always active) ──────────────────────────
         NSLayoutConstraint.activate([
-            // caret
             caretButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             caretButton.widthAnchor.constraint(equalToConstant: 16),
-            // find field
             field.leadingAnchor.constraint(equalTo: caretButton.trailingAnchor, constant: 4),
             fieldPreferredWidth,
             fieldSoftFloorWidth,
             fieldHardFloorWidth,
-            // match label (never under the close button; truncates once the
-            // field is at its floor)
             matchLabel.leadingAnchor.constraint(equalTo: field.trailingAnchor, constant: 10),
             matchLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
-            // close button
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            // replace field (same x as find field, same width)
             replaceField.leadingAnchor.constraint(equalTo: field.leadingAnchor),
             replaceField.widthAnchor.constraint(equalTo: field.widthAnchor),
-            // replace buttons
             replaceButton.leadingAnchor.constraint(equalTo: replaceField.trailingAnchor, constant: 8),
             replaceAllButton.leadingAnchor.constraint(equalTo: replaceButton.trailingAnchor, constant: 8),
         ])
 
-        // ── Collapsed constraints (bar is 32 pt tall) ──────────────────────
-        // Every control centres vertically within the whole 32 pt bar.
         collapsedConstraints = [
             caretButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -269,31 +192,19 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
         ]
 
-        // ── Expanded constraints (bar is 60 pt tall) ───────────────────────
-        // Find row centred in the top 32 pt slice; replace row centred in the
-        // bottom 28 pt slice.  Use topAnchor + constant to pin each control.
-        //
-        // Top slice centre (from view top): 32/2 = 16 pt
-        // Bottom slice centre (from view top): 32 + 28/2 = 46 pt
-        // Controls are ~20 pt tall, so offset by half that → -10 pt.
         expandedConstraints = [
-            // find row (centred at 16 pt from top → top edge at 6 pt)
             caretButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             field.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             matchLabel.topAnchor.constraint(equalTo: topAnchor, constant: 9),
             closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            // replace row (centred at 46 pt from top → top edge at 36 pt)
             replaceField.topAnchor.constraint(equalTo: topAnchor, constant: 36),
             replaceButton.topAnchor.constraint(equalTo: topAnchor, constant: 36),
             replaceAllButton.topAnchor.constraint(equalTo: topAnchor, constant: 36),
-            // Replace All ends on the bar, so Replace, then the shared
-            // find/replace field width, shrink to make room. Expanded-only:
-            // hidden views still take part in layout, and a collapsed bar
-            // must not give up field width to buttons it isn't showing.
+            // Expanded-only: hidden views still take part in layout, and a collapsed bar must not give
+            // up field width to buttons it isn't showing.
             replaceAllButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
         ]
 
-        // Start in collapsed state.
         NSLayoutConstraint.activate(collapsedConstraints)
         replaceField.isHidden     = true
         replaceButton.isHidden    = true
@@ -304,16 +215,10 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Layout
 
-    /// Replace (current) is the first button to give way on a narrow bar. A
-    /// button squeezed below its title width is a clipped sliver, so once the
-    /// layout can't give it the full title it is hidden instead (⌘⌥E still
-    /// replaces the current match). Hidden views keep their constraints, so
-    /// the pass is idempotent: it reads frames and never changes them.
     public override func layout() {
         super.layout()
-        // Alignment-rect width, like `intrinsicContentSize`: on macOS 14/15 a push
-        // button's frame carries ~7 pt of invisible bezel shadow per side, so the
-        // frame width alone would call a button up to 14 pt too narrow "full".
+        // Alignment-rect width: on macOS 14/15 a push button's frame carries ~7 pt of invisible bezel
+        // shadow per side.
         let replaceWidth = replaceButton.alignmentRect(forFrame: replaceButton.frame).width
         let fits = replaceWidth + 0.5 >= replaceButton.intrinsicContentSize.width
         let shouldHide = !isReplaceVisible || !fits
@@ -322,22 +227,10 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Theming
 
-    /// Colors most recently applied via `applyTheme`, or `nil` while the
-    /// bar still wears its init-time system-color look (no palette has
-    /// been pushed yet — `TerminalView.applyTheme` forwards one on the
-    /// same path the renderer takes, so in production this is non-nil by
-    /// the time the bar is visible).
     private var scheme: FindBarColorScheme?
 
-    /// Bottom hairline separating the bar from the terminal content below
-    /// it. Created on the first `applyTheme` — the pre-theme system look
-    /// never had one, so nothing changes visually until a palette arrives.
     private var separatorView: NSView?
 
-    /// Restyle every control from the theme palette so the bar reads as
-    /// part of the themed surface instead of a system-gray panel floating
-    /// over it (the terminal body, titlebar, and window background all
-    /// paint exact theme RGB; the find bar was the one holdout).
     public func applyTheme(_ palette: ThemePalette) {
         let scheme = FindBarColorScheme(palette: palette)
         self.scheme = scheme
@@ -350,15 +243,8 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         applyPlaceholders()
         styleGlyphButtonTitles()
         installOrRetintSeparator(Self.nsColor(rgb: scheme.separator))
-        // Replace / Replace All keep the system `.push` bezel on purpose:
-        // they're controls, not surfaces, and the window's appearance is
-        // pinned to the theme's lightness (`setWindowAppearance`), so the
-        // system bezel already resolves to the right light/dark variant.
     }
 
-    /// Themed text-field style: the system bezel is a fixed macOS gray
-    /// that can't be tinted, so themed fields drop it for a flat fill
-    /// derived from the palette, with a soft rounded corner.
     private func styleThemedField(_ f: NSTextField,
                                   background: NSColor, text: NSColor) {
         f.isBezeled = false
@@ -367,21 +253,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         f.textColor = text
         f.wantsLayer = true
         f.layer?.cornerRadius = 4
-        // The fill comes from the CELL's rectangular draw (drawsBackground),
-        // not layer.backgroundColor — without clipping, the radius above
-        // never shows.
+        // The fill is the cell's rectangular draw, not the layer's; without clipping the radius never shows.
         f.layer?.masksToBounds = true
     }
 
-    /// Placeholders re-derive on every options toggle (`placeholderString()`
-    /// encodes the regex/Aa flags), so both the toggle paths and
-    /// `applyTheme` route through here: themed bars get an attributed
-    /// placeholder in muted foreground, pre-theme bars keep the plain
-    /// system placeholder.
     private func applyPlaceholders() {
-        // The placeholder is the only on-bar record of the regex / Aa flags
-        // and disappears once a query is typed, so mirror them into the
-        // field's accessibility help, which stays put (nil when both are off).
         var modes: [String] = []
         if options.regex { modes.append("Regular expression") }
         if options.caseSensitive { modes.append("Case sensitive") }
@@ -401,11 +277,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             NSAttributedString(string: "Replace", attributes: attrs)
     }
 
-    /// The caret (▸/▾) and close (✕) buttons are borderless text buttons —
-    /// their glyph color comes from the attributed title, so re-apply it
-    /// whenever the theme OR the caret's title changes (`setReplaceVisible`
-    /// swaps ▸/▾, which resets a plain-title button to system color).
-    /// No-op until a theme is applied.
     private func styleGlyphButtonTitles() {
         guard let scheme else { return }
         let tint = Self.nsColor(rgb: scheme.text)
@@ -418,8 +289,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         }
     }
 
-    /// 1 pt hairline pinned to the bar's bottom edge. Idempotent: first
-    /// call installs it, later calls just retint.
     private func installOrRetintSeparator(_ color: NSColor) {
         if let separatorView {
             separatorView.layer?.backgroundColor = color.cgColor
@@ -439,10 +308,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         separatorView = hairline
     }
 
-    /// Packed 0xRRGGBB → NSColor in sRGB — the palette hex values are
-    /// sRGB by convention (same unpacking as `TerminalView+IME`'s
-    /// `nsColor(fromRgb:)`; using `calibratedRed:` here would silently
-    /// shift every channel through the generic-RGB 1.8 gamma).
+    /// sRGB: `calibratedRed:` would shift every channel through the generic-RGB 1.8 gamma.
     private static func nsColor(rgb: UInt32) -> NSColor {
         NSColor(
             srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255.0,
@@ -456,16 +322,12 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     public func focus() { window?.makeFirstResponder(field) }
 
-    /// ⌘F: focus the query field and select all of it. `makeFirstResponder`
-    /// alone is a no-op when the field editor already has focus, which would
-    /// leave the caret where it was instead of re-selecting the query.
+    /// `makeFirstResponder` alone is a no-op when the field editor already has focus.
     public func focusAndSelectQuery() {
         focus()
         field.currentEditor()?.selectAll(nil)
     }
 
-    /// Seed the query field (Edit → Find → Use Selection for Find, ⌘E) and
-    /// run the search as if the user had typed it.
     public func setQuery(_ query: String) {
         field.stringValue = query
         delegate?.findBar(self, didChangeQuery: query)
@@ -473,36 +335,20 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Match label
 
-    /// Monotonic token bumped every time the match label is written. The
-    /// deferred clear scheduled by `showTransientMessage` captures its
-    /// token at schedule time and only wipes the label when the latest
-    /// token still matches — so an A → B → A sequence where the second
-    /// A arrives before the first A's 2 s deadline doesn't get
-    /// prematurely wiped, and a `setMatchCount` between the schedule
-    /// and fire invalidates the clear so the match count survives.
-    /// Audit findbar-selection F6.
+    /// Bumped on every label write; `showTransientMessage`'s deferred clear fires only if its token is
+    /// still the latest.
     private var transientMessageToken: UInt64 = 0
 
     private static let noMatchesText = "No matches"
 
     public func setMatchCount(_ current: Int, of total: Int) {
-        // Bump the token so any pending `showTransientMessage` clear
-        // doesn't wipe this newly-written match count on its 2 s timer.
-        // Audit findbar-selection F6.
         transientMessageToken &+= 1
         let text = total == 0 ? FindBar.noMatchesText : "\(current + 1) / \(total)"
-        // Skip the AppKit round-trip (and the VoiceOver announcement)
-        // when nothing actually changed — the search path re-publishes
-        // the same count whenever the snapshot sequence ticks, even if
-        // the content didn't move.
         guard matchLabel.stringValue != text else { return }
         matchLabel.stringValue = text
         announce(text)
     }
 
-    /// Post an announcement so VoiceOver surfaces a label change immediately;
-    /// without it the user has to explicitly rotor-focus the label. Matches
-    /// Terminal.app / Safari's find-bar behaviour.
     private func announce(_ text: String) {
         NSAccessibility.post(
             element: matchLabel as Any,
@@ -514,12 +360,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         )
     }
 
-    /// Blank the counter without an announcement, for "no result to report"
-    /// (empty query, a Replace awaiting its re-run, or a user-driven regex scan
-    /// still in flight). Writing "No matches" for those would be spoken as a
-    /// claim the search never made. `keepingNoMatches` leaves a standing
-    /// "No matches" in place (the scan that follows would only write it back,
-    /// and announce it again).
     public func clearMatchLabel(keepingNoMatches: Bool = false) {
         transientMessageToken &+= 1
         if keepingNoMatches && matchLabel.stringValue == FindBar.noMatchesText { return }
@@ -527,22 +367,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         matchLabel.stringValue = ""
     }
 
-    /// Fires the replace-current delegate callback with the current replacement
-    /// string. Equivalent to clicking the "Replace" button. Used by ⌘⌥E when
-    /// the bar is already expanded. Honours the TUI-guard: if the delegate
-    /// reports that replace is unsafe (alt-screen, mouse-reporting, or
-    /// bracketed-paste active) the call is refused with a transient banner.
     public func triggerReplaceCurrent() {
         requestReplace(.current)
     }
 
-    /// The single TUI-gated replace emission. Every replace entry point — the
-    /// public `triggerReplaceCurrent()` and the `@objc` button actions — routes
-    /// here so the safety gate can't be bypassed by one path drifting from
-    /// another. If the delegate reports replace is unsafe (alt-screen, mouse-
-    /// reporting, or bracketed-paste active) the request is refused with the
-    /// transient banner and zero bytes are emitted; otherwise the current
-    /// replacement text is sent for `kind`.
+    /// The single TUI-gated replace emission: every replace entry point routes here so the gate can't be bypassed.
     private func requestReplace(_ kind: ReplaceKind) {
         guard let delegate else { return }
         guard delegate.findBarShouldAllowReplace(self) else {
@@ -552,17 +381,8 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         delegate.findBar(self, didRequestReplace: kind, with: replaceField.stringValue)
     }
 
-    /// Banner shown when replace is refused because the terminal appears to be
-    /// running a full-screen TUI. Exposed as a static constant so tests can
-    /// assert against the exact wording.
     public static let tuiActiveMessage = "Replace unavailable while TUI is active"
 
-    /// Shows a transient status message in the match label, auto-clearing after
-    /// 2 seconds. Used by the replace path to surface
-    /// "Only input-line matches can be replaced" without a modal alert, and by
-    /// the find path for "Invalid regex pattern" / "Regex too complex". The
-    /// message is announced to VoiceOver when it changes the label, so a banner
-    /// the snapshot-driven refresh re-shows while it is still up is spoken once.
     public func showTransientMessage(_ message: String) {
         transientMessageToken &+= 1
         let myToken = transientMessageToken
@@ -571,10 +391,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         if changed { announce(message) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
-            // Only clear when this scheduling is the most recent one. If
-            // another `showTransientMessage` (or any other label write)
-            // landed after us, the token advanced past ours and this work
-            // item is stale. Audit findbar-selection F6.
             if self.transientMessageToken == myToken {
                 self.matchLabel.stringValue = ""
             }
@@ -583,10 +399,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Replace row visibility
 
-    /// Show or hide the replace row. Resizes the bar's frame to
-    /// `preferredHeight` (top edge fixed) and tells the delegate, so the
-    /// bar's real coverage and `preferredHeight` agree on every path (the
-    /// caret, ⌘⌥E on an open bar, ⌘⌥E that opens the bar).
     public func setReplaceVisible(_ visible: Bool) {
         guard visible != isReplaceVisible else { return }
         isReplaceVisible = visible
@@ -608,11 +420,9 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             caretButton.title = "▸"
             caretButton.cell?.setAccessibilityLabel("Show replace")
         }
-        // Assigning a plain `title` resets the button to system title
-        // color — re-tint from the theme so the ▸/▾ swap doesn't strip it.
+        // Assigning a plain `title` resets the button to the system title color; re-tint from the theme.
         styleGlyphButtonTitles()
         needsLayout = true
-        // Resize the bar's own frame so the new height takes effect visually.
         let h = preferredHeight
         guard frame.height != h else { return }
         let newOriginY = frame.origin.y + frame.height - h
@@ -640,22 +450,13 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - NSTextFieldDelegate
 
-    /// Search debounce timer. Without this, every keystroke runs a full-
-    /// scrollback scan (up to 10k matches × one FFI call per history row)
-    /// while the user is still typing — wasted work the user can't see
-    /// because the next keystroke invalidates the result. Coalesce typing
-    /// bursts to one scan 150 ms after the last keystroke. Audit
-    /// findbar-selection F38.
     private var searchDebounceTimer: Timer?
 
     public func controlTextDidChange(_ notification: Notification) {
-        // The Replace field shares this delegate (for Esc / Return); typing a
-        // replacement must not re-run the search.
+        // The Replace field shares this delegate; typing a replacement must not re-run the search.
         if (notification.object as? NSTextField) === replaceField { return }
         searchDebounceTimer?.invalidate()
         let query = field.stringValue
-        // Empty query → fire immediately so the cleared-match state surfaces
-        // in the UI without a 150 ms flicker of stale matches.
         if query.isEmpty {
             delegate?.findBar(self, didChangeQuery: query)
             return
@@ -680,12 +481,8 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             return true
         case #selector(NSResponder.insertNewline(_:)):
             if control === replaceField {
-                // Return commits the Replace field, like the Replace button.
                 requestReplace(.current)
             } else {
-                // Shift-Return steps to the previous match. Shift-Tab is
-                // deliberately NOT handled (default case): it is the standard
-                // backward-focus gesture, so AppKit moves focus.
                 var backward = false
                 if let event = NSApp.currentEvent, event.type == .keyDown {
                     backward = event.modifierFlags.contains(.shift)
@@ -700,11 +497,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Bar-level keyboard contract
 
-    /// Esc dismisses the bar from ANY control in it. The text fields reach
-    /// this through their delegate (`control(_:textView:doCommandBy:)`); a
-    /// focused button (caret, close, Replace, Replace All — reachable with
-    /// Full Keyboard Access) has no field editor, so the key arrives here via
-    /// `keyDown(with:)` or the responder-chain `cancelOperation:`.
+    /// A focused button has no field editor, so Esc arrives via `keyDown(with:)` or the responder chain.
     public override func cancelOperation(_ sender: Any?) {
         delegate?.findBarDidClose(self)
     }
@@ -713,10 +506,8 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     private static let returnKeyCode: UInt16 = 36
     private static let keypadEnterKeyCode: UInt16 = 76
 
-    /// A key that no control in the bar handled lands here on its way up to
-    /// the TerminalView, whose `keyDown` would encode it into the PTY. Esc
-    /// closes the bar; Return / Enter are swallowed so a stray CR can never
-    /// reach the shell (and run the command line being edited).
+    /// Unhandled keys continue up to TerminalView, whose `keyDown` encodes them into the PTY: Return / Enter
+    /// are swallowed so a stray CR can never reach the shell.
     public override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case FindBar.escapeKeyCode:
@@ -731,45 +522,34 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     // MARK: - Test hooks
 
     #if DEBUG
-    /// Sets the replace field's string value directly (for test injection).
     public func _setReplaceFieldStringForTests(_ value: String) {
         replaceField.stringValue = value
     }
 
-    /// Simulates a click on the "Replace" button (replace current match).
     public func _clickReplaceCurrentForTests() {
         replaceCurrent()
     }
 
-    /// Simulates a click on the "Replace All" button.
     public func _clickReplaceAllForTests() {
         replaceAll()
     }
 
-    /// Reads the current match-label text so tests can assert that the
-    /// TUI-guard transient banner fired.
     public func _matchLabelStringForTests() -> String {
         matchLabel.stringValue
     }
 
-    /// The scheme most recently applied via `applyTheme`, or nil while
-    /// the bar still wears its pre-theme system-color look.
     public func _appliedSchemeForTests() -> FindBarColorScheme? {
         scheme
     }
 
-    /// The bar's current layer background, so tests can assert the themed
-    /// surface (or the pre-theme `windowBackgroundColor` default).
     public func _barLayerBackgroundForTests() -> CGColor? {
         layer?.backgroundColor
     }
 
-    /// The match-counter label's text color.
     public func _matchLabelTextColorForTests() -> NSColor? {
         matchLabel.textColor
     }
 
-    /// The find field's fill + text colors.
     public func _findFieldColorsForTests() -> (background: NSColor?, text: NSColor?) {
         (field.backgroundColor, field.textColor)
     }

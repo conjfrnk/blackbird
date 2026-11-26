@@ -1,23 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// AppKit-owned host for the SwiftUI `SettingsView`.
-///
-/// We don't rely on SwiftUI's `Settings { … }` scene because under
-/// `@NSApplicationDelegateAdaptor` + a fully custom main menu, the scene's
-/// hidden controller isn't reliably reachable via `showSettingsWindow:`
-/// on the responder chain. Building the window ourselves is a handful of
-/// lines and behaves identically across every launch path.
-/// Plain `NSWindow` container (not NSWindowController) because
-/// NSWindowController adds nib-loading machinery that trips on our
-/// SwiftUI-hosted controller path — specifically, after the window is
-/// closed, a subsequent `showWindow` sometimes orphans the hosted view
-/// tree. Managing the window directly keeps the state machine tiny.
-/// NSWindow subclass that intercepts ESC (the canonical AppKit
-/// `cancelOperation:`) and closes the window. Without this, Settings
-/// has no keyboard escape — ⌘W works, but most users expect ESC on a
-/// modal-feeling "Preferences" surface. Matches System Settings and
-/// the settings dialogs in Xcode, Safari, and Finder.
+/// Not SwiftUI's `Settings` scene: under a fully custom main menu its controller isn't reliably
+/// reachable via `showSettingsWindow:`. Not NSWindowController: a re-show can orphan the hosted view tree.
 final class SettingsWindow: NSWindow {
     override func cancelOperation(_ sender: Any?) {
         performClose(sender)
@@ -27,10 +12,7 @@ final class SettingsWindow: NSWindow {
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
 
-    /// Posted by `show()` every time Settings is (re)presented. The cached
-    /// SwiftUI tree never sees a fresh `.onAppear` when the window is closed
-    /// and re-shown, so panes that must reflect on-disk state (Diagnostics)
-    /// subscribe to this to reload.
+    /// The cached SwiftUI tree gets no fresh `.onAppear` on re-show; panes showing on-disk state reload on this.
     static let didShow = Notification.Name("dev.conjfrnk.blackbird.settingsWindowDidShow")
 
     private var window: NSWindow?
@@ -38,12 +20,8 @@ final class SettingsWindowController {
 
     private init() {}
 
-    /// Show the settings window. The hosting controller + window are built
-    /// once and reused — swapping a fresh NSHostingController into the same
-    /// window on every show has a race where the second attachment commits
-    /// an empty view tree (blank white content). SettingsView binds to
-    /// `Preferences.shared` via `@ObservedObject`, so the cached view picks
-    /// up any preference change automatically; no need to rebuild it.
+    /// The host and window are built once: swapping a fresh NSHostingController into the same window on
+    /// every show can commit an empty view tree.
     func show() {
         if window == nil { buildContent() }
         guard let w = window else { return }
@@ -53,29 +31,11 @@ final class SettingsWindowController {
         NotificationCenter.default.post(name: Self.didShow, object: self)
     }
 
-    /// Build the window + SwiftUI host (wrapped in the Liquid-Glass blur
-    /// container) exactly once. Uses `contentView` — NOT
-    /// contentViewController, which collapses the window to titlebar-only —
-    /// and keeps `host` alive so SwiftUI's lifecycle survives.
     private func buildContent() {
         let w = makeWindow()
         let h = NSHostingController(rootView: SettingsView())
-        // IMPORTANT: set `contentView`, not `contentViewController`.
-        // Assigning a fresh NSHostingController as contentViewController
-        // triggers NSWindow to adopt the controller's preferredContentSize,
-        // which is (0, 0) until SwiftUI first lays out. The window
-        // collapses to titlebar-only (~0×28 content), nothing ever draws,
-        // and the user sees an empty white window. Keep `host` as a
-        // property so SwiftUI's view controller lifecycle stays alive.
-        //
-        // Liquid Glass: we wrap the hosting controller in a container
-        // whose backing is an NSVisualEffectView with the `.sidebar`
-        // material. On macOS 26 (Tahoe) this material renders as native
-        // Liquid Glass; on earlier systems it falls back to the classic
-        // translucent sidebar blur so the window still looks modern.
-        // `.fullSizeContentView` on the window (see `makeWindow`) lets
-        // the glass extend all the way under the titlebar as one
-        // continuous surface — the hallmark of the Liquid Glass look.
+        // `contentView`, not `contentViewController`: the latter makes NSWindow adopt the host's (0, 0)
+        // preferredContentSize, collapsing the window to its titlebar. `host` is retained to keep SwiftUI alive.
         let content = NSView(frame: NSRect(origin: .zero, size: w.frame.size))
         content.autoresizingMask = [.width, .height]
         let blur = NSVisualEffectView(frame: content.bounds)
@@ -92,28 +52,18 @@ final class SettingsWindowController {
         host = h
     }
 
-    /// First-show frame policy: center only when no frame was ever autosaved
-    /// (else setFrameAutosaveName already restored the user's position, and
-    /// centering would clobber it). Audit M-18 / MS-2.
+    /// Center only when no frame was ever autosaved; otherwise centering clobbers the restored position.
     private func applyFirstShowFrame(_ w: NSWindow) {
         guard !w.isVisible else { return }
         if UserDefaults.standard.string(forKey: Self.autosaveDefaultsKey) == nil {
             w.center()
         }
-        // else: setFrameAutosaveName already applied the saved origin.
     }
 
-    /// Cocoa keys the autosaved frame under `NSWindow Frame <autosaveName>`.
     private static var autosaveDefaultsKey: String {
         "NSWindow Frame \(frameAutosaveName)"
     }
 
-    /// The autosave name the Settings window registers with AppKit.
-    /// Cocoa stores the persisted frame under
-    /// `NSWindow Frame <autosaveName>` in the standard defaults
-    /// domain; `show()` reads that key to decide whether to call
-    /// `center()` on a reopen. Keep the literal in one place so a
-    /// rename can't desync the read-side and write-side.
     fileprivate static let frameAutosaveName = "BlackbirdSettingsV2"
 
     private func makeWindow() -> NSWindow {
@@ -125,23 +75,9 @@ final class SettingsWindowController {
         )
         w.title = "Settings"
         w.isReleasedWhenClosed = false
-        // Prevent users (and buggy prior autosaves) from shrinking below the
-        // SwiftUI form's useful minimum.
         w.contentMinSize = NSSize(width: 520, height: 520)
-        // Version-suffix the autosave name so existing users on a stuck
-        // small frame (previous default was 520×360) are reset to the
-        // new, roomier default rather than opening at the cramped size.
         w.setFrameAutosaveName(SettingsWindowController.frameAutosaveName)
-        // Settings lives above other app windows even when the user
-        // switches back to the terminal briefly.
         w.hidesOnDeactivate = false
-        // Liquid Glass needs the titlebar to be transparent and the
-        // content to extend under it — the NSVisualEffectView behind the
-        // SwiftUI content then blurs the entire window surface as one
-        // continuous glass pane rather than a boxed content-under-bar
-        // look. `.titlebarSeparatorStyle = .none` removes the hairline
-        // AppKit draws between the titlebar and content, which otherwise
-        // bisects the glass surface into two visually distinct panels.
         w.titlebarAppearsTransparent = true
         w.titlebarSeparatorStyle = .none
         w.isMovableByWindowBackground = false
