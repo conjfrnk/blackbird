@@ -1,9 +1,3 @@
-//! The C-callback dispatch machinery: `CallbackCell` (the interior-mutable
-//! slot shared between `BBTerm` and its `RoutingListener`), the deferred
-//! `ColorRequestQueue` for OSC 10/11/12 replies, and `RoutingListener` itself
-//! (the alacritty `EventListener` that scrubs/rate-limits/forwards events).
-//! Moved out of the monolith verbatim (REFACTOR.md Wave 1); behavior unchanged.
-
 use std::cell::UnsafeCell;
 use std::os::raw::c_void;
 use std::sync::Arc;
@@ -20,93 +14,28 @@ use crate::rate_limit::{
 };
 use crate::scrub::scrub_title_controls;
 
-// ---------------------------------------------------------------------------
-// CallbackCell — shared mutable slot between BBTerm and RoutingListener
-// ---------------------------------------------------------------------------
-
-/// Interior-mutable storage for the registered C callback and its context
-/// pointer.  Both `BBTerm` and `RoutingListener` reference the same cell;
-/// `BBTerm` owns it via `Arc`.
-///
-/// # Thread-safety contract
-/// All access to `CallbackCell` is mutually exclusive: the FFI contract
-/// forbids concurrent calls on the same `term` handle (documented on
-/// `bb_term_input` / `bb_term_new` — one thread at a time, e.g. confinement
-/// to a dedicated serial queue). `Term<RoutingListener>` and `Processor`
-/// are not `Sync`. Under this mutual-exclusion discipline no data race can
-/// occur, making the `UnsafeCell` sound.
-///
-/// In debug builds, a `busy` flag detects OVERLAPPING access — two threads
-/// inside the cell simultaneously, the actual data-race UB — and panics
-/// with a diagnostic. Audit S1-004: the previous design latched the FIRST
-/// accessor's `ThreadId` and asserted every later access matched, which
-/// contradicted `bb_term_new`'s own documented allowance ("confine it to a
-/// single dedicated serial queue"): GCD gives a serial queue no stable
-/// thread identity, so the legitimate Swift architecture (handle created
-/// on main, driven from `coreQueue`) tripped the latch on the first event
-/// of every debug-assertions core build — making the diagnostic worthless
-/// for catching real misuse. Overlap detection has no false positive for
-/// serialized cross-thread use and still catches genuinely concurrent
-/// access (best-effort: only overlaps colliding inside the flag's window
-/// are observable). Zero cost in release (rust-core-1 F2/F10).
+/// Sound only because the FFI contract forbids concurrent calls on one `term` handle. The debug
+/// `busy` flag detects OVERLAPPING access, not thread identity: a serial queue has no fixed thread.
 pub(crate) struct CallbackCell {
     pub(crate) slot: UnsafeCell<(Option<BBEventCb>, *mut c_void)>,
-    /// Sliding-window cap on `Event::PtyWrite` dispatches. Audit M1 (the
-    /// 32/sec contract on cursor-position / DA / DSR / DECXCPR replies)
-    /// originally lived in `RoutingListener::send_event`, so two direct-
-    /// fire sites (`dispatch_xtgettcap` and `drain_color_requests`)
-    /// bypassed it — a 4 KiB DCS+q with `;`-delimited cap_hex spawned
-    /// ~1300 PtyWrites in one batch, totally bypassing the cap. Audit
-    /// H-4 moved the gate here so all three call sites inherit it by
-    /// construction. The cell is `Arc<PtyWriteRateCell>` so the listener
-    /// shares ownership and `bb_term_clear_all` can `reset()` it via
-    /// `BBTerm`'s clone (audit H-3).
+    /// Gated in `fire`, so every PtyWrite path inherits the cap.
     pub(crate) pty_write_rate: Arc<PtyWriteRateCell>,
-    /// Title/Bell tumbling windows (audit S1-002). Same UnsafeCell
-    /// discipline as `slot`; accessed only inside the fire()/reset
-    /// busy-guard scopes.
     title_rate: UnsafeCell<EventRateState>,
     bell_rate: UnsafeCell<EventRateState>,
     notification_rate: UnsafeCell<EventRateState>,
     osc52_rate: UnsafeCell<EventRateState>,
-    /// Coalesce-to-latest latch for rate-suppressed titles (review
-    /// follow-up to audit S1-002). Title is last-writer-wins state: a
-    /// plain drop of the NEWEST title in a burst left the window title
-    /// pinned to the 32nd-of-window value — and nothing re-emits in the
-    /// default configuration (the bundled shell integration sends no
-    /// OSC 0/2), so the stale title persisted indefinitely. Suppressed
-    /// titles overwrite this latch; `flush_suppressed_title` (called
-    /// from `bb_term_input` after each chunk) re-attempts delivery, so
-    /// the latest title lands on the first chunk after the window
-    /// rolls — bounding the flood to its cap while preserving
-    /// last-writer-wins correctness.
+    /// Latest rate-suppressed title (last-writer-wins), redelivered by `flush_suppressed_title`.
     suppressed_title: UnsafeCell<Option<String>>,
-    /// Same latch for rate-suppressed OSC 52 clipboard writes: the
-    /// clipboard is last-writer-wins, so a burst's final yank must still
-    /// land once the window rolls. Redelivered by `flush_suppressed_osc52`,
-    /// which the Swift side also drives from a timer
-    /// (`bb_term_flush_suppressed_osc52`): unlike a title, a write that
-    /// waited for the next input chunk could land minutes later and
-    /// overwrite whatever the user copied in the meantime.
+    /// Same latch for OSC 52 writes. The Swift side also flushes it from a timer: a write that
+    /// waited for the next input chunk could overwrite what the user copied in the meantime.
     suppressed_osc52: UnsafeCell<Option<String>>,
-    /// One-shot breadcrumb latch for the first suppressed title
-    /// (mirrors `osc133_rate_limited_logged`'s stance).
     title_suppressed_logged: UnsafeCell<bool>,
     notification_suppressed_logged: UnsafeCell<bool>,
     #[cfg(debug_assertions)]
     busy: std::sync::atomic::AtomicBool,
 }
 
-/// RAII overlap detector for the `UnsafeCell`-backed FFI cells. In
-/// debug builds `enter` panics when the flag is already held — i.e.
-/// another thread is INSIDE the cell right now (serialized access from
-/// different threads never trips it); in release it is a zero-sized
-/// no-op. The type exists in BOTH configurations with the same
-/// signature (review follow-up to audit S1-004) so guard extents read
-/// identically in release control flow and `drop(guard)` works
-/// un-cfg'd; `#[must_use]` stops a bare `self.debug_enter();`
-/// statement from silently discarding the guard and disabling
-/// detection for the scope it meant to protect.
+/// Overlap detector: `enter` panics in debug builds when the flag is held; a no-op in release.
 #[cfg(debug_assertions)]
 #[must_use]
 pub(crate) struct DebugBusyGuard<'a>(&'a std::sync::atomic::AtomicBool);
@@ -136,8 +65,7 @@ impl Drop for DebugBusyGuard<'_> {
     }
 }
 
-// Empty Drop keeps release-mode `drop(guard)` clippy-clean
-// (drop_non_drop) and compiles to nothing.
+// Empty Drop keeps release-mode `drop(guard)` clippy-clean (drop_non_drop).
 #[cfg(not(debug_assertions))]
 impl Drop for DebugBusyGuard<'_> {
     fn drop(&mut self) {}
@@ -189,11 +117,6 @@ impl CallbackCell {
         DebugBusyGuard(std::marker::PhantomData)
     }
 
-    /// Reset the Title/Bell sliding windows so a pre-clear flood does
-    /// not strand the post-clear session's budget. Mirrors the PtyWrite
-    /// reset on `bb_term_clear_all` (audit H-3); added with the caps in
-    /// audit S1-002.
-    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     pub(crate) unsafe fn reset_event_rates(&self) {
@@ -203,20 +126,12 @@ impl CallbackCell {
         *self.notification_rate.get() =
             EventRateState::new(NOTIFICATION_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
         *self.osc52_rate.get() = EventRateState::new(OSC52_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
-        // Unlike a stale title, a latched pre-clear clipboard payload must
-        // not land on the user's clipboard after they reset the terminal.
+        // A latched pre-clear clipboard payload must not land on the clipboard after a reset.
         *self.suppressed_osc52.get() = None;
     }
 
-    /// Re-attempt delivery of a rate-suppressed title (see
-    /// `suppressed_title`). Called from `bb_term_input` after each
-    /// chunk's parser drains — outside any alacritty borrow and outside
-    /// handler dispatch. If the window is still saturated, `fire`
-    /// re-latches the same title; once it rolls, the latest title is
-    /// delivered exactly once.
-    ///
     /// # Safety
-    /// Caller must ensure no concurrent access.
+    /// No concurrent access; call outside any alacritty borrow and outside handler dispatch.
     pub(crate) unsafe fn flush_suppressed_title(&self) {
         let pending = {
             let _busy = self.debug_enter();
@@ -234,21 +149,13 @@ impl CallbackCell {
         });
     }
 
-    /// Re-attempt delivery of a rate-suppressed OSC 52 write (see
-    /// `suppressed_osc52`); same contract as `flush_suppressed_title`.
-    ///
-    /// Returns how long until the cap's window rolls while a write is still
-    /// held back (so the caller can schedule a trailing flush), `None` once
-    /// nothing is held back. The latch is left untouched while the window is
-    /// saturated: re-firing would only re-clone the payload into the latch
-    /// on every chunk of a flood.
+    /// Returns the wait until the cap's window rolls while a write is held back, else `None`.
     ///
     /// # Safety
-    /// Caller must ensure no concurrent access.
+    /// Same contract as `flush_suppressed_title`.
     pub(crate) unsafe fn flush_suppressed_osc52(&self) -> Option<std::time::Duration> {
         let pending = {
             let _busy = self.debug_enter();
-            // Nothing held back: nothing to deliver, nothing to wait for.
             (*self.suppressed_osc52.get()).as_ref()?;
             if let Some(wait) = (*self.osc52_rate.get()).retry_after() {
                 return Some(wait);
@@ -268,8 +175,6 @@ impl CallbackCell {
         None
     }
 
-    /// Update the stored callback and context.
-    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     pub(crate) unsafe fn set(&self, cb: Option<BBEventCb>, ctx: *mut c_void) {
@@ -277,77 +182,30 @@ impl CallbackCell {
         *self.slot.get() = (cb, ctx);
     }
 
-    /// Invoke the stored callback if one is registered.
-    ///
-    /// `BBEventKind::PtyWrite` events go through the shared rate cap
-    /// (audit M1 + H-4); `Title` and `Bell` go through their own caps
-    /// (audit S1-002 — see `TITLE_EVENT_PER_SECOND`), and so do
-    /// `Notification` and `Osc52Clipboard` (the latter coalesces to the
-    /// latest, see `suppressed_osc52`). Excess events silently drop here.
-    /// Remaining kinds dispatch unconditionally: CwdChanged and
-    /// PromptMark are rate-gated upstream in the OscScanner and Fatal is
-    /// one-shot by nature. (alacritty bounds an OSC 52 payload's size and
-    /// validity, not how many arrive, hence the cap above.)
-    ///
-    /// Drop policy: dropped PtyWrites are silent BY DESIGN. Logging
-    /// each drop would itself become a flood-amplifier (the very thing
-    /// the rate cap is defending against — a hostile DCS+q with 1300
-    /// cap_hex tokens would emit 1300 log lines). The
-    /// `osc_color_query_rate_limit_drops_excess` /
-    /// `xtgettcap_pty_write_cap_holds` tests cover the cap behavior,
-    /// and `bb_term_clear_all` resets the budget so a flood-induced
-    /// drop episode doesn't strand legitimate post-clear traffic.
+    /// Dropped PtyWrites are silent BY DESIGN: logging each drop would itself amplify a flood.
     ///
     /// # Safety
-    /// Caller must ensure no concurrent access and that the `BBEvent` fields
-    /// are valid for the duration of the call.
+    /// No concurrent access; the `BBEvent` fields must be valid for the duration of the call.
     pub(crate) unsafe fn fire(&self, event: BBEvent) {
-        // Audit S6-001: enforce the header's documented nullability
-        // invariant (`payload == NULL ⇔ len == 0`) at the single choke
-        // point every event passes through. Rust producers naturally
-        // violate it: an empty slice's `as_ptr()` is non-null, and an
-        // empty `String`'s `as_ptr()` is `NonNull::dangling()` (0x1) —
-        // a conforming C consumer that branches on `payload != NULL`
-        // per the header would dereference it.
+        // Enforce `payload == NULL ⇔ len == 0`: an empty slice's `as_ptr()` is non-null.
         let mut event = event;
         if event.len == 0 {
             event.payload = std::ptr::null();
         }
-        // Overlap-detection scope covers the slot read and the rate-state
-        // mutation below, and ends BEFORE the user callback runs — a
-        // nested dispatch from inside `f` must not false-trip the guard.
+        // The overlap guard must end BEFORE the callback runs: a nested dispatch must not trip it.
         let _busy = self.debug_enter();
-        // Reviewer feedback (2026-04-29): read the callback slot FIRST.
-        // If no callback is registered (e.g. `set()` never called or
-        // explicitly cleared), every PtyWrite previously consumed a
-        // budget slot anyway — the cap should limit *dispatched* events,
-        // not *attempted* ones. With this reorder a pre-callback
-        // PtyWrite flood no longer drains the budget that the post-
-        // callback session needs.
+        // Read the slot FIRST: with no callback registered, an event must not consume rate budget.
         let (cb, ctx) = *self.slot.get();
         let Some(f) = cb else {
             return;
         };
-        // Audit H-4: PtyWrite cap is total-by-construction. All three
-        // PtyWrite-firing paths (RoutingListener::send_event,
-        // dispatch_xtgettcap, drain_color_requests) inherit the cap from
-        // here. This used to live in RoutingListener::send_event, where
-        // it gated only the alacritty-driven path.
         if matches!(event.kind, BBEventKind::PtyWrite) && !self.pty_write_rate.allow() {
             return;
         }
-        // Audit S1-002: Title/Bell were the only uncapped event kinds a
-        // hostile byte stream can fan out per-event to the Swift main
-        // queue. Same silent-drop policy as PtyWrite (per-drop logging
-        // would itself amplify the flood).
         if matches!(event.kind, BBEventKind::Title) {
             if (*self.title_rate.get()).allow() {
-                // An admitted title supersedes anything latched.
                 *self.suppressed_title.get() = None;
             } else {
-                // Coalesce-to-latest instead of dropping: keep the
-                // NEWEST suppressed title for redelivery once the
-                // window rolls (see `suppressed_title`).
                 let bytes = if event.payload.is_null() || event.len == 0 {
                     &[][..]
                 } else {
@@ -366,7 +224,6 @@ impl CallbackCell {
         }
         if matches!(event.kind, BBEventKind::Osc52Clipboard) {
             if (*self.osc52_rate.get()).allow() {
-                // An admitted write supersedes anything latched.
                 *self.suppressed_osc52.get() = None;
             } else {
                 let bytes = if event.payload.is_null() || event.len == 0 {
@@ -392,87 +249,33 @@ impl CallbackCell {
             }
             return;
         }
-        // Audit M-9 follow-up (2026-04-29): set the
-        // `FFI_HANDLER_IN_FLIGHT` latch around the user-callback
-        // dispatch so a synchronous re-entry from inside `f` into a
-        // `bb_term_*` entry point can be detected at the FFI boundary
-        // BEFORE the second `&mut Term` reborrow takes effect. The
-        // Swift-side `BBTerm.isInsideEventDispatch` precondition fires
-        // AFTER the second `&mut Term` is on stack — this guard is the
-        // dynamic catch one frame earlier. RAII drop restores `false`
-        // even if `f` panics (the outer `catch_unwind` machinery in
-        // `guard_with_term` still owns the panic; this guard exists
-        // only to expose the in-flight bit).
+        // Lets a callback's synchronous re-entry into `bb_term_*` bail BEFORE reborrowing `Term`.
         drop(_busy);
         let _handler_guard = HandlerInFlightGuard::enter();
         f(event, ctx);
     }
 }
 
-// ---------------------------------------------------------------------------
-// ColorRequestQueue — deferred OSC 10/11/12 color-query responses
-// ---------------------------------------------------------------------------
-
-/// Parked `Event::ColorRequest` events. Alacritty fires these from inside
-/// `term.dynamic_color_sequence`, which holds `&mut Term`; we can't re-borrow
-/// the term to read the palette from the listener. Instead the listener
-/// pushes `(index, current, formatter)` entries here, and `bb_term_input`
-/// drains the queue after `processor.advance` returns (releasing the mutable
-/// borrow), resolves the theme fallback, calls the formatter, and fires a
-/// PtyWrite.
-///
-/// # DoS bound
-/// `push` is hard-capped at `COLOR_REQUEST_QUEUE_CAP` entries between two
-/// drains: it keeps a flood from forcing an unbounded number of
-/// `Arc<dyn Fn>` trait-object allocations, inconsistent with the 4 KiB
-/// `xtgettcap_buf` cap already defending the sibling DCS path (rust-core-1
-/// F1). What one drain interval spans depends on the stream:
-/// - Outside a DEC 2026 synchronized update `process_input` drains after
-///   every ESC-delimited segment, so the cap bounds one segment, not a whole
-///   `bb_term_input` chunk. (vte keeps at most 16 OSC params, so one OSC 4
-///   queues at most 7 entries and the cap is only a backstop there; 256
-///   still covers any legitimate probe.)
-/// - Inside a synchronized update vte withholds every byte until the update
-///   ends, then replays the whole buffer in one advance with no drain
-///   between queries. The whole replayed buffer is one drain interval, so
-///   the cap is the live bound there: at most 256 entries queue and the
-///   rest are dropped with one breadcrumb.
-///
-/// A flood across many segments, replays or chunks is bounded by the
-/// tumbling-window reply gate in `drain_color_requests`, which logs its
-/// first drop per window.
-///
-/// # Thread-safety contract
-/// Same as `CallbackCell` — mutually-exclusive access under the BBTerm
-/// handle's one-thread-at-a-time discipline. Debug builds detect
-/// overlapping access via a `busy` flag and panic (rust-core-1 F2/F10,
-/// reworked per audit S1-004 — see `CallbackCell`).
+/// `Event::ColorRequest` fires while alacritty holds `&mut Term`, so entries park here until the
+/// drain after `processor.advance` returns. Same access discipline as `CallbackCell`.
 pub(crate) struct ColorRequestQueue {
     entries: UnsafeCell<Vec<ColorRequestEntry>>,
-    /// True once `push` has refused at least one entry since the latest
-    /// `drain`. Drives a one-shot log per cap-hit episode — per-drop
-    /// logging would itself become the DoS amplifier we're defending
-    /// against.
     cap_hit_logged: UnsafeCell<bool>,
     #[cfg(debug_assertions)]
     busy: std::sync::atomic::AtomicBool,
 }
 
-/// Upper bound on queued `ColorRequestEntry`s between two drains. See
-/// `ColorRequestQueue` doc for rationale.
+/// Upper bound on queued `ColorRequestEntry`s between two drains.
 pub(crate) const COLOR_REQUEST_QUEUE_CAP: usize = 256;
 
 pub(crate) struct ColorRequestEntry {
     pub(crate) index: usize,
-    /// The program-set value of the slot when the query was parsed, not
-    /// when it is drained: a set/reset later in the same chunk must not
-    /// change this reply. `None` falls back to the theme / built-in default.
+    /// The slot's program-set value when the query was parsed, not when it is drained.
     pub(crate) current: Option<Rgb>,
     pub(crate) formatter: Arc<dyn Fn(Rgb) -> String + Sync + Send>,
 }
 
-// SAFETY: the owning BBTerm is never shared across threads; same reasoning
-// as CallbackCell.
+// SAFETY: the owning BBTerm is never shared across threads; same reasoning as CallbackCell.
 unsafe impl Send for ColorRequestQueue {}
 unsafe impl Sync for ColorRequestQueue {}
 
@@ -497,10 +300,6 @@ impl ColorRequestQueue {
         DebugBusyGuard(std::marker::PhantomData)
     }
 
-    /// Append an entry, dropping it (with one breadcrumb per drain interval)
-    /// when the queue is already at `COLOR_REQUEST_QUEUE_CAP`. Returns
-    /// `true` when the entry was accepted.
-    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     pub(crate) unsafe fn push(&self, entry: ColorRequestEntry) -> bool {
@@ -521,9 +320,6 @@ impl ColorRequestQueue {
         true
     }
 
-    /// Take and clear the queue. Resets the cap-hit latch so the next
-    /// hit episode logs again.
-    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     pub(crate) unsafe fn drain(&self) -> Vec<ColorRequestEntry> {
@@ -532,8 +328,6 @@ impl ColorRequestQueue {
         std::mem::take(&mut *self.entries.get())
     }
 
-    /// Number of currently-queued entries. Test-only introspection.
-    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     #[cfg(test)]
@@ -542,44 +336,17 @@ impl ColorRequestQueue {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RoutingListener — bridges alacritty_terminal events to C callbacks
-// ---------------------------------------------------------------------------
-
-/// Event listener that forwards terminal events to a registered C callback.
-///
-/// Shares ownership of the `CallbackCell` and `ColorRequestQueue` with the
-/// parent `BBTerm` via `Arc`. The previous implementation used raw pointers
-/// and relied on field drop order (`Term` dropped before `Box<CallbackCell>`)
-/// to keep them valid — a structural invariant enforced only by comments.
-/// `Arc` shares the allocation, so even in a future refactor where the
-/// listener outlives the owning `BBTerm` or an event fires mid-teardown,
-/// every access lands on live memory (rust-core-1 F3).
-///
-/// # Thread-safety contract
-/// Must be constructed and used exclusively on the thread that owns the
-/// `BBTerm`. The Arcs are `Send + Sync` (the inner cells unsafe-impl `Sync`
-/// under single-thread discipline), but BBTerm's own single-thread rule
-/// still forbids concurrent `bb_term_input` calls — that is the real
-/// invariant. Arc merely removes the drop-order footgun that otherwise
-/// turned a future refactor into silent use-after-free.
+/// The `Arc`-shared cells stay live even if an event fires mid-teardown. Use only under the
+/// owning `BBTerm`'s one-thread-at-a-time discipline.
 pub(crate) struct RoutingListener {
     pub(crate) cell: Arc<CallbackCell>,
     pub(crate) color_queue: Arc<ColorRequestQueue>,
-    // Audit H-4 (2026-04-29): the PtyWrite rate cap (32/sec, audit M1)
-    // moved into `CallbackCell::fire` so all three dispatch paths
-    // (this listener, `dispatch_xtgettcap`, `drain_color_requests`)
-    // inherit it by construction. The shared `Arc<PtyWriteRateCell>`
-    // now lives on `CallbackCell`; the listener doesn't need its own
-    // reference because every send_event PtyWrite goes through
-    // `self.cell.fire`.
 }
 
 impl EventListener for RoutingListener {
     fn send_event(&self, event: Event) {
-        // SAFETY: `cell` and `color_queue` remain live for as long as any
-        // Arc clone exists; single-thread discipline (see RoutingListener
-        // doc) means no concurrent access.
+        // SAFETY: `cell` and `color_queue` remain live for as long as any Arc clone exists;
+        // single-thread discipline means no concurrent access.
         unsafe {
             match event {
                 Event::Bell => {
@@ -593,18 +360,6 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::Title(ref s) => {
-                    // Bug #18: strip C0 (0x00..=0x1F), DEL (0x7F), and C1
-                    // (U+0080..=U+009F) controls from the title before
-                    // firing. A malicious shell or remote SSH session may
-                    // emit `\x1b]2;before\x1b[31mafter\x07`; alacritty hands
-                    // us the raw payload and downstream consumers (Swift
-                    // NSWindow.title, telemetry, accessibility) treat the
-                    // String literally. Display sanitizes, but stored /
-                    // logged copies misinterpret embedded controls.
-                    //
-                    // Filter codepoint-wise so the C1 case (encoded as
-                    // 0xC2 0x80..=0xC2 0x9F in UTF-8) is handled by char
-                    // semantics rather than a fragile byte filter.
                     let scrubbed = scrub_title_controls(s);
                     let bytes = scrubbed.as_bytes();
                     self.cell.fire(BBEvent {
@@ -627,14 +382,6 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::PtyWrite(ref s) => {
-                    // The 32/sec cap on cursor-position / DA / DSR /
-                    // DECXCPR replies (audit M1) lives inside
-                    // `CallbackCell::fire` for `kind == PtyWrite`, so the
-                    // gate is total-by-construction — every PtyWrite
-                    // path (this one + dispatch_xtgettcap +
-                    // drain_color_requests) inherits the same cap from
-                    // one place (audit H-4). Pre-H-4 the gate lived
-                    // here; the two direct-fire sites then bypassed it.
                     let bytes = s.as_bytes();
                     self.cell.fire(BBEvent {
                         kind: BBEventKind::PtyWrite,
@@ -646,30 +393,15 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::ColorRequest(index, current, formatter) => {
-                    // Defer — we're inside alacritty's &mut Term borrow via
-                    // dynamic_color_sequence, so the palette isn't readable
-                    // from here. `bb_term_input` drains this queue right
-                    // after processor.advance returns, resolves the theme
-                    // fallback, calls the formatter, and emits PtyWrite.
-                    // `current` was captured at query time by the vendored
-                    // handler so the drain doesn't re-read a later palette.
-                    // push() is `bool`-returning for DoS capping; we ignore
-                    // the drop signal here — the listener can't replywrite
-                    // anyway, and the one-shot log inside push() surfaces
-                    // the hostile case for diagnostics.
+                    // A push refused at the cap is dropped; `push` logs it once.
                     let _ = self.color_queue.push(ColorRequestEntry {
                         index,
                         current,
                         formatter,
                     });
                 }
-                // `ResetTitle` fires from `pop_title` (XTWINOPS 23) when the
-                // saved title was `None` — i.e. nvim's save/restore in a
-                // shell that never set one — and from `set_title(None)`.
-                // Forward it as a Title event with an EMPTY payload:
-                // `SessionTitleState.applyOscTitle("")` clears the OSC
-                // title so the shell-basename seed reappears. Dropping it
-                // left the tab reading "nvim" after nvim exited.
+                // `ResetTitle` fires from `pop_title` (XTWINOPS 23) with no saved title and from
+                // `set_title(None)`: forward a Title with an EMPTY payload to clear the OSC title.
                 Event::ResetTitle => {
                     self.cell.fire(BBEvent {
                         kind: BBEventKind::Title,
@@ -680,9 +412,6 @@ impl EventListener for RoutingListener {
                         lines_scrolled: 0,
                     });
                 }
-                // All other variants (MouseCursorDirty, ClipboardLoad,
-                // TextAreaSizeRequest, CursorBlinkingChange, Wakeup, Exit,
-                // ChildExit) are intentionally ignored.
                 _ => {}
             }
         }

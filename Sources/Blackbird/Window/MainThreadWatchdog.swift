@@ -3,64 +3,28 @@ import Darwin
 import QuartzCore
 import os
 
-/// Main-thread hang detector.
-///
-/// Pings main at `pingInterval`; if main doesn't respond within
-/// `hangThreshold`, shells out to `/usr/bin/sample` with our own pid and
-/// writes a symbolicated stack trace to
-/// `~/Library/Logs/Blackbird/hang-<timestamp>.txt`. This gives us
-/// actual evidence of what the app was doing during a UI beachball
-/// rather than having to guess or catch the freeze with an external
-/// `sample` run at exactly the right moment.
-///
-/// Default-on in Debug (set `BB_HANG_WATCHDOG=0` to suppress), off in
-/// Release unless `BB_HANG_WATCHDOG=1` is set explicitly by someone
-/// trying to repro a beachball. The probe thread costs ~0.1 % CPU when
-/// idle; real work only happens on a detected hang. Production users
-/// should not accumulate diagnostics they didn't ask for.
+/// Main-thread hang detector: when main misses pings for `hangThreshold`, captures a `sample` trace.
 enum MainThreadWatchdog {
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "watchdog")
 
-    // Single-shot install guard — `install()` is idempotent so repeat callers
-    // (e.g. `applicationDidFinishLaunching` under test-induced re-entry) can't
-    // arm multiple watchdog threads.
     private static var installed = false
     private static let installLock = NSLock()
 
-    /// Minimum hang threshold (50 ms). `install(hangThreshold:)` clamps any
-    /// value below this floor up to the floor, so a bad caller can't arm a
-    /// watchdog that fires on every runloop tick. Sub-50 ms hangs aren't
-    /// actionable — sample(1) itself takes ~200 ms.
     static let minHangThreshold: Double = 0.05
 
-    /// Minimum ping interval (10 ms). `install(pingInterval:)` clamps any
-    /// value below this floor up to the floor, so
-    /// `Thread.sleep(forTimeInterval: 0)` (which returns immediately on
-    /// Darwin) can't put the watchdog thread into a tight busy-wait that
-    /// pegs an efficiency core. Likewise prevents the main-thread Timer
-    /// from being scheduled with `timeInterval: 0` (fires every runloop
-    /// service iteration). Audit M-22.
+    /// `Thread.sleep(forTimeInterval: 0)` returns immediately on Darwin; the floor prevents a busy-wait.
     static let minPingInterval: Double = 0.01
 
-    /// Last timestamp main responded to a ping. Written by the main-runloop
-    /// timer (audit M-2 fixed: previously `nonisolated(unsafe) var Double`,
-    /// read by the watchdog thread without synchronization). The lock
-    /// matches the M-8 fix shape (`OSAllocatedUnfairLock<Bool>` for
-    /// AtomicFlag.value); both are heap-resident, low-contention, and
-    /// known memory-model-safe under TSan.
+    /// Written by the main-runloop timer, read by the watchdog thread.
     private static let lastMainHeartbeat = OSAllocatedUnfairLock<Double>(initialState: 0)
 
-    /// Last-installed ping interval after clamping. Exposed for tests so the
-    /// M-22 clamp can be observed without touching the private internal
-    /// timer/thread state. nil until first install.
     static var installedPingInterval: Double? {
         installLock.lock()
         defer { installLock.unlock() }
         return _installedPingInterval
     }
 
-    /// Last-installed hang threshold after clamping. Exposed for tests.
     static var installedHangThreshold: Double? {
         installLock.lock()
         defer { installLock.unlock() }
@@ -71,20 +35,10 @@ enum MainThreadWatchdog {
     private static var _installedHangThreshold: Double?
 
     #if DEBUG
-    /// Stop flag of the currently armed watchdog. Set by `install`, raised by
-    /// `_disarmForTesting`.
     private static var stopCurrent: OSAllocatedUnfairLock<Bool>?
 
-    /// Test seam: undo `install` so a suite that arms the watchdog at a tiny
-    /// threshold doesn't leave it armed for every later test in the xctest
-    /// host. Stops the heartbeat timer and the watchdog thread and re-opens
-    /// the install latch. Once this returns, no capture can START (the watchdog
-    /// thread checks the stop flag and resolves the report directory under one
-    /// lock, which this takes), so a caller may safely un-set
-    /// `HangReportStore.logDirectoryOverride` afterwards. A capture already in
-    /// flight is not waited for (a `sample(1)` of an ASan host can run for
-    /// tens of seconds) -- it keeps the directory it resolved when it started.
-    /// No-op when nothing is armed.
+    /// Once this returns no capture can start, so `HangReportStore.logDirectoryOverride` may be
+    /// un-set afterwards. A capture already in flight is not waited for.
     internal static func _disarmForTesting() {
         installLock.lock()
         let stop = stopCurrent
@@ -97,37 +51,17 @@ enum MainThreadWatchdog {
     }
     #endif
 
-    /// Pure-function clamp helper — extracted from `install(...)` so the
-    /// M-22 clamp invariant is testable independently of the install
-    /// idempotency latch. Tests assert `_clamp` directly: a clamp-revert
-    /// regression flips this function's output even when the watchdog has
-    /// already been installed by a prior test in the same xctest process.
-    ///
-    /// NaN never reaches `max` — `isFinite` short-circuits to the floor;
-    /// this matters because Swift's `max(_:_:)` with NaN is argument-order-
-    /// dependent and unsafe to rely on (`max(0.05, .nan)` returns 0.05 but
-    /// `max(.nan, 0.05)` returns NaN).
+    /// `isFinite` is checked first: `max(_:_:)` with NaN is argument-order dependent
+    /// (`max(.nan, 0.05)` returns NaN).
     internal static func _clamp(hangThreshold: Double, pingInterval: Double) -> (hangThreshold: Double, pingInterval: Double) {
         let safeThreshold = hangThreshold.isFinite ? max(minHangThreshold, hangThreshold) : minHangThreshold
         let safePing = pingInterval.isFinite ? max(minPingInterval, pingInterval) : minPingInterval
         return (safeThreshold, safePing)
     }
 
-    /// Arm the watchdog on the main queue. Call from AppDelegate.
-    ///
-    /// Both parameters are clamped to safety floors (`minHangThreshold`,
-    /// `minPingInterval`). Passing 0 or negative values does NOT arm a
-    /// tight-spinning thread — it arms a watchdog at the floor. Audit M-22.
     static func install(hangThreshold: Double = 0.5, pingInterval: Double = 0.1) {
-        // Clamp before grabbing the lock so the values we record under the
-        // lock are the safe ones.
         let (safeThreshold, safePing) = _clamp(hangThreshold: hangThreshold, pingInterval: pingInterval)
 
-        // Per audit M-22 / SFH-005 / M-4 / M-5: when the clamp changes a
-        // caller's input, log a warning so the substitution isn't silent.
-        // `safeThreshold != hangThreshold` is true for NaN (NaN != anything),
-        // so the NaN path also logs; the explicit `!isFinite` guard is for
-        // clarity.
         if safeThreshold != hangThreshold || !hangThreshold.isFinite {
             logger.warning("hangThreshold \(hangThreshold, privacy: .public)s clamped to floor \(safeThreshold, privacy: .public)s — caller passed unsafe value (audit M-22)")
         }
@@ -145,55 +79,38 @@ enum MainThreadWatchdog {
         lastMainHeartbeat.withLock { $0 = CACurrentMediaTime() }
         logger.log("MainThreadWatchdog armed: ping=\(safePing, privacy: .public)s threshold=\(safeThreshold, privacy: .public)s (requested ping=\(pingInterval, privacy: .public)s threshold=\(hangThreshold, privacy: .public)s)")
 
-        // Per-install, so a disarmed watchdog's leftovers can never be
-        // revived by (or interfere with) a later `install`.
         let stopRequested = OSAllocatedUnfairLock<Bool>(initialState: false)
         #if DEBUG
         stopCurrent = stopRequested
         #endif
 
-        // Main-thread heartbeat. Runs on the main runloop; each tick refreshes
-        // the timestamp the watchdog thread watches.
         let timer = Timer(timeInterval: safePing, repeats: true) { (fired: Timer) -> Void in
-            // A disarmed watchdog's timer retires itself on the thread it was
-            // scheduled on (`invalidate` must be sent from there).
+            // `invalidate` must be sent from the thread the timer was scheduled on.
             if stopRequested.withLock({ $0 }) {
                 fired.invalidate()
                 return
             }
             lastMainHeartbeat.withLock { $0 = CACurrentMediaTime() }
         }
-        // `.common` so the heartbeat keeps ticking under modal + tracking
-        // runloop modes (NSMenu popup, live resize). If we used `.default`,
-        // any modal interaction would look like a "hang" to the watchdog —
-        // not useful.
+        // `.common` so modal and tracking runloop modes (NSMenu popup, live resize) do not read as hangs.
         RunLoop.main.add(timer, forMode: .common)
 
-        // Watchdog thread. Sleeps in short slices, compares heartbeat age,
-        // captures a snapshot if stale.
         let t = Thread {
             while true {
                 Thread.sleep(forTimeInterval: safePing)
-                // After the sleep, before the age check: a disarmed watchdog's
-                // heartbeat stops, which must not read as a hang.
+                // Before the age check: a disarmed watchdog's heartbeat stops, which must not read as a hang.
                 if stopRequested.withLock({ $0 }) { return }
                 let now = CACurrentMediaTime()
                 let age = now - lastMainHeartbeat.withLock { $0 }
                 if age >= safeThreshold {
-                    // The stop check and the report-directory resolution are
-                    // ONE critical section on the stop flag: `_disarmForTesting`
-                    // raises it under the same lock, so once that returns no
-                    // capture can still resolve a directory (and so none can
-                    // read the test-only redirect after it has been un-set).
-                    // `logDirectory()` is a stat on the common path.
+                    // The stop check and the directory resolution are one critical section:
+                    // `_disarmForTesting` raises the flag under the same lock.
                     let directory: String? = stopRequested.withLock { (stopped: inout Bool) -> String? in
                         stopped ? nil : HangReportStore.logDirectory()
                     }
                     guard let directory else { return }
                     HangReportStore.captureHangReport(age: age, directory: directory)
-                    // Rate-limit: after capturing, wait for main to recover
-                    // before capturing again. Otherwise a multi-second hang
-                    // produces a capture every pingInterval.
+                    // Wait for main to recover before capturing again.
                     while !stopRequested.withLock({ $0 }),
                           CACurrentMediaTime() - lastMainHeartbeat.withLock({ $0 }) >= safeThreshold {
                         Thread.sleep(forTimeInterval: safePing)

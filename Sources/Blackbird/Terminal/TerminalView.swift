@@ -5,14 +5,8 @@ import CoreText
 import Combine
 import Metal
 import MetalKit
-// `os.Logger` is used by `securityLogger` (Release-visible, audit
-// channel) and by the DEBUG-only fpsLogger / keyLogger. (The hover
-// near-miss logger moved to `HoverCoordinator`.)
-// The audit-H1 fix moved security logging out of the DEBUG block, so
-// the import must follow.
 import os
 
-/// Fixed-cell metrics derived from a monospaced font.
 public struct CellMetrics {
     public let font: NSFont
     public let cellWidth: CGFloat
@@ -20,11 +14,8 @@ public struct CellMetrics {
     public let ascent: CGFloat
     public let descent: CGFloat
     public let leading: CGFloat
-    /// Underline centre, in points ABOVE the cell's bottom edge (the
-    /// baseline sits `descent` above it; CoreText's underline position is
-    /// negative below the baseline). Strike sits at half the x-height.
-    /// Font-derived since v0.8.1: the fixed 1.5 pt / 0.55·cellHeight
-    /// constants were a hairline at 32 pt and a strike above the x-height.
+    /// Underline centre in points ABOVE the cell's bottom edge (the baseline sits `descent` above
+    /// it; CoreText's underline position is negative below the baseline).
     public let underlineCenterFromBottom: CGFloat
     public let underlineThickness: CGFloat
     public let strikeCenterFromBottom: CGFloat
@@ -35,30 +26,19 @@ public struct CellMetrics {
         self.ascent = CTFontGetAscent(ct)
         self.descent = CTFontGetDescent(ct)
         self.leading = CTFontGetLeading(ct)
-        let ulPos = CTFontGetUnderlinePosition(ct)      // typically negative
+        let ulPos = CTFontGetUnderlinePosition(ct)
         let ulThick = CTFontGetUnderlineThickness(ct)
         let xHeight = CTFontGetXHeight(ct)
         let thick = (ulThick.isFinite && ulThick > 0) ? ulThick : max(1, font.pointSize / 14)
         self.underlineThickness = max(1, thick)
         let ulCenter = self.descent + (ulPos.isFinite ? ulPos : -1.0)
-        // Keep the whole band inside the cell: never below the bottom edge.
         self.underlineCenterFromBottom = max(self.underlineThickness / 2 + 0.5, ulCenter)
         let xh = (xHeight.isFinite && xHeight > 0) ? xHeight : font.pointSize * 0.5
         self.strikeCenterFromBottom = self.descent + xh / 2
-        // Floor both metrics at 1pt so downstream grid math and atlas
-        // texture sizing never hit a division-by-zero or a zero-sized
-        // Metal texture. The settings picker only lists monospace families
-        // (for which both dimensions are real positive numbers), but an
-        // exotic font or a manually-edited UserDefault can still sneak
-        // through and we don't want to crash the app in response.
-        //
-        // isFinite sanitisation catches NaN/Infinity from a malformed font
-        // — rare but not impossible on a user-installed font. max(1, NaN)
-        // would produce NaN (NaN propagates through max), which then traps
-        // Int(NaN) later in grid(forPixelSize:). Normalise first.
+        // Check isFinite before max: max(1, NaN) is NaN, which traps Int(NaN) in grid(forPixelSize:).
+        // The 1pt floor keeps grid math off division-by-zero and Metal off a zero-sized texture.
         let rawCellHeight = (ascent + descent + leading).rounded()
         self.cellHeight = rawCellHeight.isFinite ? max(1, rawCellHeight) : 1
-        // Measure the advance of 'M' — a reliable monospace cell width.
         var glyph = CGGlyph(0)
         var chars: [UniChar] = [UInt16(("M" as Character).asciiValue ?? 77)]
         CTFontGetGlyphsForCharacters(ct, &chars, &glyph, 1)
@@ -69,16 +49,8 @@ public struct CellMetrics {
     }
 
     public func grid(forPixelSize size: CGSize) -> (cols: Int, rows: Int) {
-        // Defensive: `size` is a CGSize from AppKit bounds in practice,
-        // so always finite and within reasonable screen pixel counts.
-        // Guard against two pathologies at the `Int(Double)` cast:
-        //   1. NaN / ±Infinity traps the cast outright (stray Core
-        //      Animation value, misbehaving input device).
-        //   2. Finite-but-absurd values (e.g. 1e20) traps because
-        //      Int can't hold them.
-        // Clamp to a sane pixel count first; clamps apply per-axis
-        // so a valid axis keeps its real measurement.
-        let w = size.width.sanitizedPixel   // see `CGFloat.sanitizedPixel`
+        // NaN, infinite or absurd sizes trap the `Int(Double)` cast; clamp per axis first.
+        let w = size.width.sanitizedPixel
         let h = size.height.sanitizedPixel
         let cols = max(1, Int(w / cellWidth))
         let rows = max(1, Int(h / cellHeight))
@@ -86,41 +58,23 @@ public struct CellMetrics {
     }
 }
 
-/// MTKView that renders a BBSnapshot via Metal (`MetalRenderer` +
-/// `GlyphAtlas` + per-cell instancing) and forwards keyboard input
-/// through `KeyEncoder` to a `TerminalSession`. ProMotion 120 Hz is
-/// achieved via `CAMetalLayer.maximumDrawableCount = 3` (the comment
-/// further down in `setupTerminalView` explains the coalescer
-/// interaction).
 public final class TerminalView: MTKView, MTKViewDelegate {
 
     public weak var session: TerminalSession? {
         didSet { subscribeToSession() }
     }
 
-    /// The title the tab shows when neither a rename nor an OSC 0/2 title is
-    /// active (the shell basename, set by `MainWindowController.startSession`).
-    /// Kept apart from `window.title` because that gets overwritten by every
-    /// rename / program title, so it can't be the thing a clear reverts to.
     var defaultTitle: String?
 
     public let renderer: MetalRenderer
     public private(set) var metrics: CellMetrics
     public private(set) var encoder: KeyEncoder = {
-        // Match the user's current Option-key preference on construction so
-        // the first keystroke respects it. syncEncoderFromPreferences
-        // refreshes this on subsequent changes.
         let isMeta = Preferences.shared.optionKey == .meta
         return KeyEncoder(optionIsMeta: isMeta)
     }()
 
     private var prefsCancellable: AnyCancellable?
 
-    /// Snapshot of the preferences fields this view actually observes —
-    /// `fontName`, `fontSize`, and `optionKey`. Used by the preferences
-    /// Combine sink to short-circuit when the emitted
-    /// `objectWillChange` was driven by an unrelated property (theme
-    /// swap, translucency slider, etc.). Audit terminal-view-1 F4.
     private struct PrefsObservedKey: Equatable {
         let fontName: String
         let fontSize: Double
@@ -128,292 +82,107 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
     private var lastObservedPrefsKey: PrefsObservedKey?
 
-    /// Per-view text-size override (issue #28). `nil` → follow the global
-    /// `Preferences.shared.fontSize` (the Settings-slider default). Non-nil →
-    /// this tab/window was sized via ⌘+/⌘−/pinch and keeps its own size
-    /// until ⌘0 clears it. Session-lifetime only — deliberately not
-    /// persisted (design review 2026-07-13). Always inside
-    /// `Preferences.fontSizeRange` by construction: the only writer,
-    /// `adjustFontSizeOverride(by:)`, clamps before assigning.
+    /// `nil` follows the global `Preferences.shared.fontSize`. Session-lifetime only, not persisted.
+    /// `adjustFontSizeOverride(by:)` is the only writer and clamps to `Preferences.fontSizeRange`.
     public private(set) var fontSizeOverride: Double?
 
-    /// The size this view renders at: the per-view override when set,
-    /// otherwise the global default.
     var effectiveFontSize: Double { fontSizeOverride ?? Preferences.shared.fontSize }
 
-    /// Latest `BBSnapshot` published by the session. Read by the renderer
-    /// path, the accessibility cache, and the IME extension (which needs
-    /// the cursor coordinates for the candidate-window anchor). Internal
-    /// so the `TerminalView+IME.swift` extension can see it; no setter is
-    /// exposed — `render(snapshot:)` is the only writer.
-    ///
-    /// The `didSet` invalidates `a11yCache` on every swap. The cache is
-    /// keyed on `BBSnapshot.a11yIdentity`, which is a raw pointer into the
-    /// FFI's heap — after the old snapshot is released, the allocator is
-    /// free to hand the same slab back to the next snapshot (ABA). Without
-    /// this reset, `accessibilityValue()` could hit the old cache and
-    /// return stale text that the grid no longer contains (VoiceOver would
-    /// read content the user is no longer seeing).
+    /// `render(snapshot:)` is the only writer. `a11yCache` is keyed on a raw pointer into the FFI
+    /// heap that the allocator can hand to the next snapshot (ABA), so every swap invalidates it.
     var currentSnapshot: BBSnapshot? {
         didSet {
-            // Reset both the value-cache identity AND the line-offsets
-            // table. They're correlated: lineOffsets is computed from the
-            // cached value, so any path that recomputes value MUST also
-            // discard the offsets. Without the lineOffsets reset, an
-            // a11y line accessor running between this didSet and the
-            // next `accessibilityValue()` call would build offsets
-            // against the OLD value and cache them under whatever
-            // identity gets stamped next.
             a11yCache.invalidate()
             scheduleAccessibilityValueChanged()
-            // Find-match coordinates are relative to the buffer at the time
-            // performSearch ran. Any snapshot swap may have scrolled history,
-            // wrapped lines, or overwritten matched rows; the controller reruns
-            // the search against the fresh grid (debounced) so ⌘G cycles live
-            // hits instead of ghost rows. Audit findbar-selection F11.
             findController.snapshotDidChange()
         }
     }
 
-    /// Optional test-only override that feeds the NSAccessibility value
-    /// path without a real `BBTerm`. Production never sets this — the live
-    /// render path uses `currentSnapshot`. Visibility relaxed from
-    /// `private` to `internal` so `installSnapshotForTests` (in
-    /// `TerminalView+Accessibility.swift`) can write it; no production
-    /// caller touches this field — the `#if DEBUG` guard keeps it out of
-    /// release builds entirely.
     #if DEBUG
     var a11ySnapshotOverride: A11ySnapshotSource?
-    /// Test-only override for the ⌘-click URL resolver. When set, the click
-    /// path goes through this fake instead of building a
-    /// `SnapshotHyperlinkResolver` from `currentSnapshot`. Production leaves
-    /// it nil.
-    // `internal` so `TerminalView+Hover.swift` / `TerminalView+...
-    // .swift` can read (and tests via installHyperlinkSnapshotForTests
-    // can write) across file boundaries. Production never mutates this
-    // — the DEBUG guard keeps the member out of release builds.
     var hyperlinkResolverOverride: HyperlinkResolver?
     #endif
 
-    /// Hook for opening a URL on ⌘-click. Production hands the URL to
-    /// `NSWorkspace`; tests inject a recording fake so assertions can
-    /// match what the click path actually dispatched.
     var urlOpener: URLOpener = DefaultURLOpener()
 
-    // MARK: - Hover (OSC 8 dwell tooltip + ⌘-held URL highlight)
+    // MARK: - Hover
 
-    /// Owns all hover state + the OSC 8 / ⌘-regex highlighting engine (was the
-    /// `lastHoverCell` / `hoveredLinkID` / `cmdModifierHeld` / `cmdHoverURLMatch`
-    /// / `cachedURLMatches*` / `hoverTooltipItem` fields here + the logic in
-    /// `TerminalView+Hover.swift`). The NSResponder overrides in `+Hover`
-    /// forward to it; `+Services` (Look Up) and the draw path read
-    /// `hoverCoordinator.hoveredLinkID` across the file boundary. `lazy` because
-    /// it needs `self`; its back-reference to the view is `unowned` (no cycle).
     lazy var hoverCoordinator = HoverCoordinator(view: self)
-    /// Modifiers of the `keyDown` currently being routed through the input
-    /// context (see `routeKeyDownThroughIME`); nil outside that window.
     var pendingInsertTextModifiers: KeyEncoder.Modifiers?
-    /// `isARepeat` of that same `keyDown`; the `insertText` path can't see it.
     var pendingInsertTextIsRepeat = false
-    /// `keyCode` of that same `keyDown` when it is a numeric-keypad digit /
-    /// operator the input context may commit as layout text; nil for every
-    /// other key. Lets `insertText` file the committed text under the key.
     var pendingInsertTextKeypadKeyCode: UInt16?
-    /// Text the input context committed for a held keypad key's `keyDown`
-    /// (`keyCode` -> text). The layout decides that text (`,` on a comma-decimal
-    /// layout, a non-Latin digit on some input sources), so `keyUp` re-encodes
-    /// THIS text for the release; the encoder's fixed US table would report a
-    /// release for a key the program never saw go down. Cleared at the next
-    /// `keyDown` and consumed by `keyUp`.
+    /// `keyCode` -> text the input context committed for a held keypad key. `keyUp` re-encodes THIS
+    /// text for the release: the layout decides it, not the encoder's fixed US table.
     var keypadCommittedText = [UInt16: String]()
-    /// What a forwarded `keyDown` told the TUI: the modifiers it carried and
-    /// the base characters (`charactersIgnoringModifiers`) it was encoded from.
     private struct ForwardedKeyDown {
         let modifiers: KeyEncoder.Modifiers
         let chars: String
     }
-    /// `keyCode` → the first (non-repeat) `keyDown` of each key the TUI was
-    /// given a chance to see (past the ⌘ / no-session early returns and the
-    /// IME). `keyUp` forwards a release only for these, encoded from the PRESS's
-    /// modifiers and characters, never the key-up event's own: a ⌘ shortcut's
-    /// key-up arrives with `.command` already lifted when the user releases ⌘
-    /// first and would otherwise look like a plain key release the TUI never saw
-    /// go down, and a key-up whose Option/Shift changed since the press would
-    /// otherwise be reported with the wrong modifier field or, for a shifted US
-    /// symbol, a different key code. Auto-repeats never overwrite an entry.
-    /// Dropped when focus leaves (`forgetForwardedKeyDowns`).
+    /// `keyCode` → the first (non-repeat) `keyDown` the TUI was given. `keyUp` forwards a release only
+    /// for these, encoded from the PRESS's modifiers and characters, never the key-up event's own.
     private var forwardedKeyDowns: [UInt16: ForwardedKeyDown] = [:]
-    /// Wheel-delta → line accumulator for the mouse-report and DEC 1007
-    /// alternate-scroll paths (see `scrollWheel`). Reset on `mouseExited`.
     var wheelAccumulator = WheelScrollAccumulator()
 
-    /// Trackpad pinch gesture accumulator. Magnification events deliver
-    /// fractional deltas; we wait until the running sum crosses ±0.15
-    /// before stepping THIS view's `fontSizeOverride` (issue #28 — pinch,
-    /// like ⌘+/⌘−, is scoped to the pinched tab/window and never writes
-    /// the global `Preferences.shared.fontSize`). Without the accumulator
-    /// a single flick would fire dozens of font-size changes and fly past
-    /// the intended zoom level.
     private var pinchAccumulator: CGFloat = 0
-    /// Owns the lightweight URL-preview panel shown after the 500 ms dwell. The
-    /// panel + label live here (private); the hover coordinator scrubs the href
-    /// and hands the controller a safe string.
     let tooltipController = TooltipController()
-    /// Scheduled tooltip reveal. Owned here (not on `hoverCoordinator`) because
-    /// the view's lifecycle teardown — `viewWillMove(toWindow:)` and `deinit` —
-    /// cancels it directly; reaching through the coordinator's `unowned view`
-    /// back-ref during the view's OWN deinit traps. The coordinator
-    /// schedules/cancels it via `view.hoverTooltipItem` during normal
-    /// (view-alive) operation.
+    /// Owned here, not on `hoverCoordinator`: `deinit` cancels it, and reaching through the
+    /// coordinator's `unowned view` back-ref during the view's own deinit traps.
     var hoverTooltipItem: DispatchWorkItem?
-    /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
-    /// bounds changes via `updateTrackingAreas` (which stays on the view).
-    var hoverTrackingArea: NSTrackingArea?        // internal for TerminalView+Hover.swift
+    var hoverTrackingArea: NSTrackingArea?
 
-    /// Paired coordinate used by DEC 1003 any-event mouse tracking to
-    /// dedupe repeated motion reports on the same cell.
-    /// `lastReportedMotionCell` lives here because extensions cannot
-    /// declare stored properties; both the mouse-reporting section
-    /// (which reads the termMode bits) and the hover extension (which
-    /// fires the report from `mouseMoved`) share it.
     struct BBXYPoint: Equatable { let col: Int; let row: Int }
+    /// Dedupes DEC 1003 any-event motion reports on the same cell.
     var lastReportedMotionCell: BBXYPoint?
-    /// Sibling of `lastReportedMotionCell` for button-32 drag reports. Kept
-    /// separate because a TUI consumes drag-motion and hover-motion as
-    /// different events — sharing one cell let the last cell of a drag suppress
-    /// the first hover report for that same cell.
+    /// Not shared with `lastReportedMotionCell`: a drag's last cell would suppress a hover report there.
     var lastReportedDragCell: BBXYPoint?
 
-    /// ⌘ + right-drag resizes the window from the nearest corner. The gesture
-    /// state + frame math live in their own `WindowResizeController` (the
-    /// corner context is `private` there, not an `internal` view field); the
-    /// mouse extension drives it.
     let windowResizeController = WindowResizeController()
 
-    /// Window frame when the modifier-right-drag resize gesture began, so
-    /// `rightMouseUp` can tell a real resize from a bare ⌘-right-click (which
-    /// also opens a context) and only settle for the former.
     var windowResizeControllerStartFrame: NSRect?
 
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
-    /// Active IME composition buffer. Non-nil while the user is in a
-    /// `setMarkedText` → `insertText`/`unmarkText` cycle. The NSTextInputClient
-    /// conformance lives in `TerminalView+IME.swift`; this property is the
-    /// one piece of shared state keyDown and the IME path both inspect.
     var composition: TerminalView.Composition?
-    /// Flag raised by `insertText(_:)` for the duration of a single
-    /// `keyDown(with:)` pass. Lets keyDown tell "the IME already committed
-    /// bytes for this event" apart from "no IME activity at all" after
-    /// `inputContext?.handleEvent` returns — in the former case we must
-    /// NOT fall through to the encoder path or the shell would see the
-    /// character twice. Cleared at the top of keyDown.
+    /// Raised by `insertText(_:)` during one `keyDown(with:)` pass so keyDown does not also encode
+    /// the event (the shell would see the character twice). Cleared at the top of keyDown.
     var didInsertTextViaIME: Bool = false
-    /// CALayer-backed subview that paints the in-flight preedit glyphs plus
-    /// a dotted underline. Created lazily when composition starts; removed
-    /// when the user commits or cancels so idle sessions keep a clean tree.
     var preeditOverlay: PreeditOverlayView?
 
     #if DEBUG
-    /// Optional PTY-byte recorder for tests. When set, `sendToSession(_:)`
-    /// appends here instead of calling through to the real PTY — lets the
-    /// IME tests assert exactly which commits reach the shell.
     var ptyRecorderForTests: RecordingPTY?
-    /// Overrides the cursor coordinates that the IME path reads from the
-    /// snapshot. Lets `testFirstRectReturnsCursorCellRect` pin a specific
-    /// (row, col) without feeding the full BBTerm state machine.
     var cursorOverrideForTests: (row: Int, col: Int)?
-    /// Optional capture closure for `pasteText(_:)`. Fires with the pre-
-    /// encoding string the paste pipeline received, before CRLF /
-    /// control / bracketed-paste sanitisation. Used by `DragDropTests`
-    /// to assert that the drop integration produces the right shell-
-    /// quoted command-line — the sanitisers have their own coverage.
-    /// (The replace-path test seams moved to `FindController`.)
     var pasteTextRecorderForTests: ((String) -> Void)?
     #endif
 
-    /// Owns the terminal bell — the visual flash overlay (driven by
-    /// `session.$bellCounter`) and the audible no-op beep. Self-contained;
-    /// `attach(to:)` installs its overlay from `init`.
     let bellController = BellController()
 
-    // Public read; writer is `internal` so the hover extension's
-    // `expandSelectionUnderAnchor()` and the mouse-selection path on
-    // the main class can update the selection. Tests with
-    // `@testable import Blackbird` can also write it directly —
-    // `didSet` below wakes the render loop regardless of the writer, so
-    // no gesture path is bypassed for redraw purposes. No production
-    // caller outside the view writes this.
-    //
-    // `wakeRenderLoop()`, not `setNeedsDisplay`: the view runs with
-    // `enableSetNeedsDisplay = false`, so the old `setNeedsDisplay(bounds)`
-    // was inert, and a ⌘A / ⌘G-on-screen after ≥1 s idle painted its
-    // highlight up to 100 ms late at the 10 fps idle rate. The selection is
-    // in the FrameKey, so the next tick re-encodes on its own.
+    // `wakeRenderLoop()`, not `setNeedsDisplay`: the view runs with `enableSetNeedsDisplay = false`.
     public internal(set) var selection: Selection? {
         didSet {
             if oldValue != selection { wakeRenderLoop() }
         }
     }
 
-    /// Owns the mouse-driven selection gesture machine — the drag state
-    /// (`isDragging`, the `.word`-drag anchor) + the click/drag/word-line-extend
-    /// logic that was in `TerminalView+Mouse.swift`. The view's mouse overrides
-    /// forward their select branch here (`beginSelection`/`endDrag`/`handleDrag`)
-    /// AFTER the URL-open / window-drag / mouse-reporting early returns; the
-    /// snapshot-reconcile path reads/writes `selectionController.wordDragAnchorWord`.
-    /// The `selection` property stays on the view (public API, drawn, a render
-    /// parameter). `lazy` because it needs `self`; back-ref is `unowned`.
     lazy var selectionController = SelectionController(view: self)
 
-    /// Last mousedown this view actually received, used by
-    /// `TerminalView.effectiveClickCount` to renumber `NSEvent.clickCount`
-    /// into the run of clicks THIS VIEW saw. See the doc comment on
-    /// `ClickSequenceMark` in `TerminalView+Mouse.swift` for why the raw
-    /// system count can't be trusted.
     var lastMouseDownMark: ClickSequenceMark?
 
-    /// A ⌘-mousedown that landed on a resolvable URL. The URL is opened on
-    /// mouse**Up**, not mousedown, and only when the pointer never left the
-    /// down cell's neighbourhood — so ⌘-drag-to-move-window still works when
-    /// the drag happens to start on a link (Claude Code's transcript is dense
-    /// with hyperlinks, so "⌘-drag from anywhere" would otherwise become
-    /// "⌘-drag from anywhere except a link, which opens a browser tab").
-    ///
-    /// While this is non-nil the gesture is CONSUMED: no xterm mouse report is
-    /// emitted for the press, the drag, or the release, and no selection
-    /// starts. ⌘ has no representation in the xterm mouse protocol (the
-    /// modifier bits are shift=4, meta=8, ctrl=16 — there is no super bit) and
-    /// `MouseReportEncoder` has nothing to encode for it, so a TUI could
-    /// never have distinguished this from a plain click: swallowing it costs
-    /// the TUI nothing it could have acted on.
+    /// A ⌘-mousedown on a resolvable URL. The URL opens on mouseUp, and only if the pointer stayed
+    /// within the slop, so ⌘-drag-to-move-window still works from a link.
+    /// While non-nil the gesture is CONSUMED: no xterm mouse report and no selection. ⌘ has no bit
+    /// in the xterm mouse protocol (shift=4, meta=8, ctrl=16), so a TUI could not have seen it.
     struct PendingLinkClick {
         let url: URL
-        /// The mousedown itself. Kept so a gesture that turns out NOT to be a
-        /// click can still be handed to whichever path would have owned it —
-        /// `performDrag` needs an event, and the selection path needs the
-        /// ORIGINAL down location as its anchor.
         let downEvent: NSEvent
-        /// This mousedown's renumbered click count (see `effectiveClickCount`),
-        /// so a deferred selection is still classified as char/word/line.
         let clickCount: Int
-        /// Set once the pointer travels past the slop: the gesture is no longer
-        /// a click, but it is still CONSUMED — the press was never reported, so
-        /// neither the drags nor the release may be. Kept as state on the
-        /// pending click rather than clearing it, because clearing it handed the
-        /// rest of the gesture back to the mouse-report path, which then emitted
-        /// drag reports (and no release) for a press the TUI never saw.
+        /// Past the slop the gesture is no longer a click but stays CONSUMED: the press was never
+        /// reported, so neither the drags nor the release may be.
         var cancelled = false
 
-        /// How far (points, window space) the pointer may travel between the
-        /// ⌘-mousedown and its mouseUp and still count as a click. 3 pt matches
-        /// the slop AppKit itself allows before promoting a click to a drag.
+        /// Points, window space. 3 pt matches the slop AppKit allows before a click becomes a drag.
         static let dragSlopPoints: CGFloat = 3
 
-        /// Whether a pointer now at `location` still counts as a click on this
-        /// link. The one definition of the threshold test — `mouseDragged` and
-        /// `mouseUp` must agree exactly, and they sit ~300 lines apart.
         func isStillAClick(at location: NSPoint) -> Bool {
             let dx = location.x - downEvent.locationInWindow.x
             let dy = location.y - downEvent.locationInWindow.y
@@ -422,45 +191,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
     var pendingLinkClick: PendingLinkClick?
 
-    /// Whether `mouseDown` actually emitted a press report to the TUI.
-    /// `mouseUp` mirrors what mousedown DID rather than re-evaluating the
-    /// predicate: the TUI can flip mouse mode between the two events, and the
-    /// ⌘-URL-open / window-drag branches consume the press locally. Without
-    /// this the TUI sees a release (`CSI < 0 ; c ; r m`) with no matching
-    /// press — the same asymmetry the ⌥-bypass family fixed for right-click.
+    /// `mouseUp` mirrors what `mouseDown` did rather than re-evaluating the predicate: the TUI can
+    /// flip mouse mode between the two events, and a release must never arrive without its press.
     var didReportMouseDown = false
 
-    /// Right-button twin of `didReportMouseDown`: `rightMouseDragged` reports
-    /// motion only for a gesture whose press actually reached the TUI.
     var didReportRightMouseDown = false
 
-    /// Middle-button twin of `didReportMouseDown`, for the same two jobs:
-    /// `otherMouseDragged` reports motion only for a press that reached the
-    /// TUI, and `otherMouseUp` mirrors the press instead of re-deriving it.
     var didReportMiddleMouseDown = false
 
-    /// Drives edge-autoscroll while the user drags a selection past the
-    /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
-    /// pointer motion, so a user holding the pointer stationary past the edge
-    /// would otherwise see the autoscroll stall (the selection can't grow into
-    /// off-screen scrollback rows). Owns the timer + direction so they're
-    /// mutated in one place rather than as two more `internal` view fields;
-    /// the +Mouse path drives it via `update(direction:tick:)`. Audit
-    /// terminal-view-2 F2.
+    /// AppKit delivers `mouseDragged` only on pointer motion, so a timer drives edge-autoscroll.
     let selectionAutoscroller = SelectionAutoscroller()
 
-    /// Owns all find-bar state (was the `find*` fields here) + the
-    /// search/cycle/regex engine (was `TerminalView+Find.swift`). The view
-    /// forwards ⌘F / ⌘G / the ⌘⌥C/⌘⌥R option toggles and its `FindBarDelegate`
-    /// conformance here; `TerminalView+Accessibility` / `+ContextMenu` and the
-    /// Replace helpers below read `findController.findBar` / `.findMatches`
-    /// across the file boundary. `lazy` because it needs `self`; the
-    /// controller's back-reference to the view is `unowned`, so no retain cycle.
     lazy var findController = FindController(view: self)
 
-    /// True while an active drag with file URLs is hovering the view. Drives
-    /// the accent-coloured drop-target ring. Set by the NSDraggingDestination
-    /// callbacks in TerminalView+Dragging.swift.
     var isDropTargeted: Bool = false {
         didSet {
             guard oldValue != isDropTargeted else { return }
@@ -468,17 +211,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Accent-coloured border overlay shown while a file drag is hovering.
-    /// Implemented as an NSBox rather than a Metal draw because the view is
-    /// an MTKView — compositing an AppKit child over the Metal layer is
-    /// simpler, hit-transparent, and cheap to show/hide on a dragging
-    /// enter/exit event. Sized in `layout()`; initially hidden.
     private let dropHighlightView: NSBox = {
         let b = NSBox(frame: .zero)
         b.boxType = .custom
-        // `.custom` boxes draw their border from borderWidth/borderColor;
-        // `borderType` only applied to the deprecated NSBoxOldStyle and
-        // is itself deprecated (Xcode 27 warns).
         b.borderColor = .controlAccentColor
         b.borderWidth = 2
         b.cornerRadius = 4
@@ -495,55 +230,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var frameIntervalMinMs: Double = .infinity
     private var frameIntervalMaxMs: Double = 0
     private var frameIntervalSumMs: Double = 0
-    // `os.Logger` (not `NSLog`) so `privacy: .public` markers on string
-    // interpolations actually take effect — NSLog builds its format string
-    // at runtime, which defeats the compile-time qualifier and redacts the
-    // entire message as `<private>` in the unified log.
+    // `os.Logger`, not `NSLog`: NSLog's runtime format string redacts the whole message as `<private>`.
     private static let fpsLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                           category: "fps")
-    /// Companion to `fpsLogger` for the keyDown debug breadcrumbs. Same
-    /// readability rationale: NSLog redacted these to `<private>` so a
-    /// `log stream` filter on the keyboard category produced unreadable
-    /// lines. Routing through `os.Logger` with explicit `privacy: .public`
-    /// keeps the keystroke trail visible in Console.
     private static let keyLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                           category: "keyboard")
     #endif
 
-    /// Production-visible channel for security-relevant decisions —
-    /// blocked OSC 8 phishing-shape clicks, paste-scrub drops, and
-    /// similar. Stays outside `#if DEBUG` so a release user reporting
-    /// "the link won't open" can `log stream --predicate 'category ==
-    /// "security"'` and find a breadcrumb. Privacy: log the decision
-    /// shape with `.public`, never log keystrokes / paste contents.
+    /// Stays outside `#if DEBUG`. Never log keystrokes or paste contents.
     static let securityLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "security")
 
-    /// Production-visible channel for the mouse-event path's defensive
-    /// guards. Right now used only by the M-17 nil-snap warning — a
-    /// click that lands before the first BBSnapshot publish maps to a
-    /// synthetic 80×24 zero-history grid; without the log, the broken
-    /// selection that follows has no breadcrumb. One-shot lock keeps
-    /// repeated pre-publish clicks from spamming the unified log.
-    /// Internal because both `TerminalView+Mouse.swift` callsites of
-    /// `bufferPoint` share the same one-shot.
     nonisolated static let mouseLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                     category: "mouse")
 
-    /// Production-visible channel for renderer-state mismatches that
-    /// the user can surface in support reports. Today this only flags a
-    /// failed atlas reconfigure on the font-change path — without it, a
-    /// user reporting "I changed font size and nothing happened" has no
-    /// breadcrumb the support engineer can correlate against.
     static let rendererLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "renderer")
     static let didLogEarlyClick = OSAllocatedUnfairLock(initialState: false)
 
-    /// One-shot warning for the M-17 pre-first-publish click race. Both
-    /// `bufferPointFromEvent` and `bufferPointFromLocalPoint` early-
-    /// return into this when `currentSnapshot == nil`; the shared lock
-    /// ensures the log fires at most once per process lifetime even
-    /// across the two callsites.
     static func logEarlyClickOnce() {
         didLogEarlyClick.withLock { didLog in
             if !didLog {
@@ -554,28 +258,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public init(frame frameRect: NSRect, device: MTLDevice) {
-        // TerminalView is the authoritative owner of CellMetrics; the renderer
-        // shares this same instance so layout and rendering never diverge.
         let prefs = Preferences.shared
         let font = Self.resolveFont(name: prefs.fontName, size: CGFloat(prefs.fontSize))
         let metrics = CellMetrics(font: font)
-        // The atlas rasterizes glyphs at pixel resolution for sharp text on
-        // Retina displays. Use the primary screen's scale at construction;
-        // if the window later moves to a display with a different scale the
-        // atlas will still render correctly (linear filtering covers mild
-        // upsampling), just without re-rasterizing at the new resolution.
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         guard let renderer = MetalRenderer(device: device, metrics: metrics, scale: scale) else {
-            // MetalRenderer.init? returns nil for any of: command queue
-            // creation, default library load, vertex/fragment function
-            // lookup, render pipeline state creation, atlas allocation,
-            // or instance buffer allocation. The actual error from the
-            // failing path is logged via `MetalRenderer.logger` (audit
-            // L-6) — `log stream --predicate 'category == "renderer"'`
-            // shows the underlying NSError (shader compile error,
-            // descriptor mismatch, GPU memory pressure, etc.). The
-            // pre-fix message claimed "command queue" specifically,
-            // which misled triage when the actual failure was a PSO.
             fatalError("MetalRenderer init failed; see unified log under category=\"renderer\" for the underlying error")
         }
         self.renderer = renderer
@@ -583,84 +270,32 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         super.init(frame: frameRect, device: device)
         self.delegate = self
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        // Must match the render pipeline's colorAttachments[0].pixelFormat
-        // set up by MetalRenderer (Task 2+).
+        // Must match the render pipeline's colorAttachments[0].pixelFormat set up by MetalRenderer.
         self.colorPixelFormat = .bgra8Unorm
         self.framebufferOnly = true
         self.isPaused = false
         self.enableSetNeedsDisplay = false
-        // MTKView's internal CVDisplayLink drives `draw(in:)` at the screen's
-        // vblank rate. On a 60 Hz display that's 60 fps; on a ProMotion
-        // panel macOS's display coalescer promotes us to 120 fps once
-        // the drawable pool size is set to 3 (see below) — verified
-        // 8.40 ms steady-state on a built-in Liquid Retina XDR. A
-        // 2-deep pool flagged the workload as not-keeping-up and capped
-        // at 60 fps even with this hint set. Keep the DEBUG fps
-        // diagnostic below as a standing sensor for future regressions.
         self.preferredFramesPerSecond = 120
-        // Drawable-pool sizing. Apple's default is 3. An earlier iteration
-        // set this to 2 on the theory that fewer drawables = lower latency,
-        // but in practice macOS's display-coalescer appears to read the
-        // 2-deep pool as "this app isn't keeping up" and never promotes
-        // the compositor to 120 Hz on ProMotion panels — the fps
-        // diagnostic (logged every second in DEBUG) stuck at 60 regardless
-        // of which display-link API we used to request 120. Ghostty uses
-        // 3 and gets 120; trying that here. The third drawable is one
-        // frame of headroom for the ring in `MetalRenderer`; with
-        // `presentsWithTransaction = false` it does NOT add input-to-
-        // pixel latency (CAMetalLayer only queues the most recent pending
-        // present when the display-link fires). Keep `displaySyncEnabled`
-        // on so we never tear; a future path can flip it off for the
-        // duration of a cat / log-tail burst if it proves worth it.
+        // 3 drawables: with a 2-deep pool macOS's display coalescer never promotes the compositor
+        // to 120 Hz on ProMotion panels.
         if let metalLayer = self.layer as? CAMetalLayer {
             metalLayer.maximumDrawableCount = 3
             metalLayer.displaySyncEnabled = true
-            // Pin the colorspace to sRGB so Display P3 panels don't
-            // reinterpret our 8-bit RGB values in P3-native primaries
-            // (reds +~30% saturated, greens shifted). Audit metal-renderer
-            // F10. The pixel format is `.bgra8Unorm` (not `_srgb`), so the
-            // shader operates in gamma-encoded space by design — matching
-            // Terminal.app / Alacritty's effective behavior. If a future
-            // commit flips to `_srgb` with linear shader math, this
-            // colorspace must track (sRGB decode is the matching choice).
+            // Pin sRGB so Display P3 panels do not reinterpret the 8-bit values in P3 primaries. The
+            // format is `.bgra8Unorm` (not `_srgb`): the shader works in gamma-encoded space.
             metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         }
 
-        // Minimal right-edge scroll indicator (pass-through hit testing —
-        // never swallows mouse events). Positioned in layout() so it tracks
-        // the bottom inset shared with the grid.
         addSubview(scrollIndicator)
 
         bellController.attach(to: self)
 
-        // Drop-target ring sits on top of the bell flash so a dropped file
-        // feedback never gets visually swamped by a simultaneous ^G bell.
-        // Autoresizes with the view so layout() only adjusts explicit frames.
         dropHighlightView.frame = bounds
         dropHighlightView.autoresizingMask = [.width, .height]
         addSubview(dropHighlightView)
 
-        // Audit terminal-view-1 F3+F4. Preferences.objectWillChange fires
-        // on EVERY `@Published` mutation across the preferences object —
-        // theme swap, translucency slider, bell mode, etc. — not just the
-        // font/encoder-relevant ones. Two-layer mitigation:
-        //   F3: subscribe with `.receive(on: DispatchQueue.main)` so the
-        //       downstream work is hopped to main exactly once; the old
-        //       inner `DispatchQueue.main.async` added a redundant runloop
-        //       tick when the publisher was already emitting on main.
-        //   F4: dedupe via a cached `(fontName, fontSize, optionKey)`
-        //       tuple; skip the NSFontManager / CellMetrics / renderer
-        //       work when none of the three observed keys actually moved.
-        //       Cuts NSFont lookups from "one per unrelated pref" to
-        //       "one per real font/option change".
-        //
-        // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE. Any write
-        // to UserDefaults (directly or via a framework like Sparkle) fires
-        // NSUserDefaultsDidChangeNotification, which SwiftUI's global
-        // UserDefaultObserver bridges back into Preferences.objectWillChange,
-        // re-firing THIS sink indefinitely. See commit 982b719 for the
-        // manifest of that hazard in AppDelegate. This closure is safe: it
-        // only reads prefs and pushes into CellMetrics / renderer / encoder.
+        // Do NOT write UserDefaults in this sink: the write re-fires `Preferences.objectWillChange`
+        // through SwiftUI's global UserDefaults observer and loops indefinitely.
         prefsCancellable = Preferences.shared.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -674,34 +309,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 if key == self.lastObservedPrefsKey {
                     return
                 }
-                // Stamp AFTER a successful apply, never before. The prior
-                // ordering stamped first, so a failed atlas rebuild inside
-                // the apply left this view at its old metrics while the key
-                // claimed the new state was seen — every later same-value
-                // emission then dedup'd and the view was stranded until the
-                // pref moved to a DIFFERENT value (issue #28 investigation).
-                // With the stamp gated on success, a transient reconfigure
-                // failure retries on the next emission instead.
+                // Stamp only after a successful apply so a failed atlas rebuild retries.
                 if self.applyEffectiveFont() {
                     self.lastObservedPrefsKey = key
                 }
                 self.syncEncoderFromPreferences()
             }
 
-        // Push the system accent into the renderer immediately so the
-        // hyperlink hover underline matches whatever accent the user
-        // picked in System Settings — not the hardcoded macOS Blue that
-        // the renderer defaults to. The drop-target ring (`dropHighlightView`
-        // above) already follows `NSColor.controlAccentColor`; without
-        // this we'd paint two different "accents" in the same window.
         pushSystemAccentToRenderer()
-        // Observe accent changes so Settings → Appearance → Accent swap
-        // reflects live. The accent observer is process-global (not bound
-        // to any specific window), so it lives in `accentObservers` — a
-        // dedicated array that survives `viewDidMoveToWindow` (which tears
-        // down and rebuilds `focusObservers` to re-bind to the new window).
-        // Otherwise, the first re-parenting — e.g. dragging a tab out to a
-        // new window — would silently drop accent tracking everywhere.
+        // Process-global: `accentObservers` survives `viewDidMoveToWindow` rebuilding `focusObservers`.
         accentObservers.append(NotificationCenter.default.addObserver(
             forName: NSColor.systemColorsDidChangeNotification,
             object: nil,
@@ -713,11 +329,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         })
     }
 
-    /// Read `NSColor.controlAccentColor`, convert to sRGB, and hand the
-    /// components to the renderer as the accent uniform. Falls back to
-    /// the macOS Blue sRGB values if the accent colour can't be
-    /// represented in sRGB for some reason — matches what the renderer
-    /// defaults to anyway.
     private func pushSystemAccentToRenderer() {
         let sRGB = NSColor.controlAccentColor.usingColorSpace(.sRGB)
         let r = Float(sRGB?.redComponent ?? 0.0)
@@ -727,10 +338,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setAccentColor(rgba: SIMD4<Float>(r, g, b, a))
     }
 
-    /// Rebuild the KeyEncoder if the user flipped Option between Meta and
-    /// Native. Cheap (one ref + Bool) so we call it on every preference
-    /// emission; the actual rebuild only happens when optionIsMeta differs
-    /// from the current encoder's setting.
     private func syncEncoderFromPreferences() {
         let wantMeta = Preferences.shared.optionKey == .meta
         if encoder.optionIsMeta != wantMeta {
@@ -738,16 +345,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Re-apply the effective font (global fontName at `effectiveFontSize`)
-    /// to metrics + atlas. Single funnel for BOTH the Preferences sink
-    /// (global fontName/fontSize changes) and the per-view size actions
-    /// (⌘+/⌘−/⌘0 override changes, issue #28). Compares against the
-    /// currently-applied font to avoid redundant atlas rebuilds.
-    ///
-    /// Returns `true` when the view's metrics now match the target —
-    /// including the already-in-sync no-op — and `false` only when the
-    /// renderer failed to rebuild its atlas, in which case the caller must
-    /// NOT advance dedupe state so the next emission retries.
+    /// Returns `false` only when the renderer failed to rebuild its atlas; the caller must then
+    /// NOT advance dedupe state, so the next emission retries.
     @discardableResult
     func applyEffectiveFont() -> Bool {
         let wantName = Preferences.shared.fontName
@@ -757,28 +356,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         let newFont = Self.resolveFont(name: wantName, size: wantSize)
         let newMetrics = CellMetrics(font: newFont)
-        // Rasterise at the window's current screen's scale — not the primary
-        // screen's. Otherwise a Blackbird window sitting on a 1x external
-        // display would re-atlas at 2x (from the Retina primary) and glyphs
-        // would be drawn oversampled, then downsampled in the compositor for
-        // a faintly blurry look. drawableSizeWillChange corrects this on
-        // display migration; doing it up front at the font-change path keeps
-        // the initial atlas sharp for users who never drag across displays.
+        // Rasterise at the window's current screen's scale, not the primary screen's.
         let scale = window?.screen?.backingScaleFactor
             ?? NSScreen.main?.backingScaleFactor
             ?? 2.0
-        // Only commit the new metrics if the renderer actually rebuilt its
-        // atlas; otherwise grid math and glyph rasterisation would drift
-        // apart (cells laid out at new size but drawn with an old-size
-        // atlas → smeared / wrong-sized glyphs).
+        // Commit the new metrics only if the atlas was rebuilt, or grid math and glyphs drift apart.
         guard renderer.reconfigure(metrics: newMetrics, scale: scale) else {
-            // Mirror the sibling `mtkView(_:drawableSizeWillChange:)`
-            // log: a failed reconfigure (e.g., MTLDevice couldn't allocate
-            // a larger atlas at the new font size) leaves the user staring
-            // at unchanged metrics with no audit trail. Surface enough
-            // context that a support reporter pasting `log show --predicate
-            // 'category == "renderer"'` can correlate the moment with a
-            // pref change.
             Self.rendererLogger.error(
                 "applyEffectiveFont reconfigure failed — keeping cellW=\(self.metrics.cellWidth, privacy: .public) cellH=\(self.metrics.cellHeight, privacy: .public); requested cellW=\(newMetrics.cellWidth, privacy: .public) cellH=\(newMetrics.cellHeight, privacy: .public) scale=\(scale, privacy: .public)"
             )
@@ -786,35 +369,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         self.metrics = newMetrics
         if let window {
-            // Pixel-precise resize: no contentResizeIncrements re-set here
-            // either (the original setter shipped before pixel-precise drag).
-            // Keep contentMinSize in sync with the new cell size; otherwise
-            // bumping the font up doesn't prevent the user from dragging
-            // the window below the new font's 20-col / 4-row minimum — they'd
-            // end up with a window too small to read comfortably.
             window.contentMinSize = NSSize(
                 width: newMetrics.cellWidth * 20 + 2 * Self.horizontalContentInsetPoints,
                 height: newMetrics.cellHeight * 4 + titlebarOnlyTopInset + Self.bottomContentInsetPoints
             )
         }
-        // Force a grid recomputation on the next layout — propagateResize
-        // compares against lastPropagatedSize, so clear it.
+        // propagateResize dedupes against lastPropagatedSize; clear it to force a re-grid.
         lastPropagatedSize = nil
-        // Async resize — font change is a one-off, not a drag loop, so we
-        // don't need the sync-return-with-snapshot guarantee. Using the
-        // async path prevents coreQueue backlog (shell streaming output)
-        // from blocking main while the pref change is applied.
+        // Async so a coreQueue backlog (shell streaming output) cannot block main.
         propagateResize(async: true)
-        // Re-layout the scroll indicator (its Y depends on cellHeight).
         needsLayout = true
         return true
     }
 
-    /// Top chrome height that excludes AppKit's phantom reservation for
-    /// the suppressed native tab bar. Uses `NSWindow.frameRect(forContentRect:
-    /// styleMask:)` on the window's real style mask minus `.fullSizeContentView`
-    /// — the delta between that and the window's content-view height is the
-    /// pure titlebar offset.
+    /// Titlebar height excluding AppKit's phantom reservation for the suppressed native tab bar.
     var titlebarOnlyTopInset: CGFloat {
         guard let window else { return 28 }
         var maskWithoutFullSize = window.styleMask
@@ -840,15 +408,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             width: width,
             height: max(0, bounds.height - bottom - top)
         )
-        // Re-anchor the IME preedit overlay to the current cursor cell
-        // whenever our bounds change — a window resize mid-composition
-        // would otherwise leave the overlay stranded at stale pixel
-        // coordinates until the user committed or cancelled.
         if composition != nil {
             refreshPreeditOverlay()
         }
     }
-
 
     public required init(coder: NSCoder) { fatalError("not supported") }
 
@@ -860,42 +423,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return resigned
     }
 
-    /// NSView's default returns `true` when the view is non-opaque — and our
-    /// MTKView is non-opaque whenever the user enables translucency, so by
-    /// default AppKit quietly converts every click-drag inside the terminal
-    /// into a window drag (mouseDown still fires, but the first mouseDragged
-    /// is intercepted). Pin this to `false` so click-drag always reaches
-    /// `mouseDragged(with:)` for text selection; explicit ⌘-drag still moves
-    /// the window via `performDrag(with:)` in `mouseDown`.
+    /// NSView's default is `true` for a non-opaque view (translucency on), and AppKit then turns
+    /// every click-drag into a window drag before `mouseDragged(with:)` sees it.
     public override var mouseDownCanMoveWindow: Bool { false }
 
     // MARK: - Synchronous presentation during resize
 
-    /// True while presents are tied to the AppKit CATransaction (a live
-    /// window resize, or the modifier-right-drag resize which never sets
-    /// `inLiveResize`). See `beginSynchronousResizePresentation`.
     private(set) var synchronousResizePresentation = false
 
     #if DEBUG
-    /// Count of synchronous `draw()` calls made outside the display link
-    /// (resize frames + the un-occlude frame). Test sensor only.
     var synchronousDrawsForTesting = 0
     #endif
 
-    /// Tie every present to the window server transaction that carries the
-    /// new layer bounds. By default MTKView presents on a display-link tick
-    /// while AppKit commits the resized layer at the end of the event turn;
-    /// whichever lands first, the compositor shows one drawable scaled to the
-    /// other's bounds — the shader divides by the viewport, so that is the
-    /// text shimmer / edge gap visible during a drag. With
-    /// `presentsWithTransaction` on, `setFrameSize` draws synchronously and
-    /// the renderer waits until the command buffer is scheduled, so the
-    /// new-size drawable and the new bounds reach the screen together
-    /// (Apple's documented technique, also what Ghostty and Alacritty do).
-    /// The renderer reads the layer flag off the drawable, so the layer is
-    /// the single source of truth. Idempotent; `endSynchronousResizePresentation`
-    /// restores the async path once the gesture ends (live-resize end,
-    /// right-drag release, or the view leaving its window mid-gesture).
+    /// With `presentsWithTransaction` on, the new-size drawable and the new layer bounds reach the
+    /// screen together; otherwise the compositor scales one to the other's bounds mid-drag.
     public func beginSynchronousResizePresentation() {
         guard !synchronousResizePresentation else { return }
         synchronousResizePresentation = true
@@ -908,9 +449,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         (layer as? CAMetalLayer)?.presentsWithTransaction = false
     }
 
-    /// One frame outside the display link. `MTKView.draw()` runs the delegate
-    /// even while paused; the renderer tolerates a missing drawable (headless
-    /// views, ordered-out windows), so this is always safe to call.
+    /// `MTKView.draw()` runs the delegate even while paused; the renderer tolerates a missing drawable.
     private func drawSynchronously() {
         #if DEBUG
         synchronousDrawsForTesting += 1
@@ -926,61 +465,28 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
         endSynchronousResizePresentation()
-        // Drag ended — make sure the session lands on the final grid size.
-        // In practice a no-op: `setFrameSize` fires for the final size too, so
-        // the `lastPropagatedSize` dedup swallows this call. Kept as a cheap
-        // belt-and-braces for any AppKit path that ends a live resize without
-        // a final `setFrameSize`. (Convergence of the coalesced column path
-        // does NOT depend on this — latest-wins guarantees the last requested
-        // size is the one applied, which is exactly why that design was chosen
-        // over an `inLiveResize`-gated throttle.)
-        // (The renderer never had a "stretched viewport" to flip back from,
-        // whatever the comment that used to live here claimed: text is drawn
-        // at absolute point positions against the live viewport.)
         propagateResize()
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        // Propagate to the session on every frame-size change. During live
-        // resize this fires many times per second; propagateResize's
-        // lastPropagatedSize dedup skips calls that didn't cross a cell
-        // boundary. Programmatic / zoom / first-appear paths also land
-        // here.
         propagateResize()
-        // Resize frame: present now, inside AppKit's transaction, rather than
-        // on the next display-link tick. The tick that follows sees an equal
-        // FrameKey (same viewport, same snapshot) and skips, so a drawable is
-        // never acquired twice per vblank.
+        // Present now, inside AppKit's transaction. The display-link tick that follows sees an
+        // equal FrameKey and skips, so a drawable is never acquired twice per vblank.
         if synchronousResizePresentation {
             drawSynchronously()
         }
     }
 
     private var lastPropagatedSize: PTY.Size?
-    /// Whether this view has EVER propagated a grid size. Distinct from
-    /// `lastPropagatedSize != nil`, which two paths deliberately reset to force
-    /// a re-grid (a font change, and a titlebar-inset change from the draw
-    /// path). Those resets must not make the follow-up resize look like the
-    /// first one: startup earns the synchronous path because the shell must be
-    /// at the real grid size before its first output, but a fullscreen
-    /// transition — which changes the inset *and* fans out to sibling tabs —
-    /// would otherwise drop a full 80→200-column scrollback reflow onto main.
+    /// Distinct from `lastPropagatedSize != nil`, which a font change and a titlebar-inset change
+    /// reset to force a re-grid; those must not earn the first resize's synchronous path.
     private var hasPropagatedOnce = false
-    /// Set while the tab-group fan-out is pushing a frame onto THIS view's
-    /// window. See the delivery table in `propagateResize`.
     private var forceNonBlockingResizeDelivery = false
     private var lastSafeAreaTop: Float = -1
 
-    /// Run `body` with resize delivery forced off the main thread. Used by the
-    /// tab-group frame fan-out: `window.setFrame` calls `setFrameSize`
-    /// synchronously, so the scope is exact.
-    ///
-    /// Scoped rather than inferred, deliberately. At AppKit's own select-time
-    /// frame apply a background tab still reports `isVisible == false` and its
-    /// group's `selectedWindow` is still the OUTGOING tab, so any "am I the
-    /// foreground tab?" heuristic here would silently reclassify the ordinary
-    /// tab-switch resize too.
+    /// Scoped, not inferred: at AppKit's select-time frame apply a background tab still reports
+    /// `isVisible == false` and its group's `selectedWindow` is still the OUTGOING tab.
     func withNonBlockingResizeDelivery(_ body: () -> Void) {
         let previous = forceNonBlockingResizeDelivery
         forceNonBlockingResizeDelivery = true
@@ -988,50 +494,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         body()
     }
 
-    /// Space reserved at the bottom of the view so the last grid row never
-    /// runs into the window's rounded corner. macOS window corner radius is
-    /// ~10 pt; keep the bottom row one cell-height above so descenders and
-    /// block cursors clear comfortably. Matches the feel of Terminal.app and
-    /// iTerm2, which both leave breathing room below the prompt.
+    /// Keeps the last grid row clear of the window's rounded corner (~10 pt radius).
     public static let bottomContentInsetPoints: CGFloat = 10
 
-    /// Space reserved on the left and right of the grid so text never kisses
-    /// the window edge. Mirrored on both sides — total horizontal padding is
-    /// `2 * horizontalContentInsetPoints`. Sub-cell pixel leftover from
-    /// pixel-precise window resize gets absorbed into the right side, so the
-    /// effective right inset floats from `horizontalContentInsetPoints` to
-    /// `horizontalContentInsetPoints + cellWidth - 1`.
     public static let horizontalContentInsetPoints: CGFloat = 8
 
-    /// Top-left pixel origin of cell `(row, col)` in this view's local
-    /// (top-down) coordinate space. Single source of truth for the
-    /// grid → view mapping; every callsite that previously did
-    /// `col * cellWidth` and `row * cellHeight` directly should route
-    /// through this helper so the inset can never drift out of sync.
+    /// Top-left origin of the cell in this view's local, top-down coordinate space.
     public func cellOriginPx(row: Int, col: Int) -> CGPoint {
         let x = Self.horizontalContentInsetPoints + CGFloat(col) * metrics.cellWidth
         let y = titlebarOnlyTopInset + CGFloat(row) * metrics.cellHeight
         return CGPoint(x: x, y: y)
     }
 
-    /// Inverse of `cellOriginPx`. Maps a view-local (top-down) point to a
-    /// `(row, col)` cell coordinate. **Does not know the live grid size** —
-    /// row/col are only clamped to a generic 100_000-cell sanity cap, so
-    /// callers that need a tight `[0, cols)` / `[0, rows)` clamp must
-    /// re-clamp against the current `BBSnapshot`. Selection sites that
-    /// also need scrollback awareness should use
-    /// `Selection.bufferPoint(forView:…, leftInsetPoints:)` instead.
-    /// Points inside the left/top inset clamp to `col 0` / `row 0`;
-    /// non-finite or absurd-magnitude inputs clamp to the origin sentinel
-    /// rather than trapping at `Int(NaN)` / `Int(±Inf)`.
+    /// Does NOT know the live grid size: row/col are clamped only to a 100_000 sanity cap, so
+    /// callers needing `[0, cols)` / `[0, rows)` must re-clamp against the current `BBSnapshot`.
     public func cellAt(point: CGPoint) -> (row: Int, col: Int) {
         let cw = metrics.cellWidth
         let ch = metrics.cellHeight
         guard cw > 0, ch > 0 else { return (0, 0) }
-        // Mirror `Selection.bufferPoint(forView:…)`'s defensive clamp so a
-        // stray Core Animation NaN or a misbehaving input device can't
-        // crash the app at `Int(NaN)` / `Int(±Inf)`. Same `CGFloat.sanePx`
-        // ceiling (see `CGFloat.sanitizedPixel`).
         let safeX = point.x.sanitizedPixel
         let safeY = point.y.sanitizedPixel
         let xInGrid = safeX - Self.horizontalContentInsetPoints
@@ -1043,12 +523,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return (row, col)
     }
 
-    /// Strip the titlebar (top), bottom corner clearance, and L+R inset
-    /// from a raw view-bounds size to get the rectangle that actually
-    /// hosts the grid. Single source of truth for the formula — both
-    /// `propagateResize` and `MainWindowController.startSession` route
-    /// through it so the start-size and the first SIGWINCH can never
-    /// disagree on what "usable area" means.
+    /// Shared with `MainWindowController.startSession` so the start size and the first SIGWINCH agree.
     public static func usableViewSize(
         forBounds bounds: CGSize,
         titlebarTopInset: CGFloat,
@@ -1073,11 +548,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         let grid = metrics.grid(forPixelSize: usable)
         guard grid.cols > 0, grid.rows > 0 else { return }
-        // `grid` is bounded by CGFloat.sanePx (1M px / min cell size),
-        // so in theory cols/rows can exceed UInt16.max on a degenerate
-        // combination (1×1 cell on a 1 Mpx viewport). `clamping:` avoids
-        // the trap; TerminalSession.resize clamps again to ≤1000 so the
-        // real dimensions never go past the grid allocator's ceiling.
+        // cols/rows can exceed UInt16.max on a degenerate cell size; `clamping:` avoids the trap.
         let size = PTY.Size(
             cols: UInt16(clamping: grid.cols),
             rows: UInt16(clamping: grid.rows)
@@ -1085,42 +556,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let previous = lastPropagatedSize
         guard size != previous else { return }
         lastPropagatedSize = size
-        // How this resize was delivered. Three paths, chosen by cost:
-        //
-        //   .async     — font change and other non-drag callers. Never blocks
-        //                main on a coreQueue backlog (clicking "Size: 14" in
-        //                Settings while a shell streams used to beachball).
-        //   .sync      — the first resize a view ever propagates (startup
-        //                ordering: the session must be at the real grid size
-        //                before the shell's first output), and any resize that
-        //                changes ONLY the row count. Row changes are ring
-        //                rotations — measured 0.000 ms even at 100 000 lines of
-        //                history — so the "no frame at the old grid size"
-        //                guarantee is free there.
-        //   .coalesced — a column change. Reflows the entire populated
-        //                scrollback (10 ms at 20 000 lines, 37 ms at 100 000),
-        //                so it must not run on main once per cell crossing of a
-        //                live drag; latest-wins queuing also collapses a drag's
-        //                worth of steps into a handful of reflows and, with
-        //                them, the SIGWINCH storm that made every TUI repaint
-        //                its whole screen per crossing.
-        //
-        // Two guards keep `.sync` honest, because "cheap" is only true when the
-        // core is actually idle:
-        //
-        //   - `forceNonBlockingResizeDelivery` — set while a resize is being
-        //     pushed onto a BACKGROUND tab by the tab-group fan-out. That tab
-        //     draws nothing, so it gains nothing from the synchronous path, and
-        //     `coreQueue.sync` there would make main wait out that session's
-        //     entire queued `feed(_:)` backlog: N background tabs streaming
-        //     build output would turn one mouse-up into N serialized drains on
-        //     main.
-        //   - `hasPendingCoalescedResize` — "the columns didn't change" is
-        //     relative to the last size REQUESTED, and a coalesced resize may
-        //     not have reached the core yet. A corner drag alternates column
-        //     and row crossings, so without this the row frames would take
-        //     `coreQueue.sync` straight behind the reflow the previous frame
-        //     queued.
+        // .async: non-drag callers; never blocks main on a coreQueue backlog.
+        // .sync: the first resize (the shell must start at the real grid size) and row-only changes.
+        // .coalesced: a column change reflows the whole scrollback (10-37 ms); off main, latest-wins.
+        // `.sync` is cheap only when the core is idle: not for a fan-out onto a background tab
+        // (main would wait out its feed backlog) nor behind a pending coalesced resize.
         let delivery: ResizeDelivery
         if asyncResize {
             delivery = .async
@@ -1137,9 +577,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         #if DEBUG
         lastResizeDeliveryForTesting = delivery
         #endif
-        // Without an attached session there's nothing to forward to. The
-        // size is still recorded above so resize-math tests can assert
-        // against it without spinning up a real PTY.
         guard let session else { return }
         switch delivery {
         case .async:     session.resizeAsync(to: size)
@@ -1148,9 +585,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Which `TerminalSession` resize entry point `propagateResize` used.
-    /// Named rather than inferred so the choice is reviewable and testable —
-    /// see the decision table in `propagateResize`.
     enum ResizeDelivery: Equatable {
         case sync
         case async
@@ -1158,13 +592,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     #if DEBUG
-    /// DEBUG-only accessor so unit tests can assert what the most recent
-    /// `propagateResize` call computed for the grid.
     public func lastPropagatedSizeForTesting() -> PTY.Size? { lastPropagatedSize }
 
-    /// How the most recent `propagateResize` delivered its resize. Recorded
-    /// even when no session is attached, so the delivery policy is assertable
-    /// without a PTY (same trick `lastPropagatedSize` already uses).
     var lastResizeDeliveryForTesting: ResizeDelivery?
     #endif
 
@@ -1176,49 +605,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let bgG = Double((palette.background >> 8)  & 0xFF) / 255.0
         let bgB = Double(palette.background & 0xFF) / 255.0
         let (opacity, blurRadius) = Preferences.shared.translucencyResolved
-        // clearColor gets the theme bg at user opacity. Cells with default bg
-        // skip their bg quad (in buildInstances) so clearColor shows — that's
-        // where the desktop bleed-through happens.
+        // Cells with the default bg skip their bg quad, so clearColor shows through them.
         clearColor = MTLClearColor(red: bgR, green: bgG, blue: bgB, alpha: opacity)
         themeDefaultBgRgb = palette.background
         themeDefaultFgRgb = palette.foreground
         renderer.setDefaultBgRgb(palette.background)
         renderer.setCursorColor(rgb: palette.cursor)
         renderer.setSelectionColors(highlightRgb: palette.selection, foregroundRgb: palette.selectionForeground)
-        // Single slider — explicit colors (status lines, highlights) fade
-        // with the window. Users who want solid highlights just lower
-        // translucency.
         renderer.setBackgroundOpacity(Float(opacity), keepBgOpaque: false)
         renderer.setCursorBlinkEnabled(Preferences.shared.cursorBlink)
         renderer.setCursorShapeOverride(Preferences.shared.cursorShape.rendererOverride)
         setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
         window?.setBackgroundBlurRadius(blurRadius)
-        // Find bar chrome derives from the same palette (FindBarColorScheme);
-        // forwarding here keeps an open bar in sync on live theme switches
-        // and caches the palette for a bar opened later.
         findController.applyTheme(palette)
-        // If an IME composition is in flight when the theme changes, repaint
-        // the preedit overlay so its fg/bg track the new palette. Without
-        // this the overlay holds its pre-change colours until the next
-        // setMarkedText/insertText callback — visible to anyone mid-kana
-        // composition at the moment they toggle light/dark.
         if composition != nil {
             refreshPreeditOverlay()
         }
     }
 
-    /// Theme's default background RGB, captured so the renderer can skip
-    /// drawing a bg quad for cells at the default bg (they inherit the
-    /// transparent clearColor). Internal so `TerminalView+IME.swift`'s
-    /// preedit-overlay path can render against the same theme bg that
-    /// committed text will land on.
     var themeDefaultBgRgb: UInt32 = 0x000000
 
-    /// Theme's default foreground RGB. Cached so the IME preedit overlay
-    /// can render composing glyphs in the same colour committed text will
-    /// land in, rather than AppKit's `.labelColor` (which ignores the
-    /// Blackbird theme and flips to white on dark system appearance even
-    /// under a light theme).
     var themeDefaultFgRgb: UInt32 = 0xFFFFFF
 
     private func setWindowAppearance(opacity: Double, themeBg: (r: Double, g: Double, b: Double)) {
@@ -1226,37 +632,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         layer?.isOpaque = !transparent
         guard let window else { return }
         window.isOpaque = !transparent
-        // Always strip the titlebar material — even at fully opaque. If we
-        // let AppKit draw its default chrome over the top, it reads as a
-        // separate lighter bar against the Metal-tinted body. With it off,
-        // the full-size content view's Metal clearColor fills the titlebar
-        // region too, continuous with the body. Traffic lights and the
-        // title text still render on top as usual.
+        // Always, even when fully opaque: AppKit's default titlebar chrome reads as a separate bar.
         window.titlebarAppearsTransparent = true
-        // Paint backgroundColor with the same tint the Metal clearColor
-        // uses, so any pre-first-frame or resize-tear area matches instead
-        // of flashing to NSWindow's default gray.
         window.backgroundColor = NSColor(
             calibratedRed: themeBg.r,
             green: themeBg.g,
             blue: themeBg.b,
             alpha: opacity
         )
-        // Pin the window's effective appearance to the theme's lightness, not
-        // the OS's. Otherwise the title text (drawn by AppKit in labelColor)
-        // and the traffic-light tinting follow the OS appearance — a dark
-        // theme under Light OS mode renders a dark title on a dark bg and
-        // the title becomes unreadable. Rec. 709 luminance on the theme bg
-        // picks dark vs light; AppKit then handles the label + chrome
-        // coloring automatically.
+        // Theme lightness (Rec. 709 luminance), not the OS appearance, decides AppKit's title-text colour.
         let luminance = 0.2126 * themeBg.r + 0.7152 * themeBg.g + 0.0722 * themeBg.b
         window.appearance = NSAppearance(named: luminance > 0.5 ? .aqua : .darkAqua)
     }
 
     public func render(snapshot: BBSnapshot) {
         wakeRenderLoop()
-        // A partial wheel line accrued under one delivery mode must not be
-        // credited to the next (leaving `less` into a mouse-reporting TUI).
+        // A partial wheel line accrued under one delivery mode must not be credited to the next.
         let wheelBits: BBTermMode = [.altScreen, .alternateScroll, .mouseReportClick, .mouseMotion, .mouseDrag]
         if let prev = currentSnapshot?.termMode,
            prev.intersection(wheelBits) != snapshot.termMode.intersection(wheelBits) {
@@ -1264,43 +655,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         let wasFocusMode = currentSnapshot?.termMode.contains(.focusInOut) ?? false
         let nowFocusMode = snapshot.termMode.contains(.focusInOut)
-        // Bugs #14 + #15: invalidate the active selection on snapshot
-        // transitions that move the cells its BufferPoints address.
-        //
-        //  - #14 (column reflow): `Selection.anchor` / `cursor` are
-        //    `BufferPoint(line, col)` pinned to the pre-reflow grid. When
-        //    the user shrinks the window's cols (alacritty's wrapped
-        //    scrollback re-wraps on column changes — *not* on row-only
-        //    changes), the buffer line/col those points named now refer
-        //    to a different cell. Re-mapping is impossible without
-        //    retaining the original byte stream, so the safe choice is to
-        //    drop the selection. A row-only resize doesn't reflow, but it
-        //    still shifts every buffer line (MSC-7: rows move between the
-        //    grid and history), so it drops the selection too.
-        //
-        //  - #15 (alt-screen exit/enter): `CSI ?1049h` swaps the visible
-        //    grid for a fresh alt-screen and `?1049l` restores the prior
-        //    main-screen content; either edge means the lines the
-        //    selection points into have been replaced. `BBSnapshot.termMode`
-        //    surfaces the `.altScreen` bit (see BBTerm.swift), so detect
-        //    the toggle and clear.
-        //
-        // Both checks are gated on a non-nil prior snapshot so the very
-        // first render() (where `currentSnapshot` is still nil) doesn't
-        // misfire — there's no live selection at session start anyway.
-        //  - H-6 (history collapsed by ⌘K): `TerminalSession.clearAll()`
-        //    calls `bb_term_clear_all`, which drops the entire scrollback
-        //    ring. A selection that pointed into history now references
-        //    deleted lines — copy returns blank. The cols/altScreen gates
-        //    above don't fire (cols unchanged, no alt-screen toggle), so
-        //    we need an explicit "history just collapsed to zero" predicate.
-        //    Picked "was-non-zero, now-zero" rather than "shrank" so a
-        //    natural scrollback eviction (history wraps at the cap) — which
-        //    keeps history positive — doesn't drop a live selection.
-        // Bugs #14/#15/H-6/S5-005: reconcile the active selection (and its word-
-        // drag anchor) against the cells the new snapshot moved/deleted. Pure;
-        // exercised on snapshot pairs in SelectionReconciler. Gated on a prior
-        // snapshot so the first render (selection still nil) doesn't misfire.
         if let sel = selection, let prev = currentSnapshot {
             let result = SelectionReconciler.reconciled(
                 selection: sel,
@@ -1308,51 +662,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 prev: prev,
                 next: snapshot
             )
-            // `selection`'s didSet has a same-value guard, so re-assigning an
-            // unchanged value is a no-op (no spurious setNeedsDisplay).
             selection = result.selection
             selectionController.wordDragAnchorWord = result.wordDragAnchor
         }
-        // The preedit overlay is a subview pinned to the cursor cell, so a
-        // snapshot that moves the cursor (PTY output, a pasted block echoing,
-        // the reflow snapshot that lands after a column resize's layout())
-        // would leave it painted, opaque, over real output until the next IME
-        // callback. Compare the cell rect across the swap rather than
-        // refreshing unconditionally: a streaming TUI that leaves the cursor
-        // put shouldn't rebuild the overlay on every frame.
+        // The preedit overlay is pinned to the cursor cell. Compare the cell rect across the swap
+        // rather than refreshing unconditionally: a streaming TUI must not rebuild it every frame.
         let preeditAnchor: NSRect? = composition != nil ? cursorCellRectInView() : nil
         self.currentSnapshot = snapshot
         if let preeditAnchor, cursorCellRectInView() != preeditAnchor {
             refreshPreeditOverlay()
         }
-        // The grid just changed under a pointer that didn't move: re-resolve
-        // every hover affordance against the new snapshot. Both halves need it.
-        //
-        //   - OSC 8: link ids are assigned PER SNAPSHOT by the core, so the id
-        //     we're holding may now name a different URL (or none). A link that
-        //     scrolled under the pointer must acquire its underline; one that
-        //     scrolled away must lose it.
-        //   - ⌘-held regex URLs: the row/col under the pointer now maps to a
-        //     different buffer line, so the painted range must be recomputed.
-        //
-        // Unconditional (the coordinator internally short-circuits when the
-        // pointer is outside the grid, and only runs the O(rows × cols) regex
-        // scan on the ⌘-held path) — gating the whole thing on `cmdModifierHeld`
-        // was why an OSC 8 link never updated under a repainting TUI.
+        // Unconditional, not gated on ⌘: OSC 8 link ids are assigned PER SNAPSHOT by the core, so
+        // the id under a stationary pointer may now name a different URL (or none).
         hoverCoordinator.handleSnapshotPublished()
-        // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
-        // Scroll indicator consumes the same snapshot — keep it in lockstep
-        // with the grid so a sudden `clear` or big output reshapes the thumb
-        // on the frame the viewport itself changes.
         scrollIndicator.update(
             displayOffset: snapshot.displayOffset,
             historySize: snapshot.historySize,
             rows: snapshot.rows
         )
-        // Paint OSC 133 prompt ticks along the track so the user can see
-        // at a glance how far apart their prompts are (and how far up
-        // they've scrolled). No-op when the shell isn't sourcing the
-        // integration snippet — promptMarks stays empty.
         if let s = session {
             scrollIndicator.updatePromptMarks(
                 s.promptMarks,
@@ -1362,98 +689,49 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 accentColor: NSColor.controlAccentColor
             )
         }
-        // Shell just enabled DECSET 1004 (focus events). If the window is
-        // already key — typical: vim's init.vim or tmux's .conf flips this
-        // on before the user interacts — notify the app of current focus
-        // state. Without this, the "first" focus event the app sees is the
-        // next NSWindow.didResignKey, which misregisters the initial state.
+        // DECSET 1004 enabled while already key: report focus now, through the session's single emitter.
         if !wasFocusMode, nowFocusMode, window?.isKeyWindow == true {
-            // Route through the session's single focus emitter (live-core
-            // gate + same-state dedup) so this 1004-enable catch-up can't
-            // double-fire against the MainWindowController key-transition
-            // path. See TerminalSession.focusEmissionBytes.
             session?.focusChanged(true)
         }
     }
 
     private var focusObservers: [NSObjectProtocol] = []
 
-    /// Observers for OS-level state that affects the target frame rate:
-    /// `isLowPowerModeEnabled`, thermal state, and window occlusion.
-    /// Kept separate from `focusObservers` so the two reset cycles in
-    /// `viewDidMoveToWindow` don't cross-contaminate (power/thermal
-    /// observers are process-global and don't re-register on window
-    /// swap; occlusion observers bind to the current window and do).
     private var powerObservers: [NSObjectProtocol] = []
     private var occlusionObservers: [NSObjectProtocol] = []
 
-    /// Process-global observers that must survive re-parenting between
-    /// windows. `viewDidMoveToWindow` unconditionally tears down
-    /// `focusObservers`; anything we want to keep live across a tab-drag-out
-    /// / window-swap goes here and is torn down only in `deinit`.
-    ///
-    /// Currently holds the `NSColor.systemColorsDidChangeNotification`
-    /// observer that drives the live accent-colour push into the renderer.
     private var accentObservers: [NSObjectProtocol] = []
 
     public override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil {
-            // A window torn down mid-gesture never delivers the live-resize
-            // end / right-mouse-up that would clear sync-presentation mode.
+            // A window torn down mid-gesture never delivers the live-resize end / right-mouse-up.
             endSynchronousResizePresentation()
         }
-        // Drop the hover tooltip before the window reference changes. The
-        // panel is parented to the current window; leaving it up across a
-        // reparent lands it at stale coordinates (and, if the old window
-        // is being torn down, against a freed NSWindow). Audit
-        // terminal-view-2 F19. Touch the view's own `hoverTooltipItem` +
-        // `tooltipController` directly (not via `hoverCoordinator`) — this is a
-        // view-lifecycle teardown and the panel dismiss must not depend on the
-        // coordinator's `unowned view` back-ref.
+        // The tooltip panel is parented to the current window; dismiss it before that changes.
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
         tooltipController.dismiss()
-        // M-7 / RW-04: also kill the selection autoscroll timer. `deinit`
-        // already invalidates it (terminal-view-2 F2), but tab tear-out
-        // moves the view between windows WITHOUT calling deinit. Between
-        // `viewWillMove` and `viewDidMoveToWindow` `self.window` is nil;
-        // an active timer firing in that gap would call
-        // `session?.scroll(delta:)` against stale window coordinates.
+        // Tab tear-out moves the view without deinit; a timer firing while `window` is nil must not scroll.
         selectionAutoscroller.stop()
     }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // Register every time the view attaches to a new window — AppKit
-        // doesn't carry dragging-destination registration across window
-        // moves reliably, and this is idempotent so repeated calls are safe.
-        // The NSDraggingDestination conformance lives in
-        // TerminalView+Dragging.swift.
+        // AppKit does not reliably carry dragging-destination registration across window moves.
         registerForDraggedTypes([.fileURL])
         #if DEBUG
         if let screen = window?.screen {
-            // `maximumFramesPerSecond` is the panel's native ceiling (60 on
-            // standard Retina, 120 on ProMotion). Logged once per window
-            // attach so the periodic fps line below can be sanity-checked
-            // against the expected rate.
             let maxFPS = screen.maximumFramesPerSecond
             Self.fpsLogger.log("attached to screen '\(screen.localizedName, privacy: .public)' @ \(maxFPS, privacy: .public) Hz max")
         }
         #endif
 
-        // Tear down any stale focus observers (e.g. view moved between
-        // windows), then re-attach to the new window. Focus-event reporting
-        // requires us to notify the shell/TUI with CSI I / CSI O every time
-        // this tab becomes key or resigns key — but only while the app has
-        // enabled mode 1004.
         for token in focusObservers {
             NotificationCenter.default.removeObserver(token)
         }
         focusObservers.removeAll()
-        // Same for the power / occlusion observers — BEFORE the window guard,
-        // so a detached view is never driven (occlusion cache, synchronous
-        // draw) by transitions of a window it no longer belongs to.
+        // Before the window guard, so a detached view is never driven by its old window's transitions.
         for token in powerObservers {
             NotificationCenter.default.removeObserver(token)
         }
@@ -1470,20 +748,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.wakeRenderLoop()
-            // Focus-event emission (CSI I) is owned by MainWindowController's
-            // windowDidBecomeKey → session.focusChanged, which gates on the
-            // live core mode. Don't also emit here — the old snapshot-gated
-            // path double-fired and could disagree with the core. The SKE +
-            // ⌘-modifier sync below ARE this view's responsibility.
+            // CSI I / CSI O emission is owned by MainWindowController → session.focusChanged; not here.
             self?.enableSecureEventInputIfNeeded()
-            // If the user switched INTO this tab while already holding
-            // ⌘ (Cmd-Tab, or Cmd-` within the group), `flagsChanged`
-            // didn't fire — modifier events only route to the key
-            // window's first responder. Sync from the current global
-            // state so the next hover evaluation sees the right flag.
-            // Re-evaluation itself is deferred to the next mouseMoved:
-            // we don't know the pointer's current cell on the new tab
-            // until it reports in.
+            // `flagsChanged` only reaches the key window's first responder; sync ⌘ from the global state.
             self?.hoverCoordinator.syncCmdModifierHeld(fromEventFlags: NSEvent.modifierFlags)
         })
         focusObservers.append(center.addObserver(
@@ -1492,34 +759,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.wakeRenderLoop()
-            // A modifier-right-drag resize whose rightMouseUp went to another
-            // app (⌘-Tab mid-drag, a sheet) would otherwise leave presents tied
-            // to the transaction for the view's life. Idempotent.
+            // A right-drag resize whose rightMouseUp went to another app would leave sync presentation on.
             self?.endSynchronousResizePresentation()
-            // Focus-event emission (CSI O) is owned by MainWindowController's
-            // windowDidResignKey → session.focusChanged. Keep the SKE /
-            // IME-composition / hover teardown below, which ARE this view's
-            // responsibility.
             self?.disableSecureEventInputIfHeld()
-            // Tear down any in-flight IME composition so a stale preedit
-            // can't commit into the next-focused terminal on Cmd-Tab, and
-            // forget held keys whose key-ups go elsewhere. See
-            // `discardKeyboardStateOnResignKey()`.
             self?.discardKeyboardStateOnResignKey()
-            // Wipe modifier + hover state so a missed ⌘-release during
-            // focus loss (flagsChanged fires only for the key window)
-            // doesn't leave a stale ⌘-hover highlight painted into the
-            // next focus cycle. mouseMoved will sync back as soon as the
-            // pointer moves over the view again.
             self?.hoverCoordinator.resetModifierAndHoverState()
         })
         #if DEBUG
-        // Window-attach logging (above) fires once per view⇄window pairing,
-        // not when the user drags the window between displays — the view's
-        // `window` property doesn't change on a screen move. Observe the
-        // window's own screen-change notification so the DEBUG fps log can
-        // be sanity-checked against whichever display the view is actually
-        // presenting on right now.
         focusObservers.append(center.addObserver(
             forName: NSWindow.didChangeScreenNotification,
             object: window,
@@ -1530,19 +776,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         })
         #endif
 
-        // Rebuild every frame-rate-related observer from scratch (torn down
-        // above the window guard). Each viewDidMoveToWindow may cross a
-        // screen boundary (different nativeMaxFPS), a window change
-        // (different occlusionState source), or a re-attach after some
-        // other view moved between windows.
-        // Seed the cached occlusion state from the new window so the first
-        // `applyPowerAwareFrameRate()` below sees the same answer the live
-        // query used to give (a not-yet-shown window reports not visible →
-        // paused until AppKit's first occlusion notification un-pauses it).
+        // A not-yet-shown window reports not visible: paused until the first occlusion notification.
         isWindowOccluded = !window.occlusionState.contains(.visible)
 
-        // Window-bound: occlusion + screen-change both affect the
-        // target rate via `applyPowerAwareFrameRate`.
         occlusionObservers.append(center.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: window,
@@ -1561,7 +797,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             self?.applyPowerAwareFrameRate()
         })
 
-        // Process-global: low-power mode + thermal state.
         powerObservers.append(center.addObserver(
             forName: Notification.Name.NSProcessInfoPowerStateDidChange,
             object: nil,
@@ -1577,38 +812,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             self?.applyPowerAwareFrameRate()
         })
 
-        // Seed the rate from current state rather than waiting for a
-        // first notification that may never fire in a short session.
         applyPowerAwareFrameRate()
     }
 
-    /// Asymmetric hysteresis on thermal-driven frame-rate throttling.
-    /// `.fair` is the boundary state macOS toggles between when sampling
-    /// drifts around a warmth threshold — without a guard, the fps would
-    /// pulse 120 → 30 → 120 several times per minute on a machine hovering
-    /// near the edge. Once we've throttled, require `.nominal` (not just
-    /// `.fair`) to come back up; once unthrottled, require `.serious` or
-    /// worse to throttle. `.fair` is a no-op in either direction.
-    /// Audit latency-power F5.
+    /// Hysteresis: once throttled, only `.nominal` unthrottles; once unthrottled, only `.serious`
+    /// or worse throttles. `.fair` is a no-op in either direction.
     private var isThermalThrottled: Bool = false
 
-    /// Idle throttle. The display link runs at the panel's native rate
-    /// (up to 120 Hz) for the view's whole life, and each tick pays a
-    /// wakeup, a main-thread hop, an AppKit `contentRect` round-trip and a
-    /// FrameKey compare before short-circuiting. With cursor blink off
-    /// (the default) nothing animates on an idle terminal, so after
-    /// `idleThrottleAfterFrames` consecutive skipped frames the rate drops
-    /// to `idleFPS`; any input, snapshot publish, resize or focus change
-    /// restores it via `wakeRenderLoop()`. A change the FrameKey notices on
-    /// its own (blink phase, a hover computed elsewhere) still renders at
-    /// the idle rate, i.e. within 100 ms.
     static let idleThrottleAfterFrames = 120
     static let idleFPS = 10
     private var consecutiveSkippedFrames = 0
     private(set) var isIdleThrottled = false
 
-    /// Is the user NOT already looking at this tab? (App inactive, window
-    /// not key, or another tab of the group selected.) See `AttentionPolicy`.
     func attentionNeeded() -> Bool {
         let tabSelected: Bool = {
             guard let window, let group = window.tabGroup else { return true }
@@ -1621,12 +836,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
     }
 
-    /// Dot this tab's pill until it is next selected.
     func markTabUnseenAttention() {
         (window?.windowController as? MainWindowController)?.markUnseenAttention()
     }
 
-    /// Restore the full frame rate. Cheap when not throttled.
     func wakeRenderLoop() {
         consecutiveSkippedFrames = 0
         if isIdleThrottled {
@@ -1635,7 +848,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Called from `draw(in:)` with whether the renderer skipped this frame.
     private func noteFrameOutcome(skipped: Bool) {
         if skipped {
             consecutiveSkippedFrames &+= 1
@@ -1648,21 +860,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Read current NSProcessInfo + occlusion state, compute the
-    /// target frame rate via `preferredFrameRate(...)`, and apply it
-    /// to this MTKView. Safe to call from any notification handler.
-    /// Occlusion as last reported by AppKit (or read at window attach).
-    /// Cached rather than re-queried so `windowOcclusionDidChange` can act
-    /// on the hidden→visible TRANSITION, not just the current state.
     private var isWindowOccluded = false
 
-    /// Occlusion changed. Hidden: pause the display link (nothing to paint
-    /// for). Visible again: restore the rate AND draw one frame right now.
-    /// A background tab receives the front tab's frame while paused (issue
-    /// #29 fan-out), so its layer still holds a drawable of the OLD size;
-    /// waiting for the first display-link tick after ⌘⇧] showed that stale
-    /// drawable stretched to the new bounds for a frame. Drawing on the
-    /// transition presents a correctly sized frame before the tick.
+    /// On becoming visible, draw one frame now: a background tab's layer still holds a drawable of
+    /// the OLD size, which the first display-link tick would show stretched to the new bounds.
     func windowOcclusionDidChange(visible: Bool) {
         let wasOccluded = isWindowOccluded
         isWindowOccluded = !visible
@@ -1677,10 +878,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let info = ProcessInfo.processInfo
         let isOccluded = isWindowOccluded
         let nativeMax = window?.screen?.maximumFramesPerSecond ?? 60
-        // Apply thermal hysteresis before consulting preferredFrameRate:
-        // the pure function reacts to `.serious`/`.critical`, so we stretch
-        // the observed state to `.serious` while throttled until we see a
-        // definite `.nominal` return, and vice-versa for promotion.
         let rawThermal = info.thermalState
         let effectiveThermal: ProcessInfo.ThermalState
         switch rawThermal {
@@ -1688,8 +885,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             isThermalThrottled = false
             effectiveThermal = .nominal
         case .fair:
-            // No transition: preserve the current throttled state. Report
-            // the pure function whatever keeps the output stable.
             effectiveThermal = isThermalThrottled ? .serious : .fair
         case .serious, .critical:
             isThermalThrottled = true
@@ -1703,10 +898,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             thermalState: effectiveThermal,
             nativeMaxFPS: nativeMax
         )
-        // Same-value guards: MTKView's setters are not documented as
-        // idempotent, and this runs on every thermal / power / occlusion
-        // notification and every idle wake — never restart the display link
-        // for a value that did not change.
+        // Same-value guards: MTKView's setters are not documented as idempotent.
         switch target {
         case .paused:
             if !self.isPaused { self.isPaused = true }
@@ -1718,8 +910,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     #if DEBUG
-    /// Test seam: enter the idle-throttled state directly (the production
-    /// path needs `idleThrottleAfterFrames` display-link ticks).
     func _enterIdleThrottleForTesting() {
         isIdleThrottled = true
         applyPowerAwareFrameRate()
@@ -1739,57 +929,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         for token in accentObservers {
             NotificationCenter.default.removeObserver(token)
         }
-        // Tear down any pending hover tooltip. The DispatchWorkItem
-        // captures self weakly so it won't crash on late fire, but the
-        // panel would otherwise linger briefly after the view is gone. Touch
-        // the view's own fields directly — `deinit` must not read the
-        // coordinator's `unowned view` back-ref (it traps mid-deinit).
+        // `deinit` must not read the coordinator's `unowned view` back-ref (it traps mid-deinit).
         hoverTooltipItem?.cancel()
         tooltipController.dismiss()
-        // Selection-autoscroll timer, if the user tore the view down
-        // mid-drag (rare but possible on app quit). `selectionAutoscroller`
-        // is a stored `let`, so reaching it in deinit can't race a property
-        // teardown. Audit terminal-view-2 F2.
         selectionAutoscroller.stop()
-        // Release our EnableSecureEventInput refcount if the window
-        // closed while still key. Without this pair, secure-input mode
-        // leaks system-wide until the next reboot.
         disableSecureEventInputIfHeld()
     }
 
-    /// Whether THIS view currently owns a matched `EnableSecureEventInput`
-    /// refcount. Flipped on window-key gain / loss so the Disable call is
-    /// paired 1:1 with the Enable — mismatched refcounts at app quit would
-    /// leak secure-input mode system-wide until a reboot.
+    /// `EnableSecureEventInput` is refcounted by the OS: every Enable must be paired with exactly
+    /// one Disable, or secure-input mode leaks system-wide.
     private var ownsSecureInput: Bool = false
 
-    /// Ask the OS to route keyboard events exclusively to the focused
-    /// process (us). Other apps — keyloggers, TextExpander, Keyboard
-    /// Maestro, AX-based automation — stop seeing keystrokes directed at
-    /// the terminal. The cost is real: legitimate productivity tools stop
-    /// working while focus is here. Terminal.app and iTerm2 both enable
-    /// this by default because a shell prompt takes passwords (sudo, ssh,
-    /// gpg unlock, 1Password CLI) and that content must not be
-    /// observable by user-land peers.
-    ///
-    /// `EnableSecureEventInput` is refcounted by the OS; pair every Enable
-    /// with exactly one Disable on blur so multi-window setups don't drift.
     private func enableSecureEventInputIfNeeded() {
         guard !ownsSecureInput else { return }
         EnableSecureEventInput()
         ownsSecureInput = true
     }
 
-    /// Release our refcount, if any. Safe to call more than once — the
-    /// `ownsSecureInput` flag prevents a double-release that would under-
-    /// counts the global state and disable secure input system-wide.
-    ///
-    /// Audit terminal-view-1 F16: macOS refcounts per-process so the OS
-    /// auto-releases on process exit, but `deinit` isn't guaranteed to
-    /// run during termination and a pending modal (e.g. the close-confirm
-    /// alert) can delay Disable past the next user action. Public so
-    /// AppDelegate can call it from `applicationWillTerminate` as
-    /// defence-in-depth.
+    /// Public for AppDelegate's `applicationWillTerminate`: `deinit` may not run during termination.
     public func disableSecureEventInputIfHeld() {
         guard ownsSecureInput else { return }
         DisableSecureEventInput()
@@ -1800,26 +957,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         wakeRenderLoop()
-        // setFrameSize + viewDidEndLiveResize own the points-based resize
-        // path; we mustn't double-fire SIGWINCH from here (zoom button etc.).
-        // What this callback IS good for: detecting a backing-scale change,
-        // which happens when the window moves between displays of different
-        // densities (1x external, 2x Retina, 3x Liquid Retina XDR, etc.).
-        // Re-rasterise the atlas at the new pixel resolution so glyphs stay
-        // sharp on the new display. Do nothing if the scale hasn't moved.
+        // setFrameSize owns the points-based resize; SIGWINCH must not also fire from here. This
+        // callback only detects a backing-scale change (window moved between displays).
         guard bounds.width > 0 else { return }
         let newScale = size.width / bounds.width
         guard newScale > 0 else { return }
         if abs(newScale - renderer.atlas.scale) > 0.01 {
-            // Check the return value the same way applyEffectiveFont
-            // does — a failed reconfigure (e.g. MTLDevice couldn't
-            // allocate a bigger atlas texture on a hot-unplugged
-            // display) leaves the renderer in its previous state and
-            // should be surfaced rather than silently eaten. Audit
-            // terminal-view-1 F7.
             if !renderer.reconfigure(metrics: metrics, scale: newScale) {
-                // Release users on a hot-plugged display got blurry glyphs
-                // with no breadcrumb: this was DEBUG-only.
                 Self.rendererLogger.error(
                     "drawableSizeWillChange reconfigure failed, atlas stays at \(self.renderer.atlas.scale, privacy: .public)x"
                 )
@@ -1828,75 +972,31 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
-        // Top chrome is always just the titlebar — our custom tab bar
-        // lives INSIDE the titlebar row (iTerm2/Safari style), not as
-        // a separate strip below it, so the text grid should start
-        // right below the titlebar regardless of tab count.
-        //
-        // `titlebarOnlyTopInset` IS used directly here — deliberately NOT
-        // `safeAreaInsets.top` / `contentLayoutRect`, which still reserve
-        // AppKit's phantom 36pt tab-bar band even after the native strip is
-        // suppressed via view-walk (our custom pills occupy the titlebar
-        // itself instead). `titlebarOnlyTopInset` derives the real titlebar
-        // height from the window's STYLE instead: (window frame height) −
-        // (contentRect for the same style with NO tab-bar reservation).
-        // That gives a stable content offset (~28-32pt depending on macOS
-        // version — see that property's own doc comment) independent of
-        // AppKit's phantom tab-bar bookkeeping, so it does NOT jump when
-        // tab count changes.
+        // `titlebarOnlyTopInset`, deliberately NOT `safeAreaInsets.top` / `contentLayoutRect`: those
+        // still reserve AppKit's phantom 36pt tab-bar band after the native strip is suppressed.
         let currentTop = Float(titlebarOnlyTopInset)
         renderer.setTopInsetPoints(currentTop)
-        // Sibling of setTopInsetPoints — keep the two inset setters in
-        // lockstep so a layout-transition race that runs draw(in:) before
-        // layout() can't paint cells at the unset default of x=0 for one
-        // frame. Cheap (no per-frame state, no FrameKey churn since
-        // currentLeftInset is constant for the view's lifetime).
+        // Set here too so a draw that runs before layout() cannot paint cells at x=0.
         renderer.setLeftInsetPoints(Float(Self.horizontalContentInsetPoints))
         if currentTop != lastSafeAreaTop {
             lastSafeAreaTop = currentTop
-            // SIGWINCH must NOT run synchronously from the MTKViewDelegate
-            // draw callback: `session.resize(to:)` is a blocking call that
-            // re-enters the snapshot publisher and burns main-thread cycles
-            // during frame assembly (defeats ProMotion's 120 Hz promotion
-            // and storms the PTY when the titlebar inset jitters during
-            // fullscreen/style-mask transitions). Defer to the next runloop
-            // turn. `propagateResize` dedups against `lastPropagatedSize`, so
-            // scheduling when the grid hasn't actually changed is a no-op.
+            // Never resize synchronously from the draw callback: `session.resize(to:)` blocks and
+            // re-enters the snapshot publisher. Defer to the next runloop turn.
             lastPropagatedSize = nil
             DispatchQueue.main.async { [weak self] in
                 self?.propagateResize()
             }
         }
         let focused = window?.isKeyWindow ?? false
-        // Hovered OSC 8 link id is set by `mouseMoved`; the renderer reads
-        // it here so cells with a matching `link_id` get the accent-
-        // underline attribute bit this frame. UInt32 → UInt16 is lossy
-        // in principle (link ids are stored as u16 in BBCell), but the
-        // snapshot API returns u32 to leave room for future expansion —
-        // truncation here is safe because the FFI only ever returns ids
-        // that originated as u16.
+        // Link ids are u16 in BBCell; the snapshot API widens them to u32, so truncation is lossless.
         renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoverCoordinator.hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         noteFrameOutcome(skipped: renderer.didFrameSkipLastRender)
-        // Any frame after a keystroke counts as "the keystroke landed on
-        // screen" for probe purposes. The renderer can short-circuit
-        // (frameKey unchanged → no encode, no present; drawable
-        // unavailable → semaphore released without paint), and on those
-        // paths nothing reached the screen. Reading
-        // `didFrameSkipLastRender` filters those out so we don't record
-        // phantom zero-latency samples that drag p50/p99 down. When the
-        // skip flag is set the pending keystroke timestamp stays armed
-        // and the next *real* presented frame consumes it.
+        // A skipped frame reached no screen: the keystroke timestamp stays armed for the next one.
         if !renderer.didFrameSkipLastRender {
             LatencyProbe.shared.markPresented()
         }
         #if DEBUG
-        // Count draws and sample the interval between consecutive calls so
-        // the periodic log can distinguish "N fps with 16.67ms spacing" (60 Hz
-        // vsync'd) from "N fps with 8.33ms spacing" (120 Hz vsync'd) from
-        // "N fps with wildly uneven spacing" (MTKView stalling). Use
-        // CACurrentMediaTime (mach_absolute_time) rather than Date — Date is
-        // wall-clock and drifts; we want strict monotonic elapsed here.
         let nowMedia = CACurrentMediaTime()
         if lastFrameTime != 0 {
             let dtMs = (nowMedia - lastFrameTime) * 1000.0
@@ -1913,10 +1013,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             let screenName = window?.screen?.localizedName ?? "nil"
             let maxFPS = window?.screen?.maximumFramesPerSecond ?? -1
             let minMs = frameIntervalMinMs.isFinite ? frameIntervalMinMs : 0
-            // Ask CoreGraphics for the display's *current* mode refresh rate,
-            // independent of MTKView's internal timer. If this returns 120
-            // but we're drawing at 60 fps, the issue is MTKView's display
-            // link (not ProMotion being clamped by System Settings).
             var hwHz: Double = -1
             if let sNum = window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
                 let cgID = CGDirectDisplayID(sNum.uint32Value)
@@ -1943,64 +1039,23 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private func subscribeToSession() {
         cancellables.removeAll()
-        // Reset the bell de-dup counter so a fresh session's first bell
-        // (counter=1) always flashes, even if a prior session's counter
-        // had grown past 0. Only matters if the view ever reuses sessions;
-        // still belt-and-braces.
         bellController.resetCounter()
-        // Clear the stale snapshot + find-match state BEFORE returning on
-        // a nil session — otherwise the previous session's grid lingers
-        // on screen (rendered from `currentSnapshot`) after `view.session =
-        // nil`, which is the most likely "stale snapshot" footgun. Audit
-        // terminal-view-1 F5.
+        // Clear the snapshot before the nil-session return, or the previous session's grid stays on screen.
         guard let session else {
             currentSnapshot = nil
             findController.reset()
-            // The selection's coordinates addressed the session's grid that
-            // `currentSnapshot = nil` just discarded; leaving it set would
-            // keep a highlight (and a copyable range) over nothing. Unlike
-            // findBarDidClose (F30) there is no on-screen grid to copy from.
             selection = nil
-            // Per-session sequence ids (audit S6-003) can collide across
-            // sessions, so the URL-hover cache key must be cleared on any
-            // rebind — global uniqueness no longer invalidates it for
-            // free (F-S5-018 follow-up). `!=`-gated, so over-clearing is
-            // harmless.
             hoverCoordinator.invalidateURLMatchCache()
             setNeedsDisplay(bounds)
             return
         }
 
-        // Audit terminal-view-1 F3. Each `.sink` below previously wrapped
-        // its body in `DispatchQueue.main.async` — a no-op hop when the
-        // publisher already emits on main (TerminalSession coalesces to
-        // main via `publishPendingSnapshot`), and a UI-touch-off-main
-        // hazard if it ever doesn't. Declaring `.receive(on:
-        // DispatchQueue.main)` upstream shifts the whole closure onto
-        // main exactly once; saves a runloop tick per update on the
-        // snapshot path (which feeds the renderer's keystroke→pixel
-        // cadence) and makes the thread contract explicit at the
-        // subscription point rather than implicit at every call site.
-        // Rebinding to a session (fresh view today; defensive for any
-        // future rebind path): per-session sequence ids (audit S6-003)
-        // mean the previous session's cached seq can collide with the
-        // new session's numbering — clear the seq-keyed caches so a
-        // stale URL-match set can't survive the swap (F-S5-018
-        // follow-up). `!=`-gated consumers make over-clearing harmless.
+        // Sequence ids are per-session and can collide: clear the seq-keyed caches on any rebind.
         hoverCoordinator.invalidateURLMatchCache()
         findController.findMatchesSeq = nil
 
-        // NO `.receive(on: DispatchQueue.main)` here. `DispatchQueue` as a
-        // Combine scheduler ALWAYS dispatches asynchronously, even when the
-        // value is already emitted on main — which every publish path does
-        // (`SnapshotCoalescer.publishPendingSnapshot` hops to main itself,
-        // `publishImmediate` publishes inline on main). The hop cost a full
-        // runloop turn per snapshot and broke `ResizeController.resize`'s
-        // synchronous contract: it blocks main so the new-size snapshot is
-        // in place before the next display-link tick, and the deferred
-        // delivery let the old-grid-at-new-viewport frame draw anyway. The
-        // audit-F3 comment that claimed the hop "saved a tick" had it
-        // backwards. The precondition pins the contract instead.
+        // No `.receive(on: DispatchQueue.main)`: as a Combine scheduler it always hops asynchronously,
+        // and a synchronous resize needs the new-size snapshot in place before the next display-link tick.
         session.$snapshot
             .sink { [weak self] snap in
                 dispatchPrecondition(condition: .onQueue(.main))
@@ -2013,20 +1068,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] title in
                 guard let self else { return }
-                // Tab labels in AppKit's native tab group mirror window.title,
-                // so one write covers both the titlebar and the tab. When the
-                // shell hasn't emitted OSC 0/2 yet (stock zsh/bash until the
-                // user configures precmd), or a rename / XTWINOPS pop just
-                // cleared the title, fall back to the default (shell
-                // basename) set by MainWindowController. `window.title` is
-                // only the last resort: by now it holds the title being
-                // cleared.
                 let fallback = self.defaultTitle ?? self.window?.title ?? "Blackbird"
                 let useTitle = (title?.isEmpty == false ? title : fallback) ?? "Blackbird"
-                // Skip an unchanged title: `NSWindow.title` KVO fires on every
-                // write, even an identical one, and each fire rebuilds the tab
-                // pill strips. Shells and TUIs re-send the same OSC 0/2 on
-                // every prompt or status tick.
+                // `NSWindow.title` KVO fires even on an identical write, rebuilding the tab pill strips.
                 if self.window?.title != useTitle {
                     self.window?.title = useTitle
                 }
@@ -2038,12 +1082,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             .sink { [weak self] counter in
                 guard let self else { return }
                 self.bellController.handleBellCounter(counter)
-                // A bell while the user is elsewhere bounces the Dock icon
-                // and dots the tab (Claude Code's `terminal_bell` channel is
-                // a BEL; through v0.8.0 it produced at most a flash nobody
-                // was looking at). Skipped only when the user has silenced
-                // both controls that speak for a bell: Bell = Off and
-                // "Show notifications from programs" off.
                 let prefs = Preferences.shared
                 if counter > 0, prefs.bell != .off || prefs.programNotifications,
                    self.attentionNeeded() {
@@ -2080,9 +1118,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func keyDown(with event: NSEvent) {
         wakeRenderLoop()
-        // Typing dismisses any dwell-tooltip the pointer might be about
-        // to reveal — otherwise a hovered URL tooltip would obscure the
-        // user's own output as it scrolls past.
         hoverCoordinator.cancelHoverTooltip()
         #if DEBUG
         let keyCode = event.keyCode
@@ -2094,14 +1129,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         #endif
 
-        // ⌘-prefixed events never encode into PTY bytes. They're reserved for
-        // application-level shortcuts (menu items, window management). This
-        // enforces the spec's ⌘C/⌃C strict separation: ⌃C always sends 0x03
-        // (via KeyEncoder's control path), ⌘C is never re-encoded as 'c'.
         if event.modifierFlags.contains(.command) {
-            // A fresh (non-repeat) press of a key still on the ledger means its
-            // key-up was lost; this shortcut's key-up must not be paired with
-            // that earlier press.
+            // A fresh press of a key still on the ledger means its key-up was lost; this shortcut's
+            // key-up must not be paired with that earlier press.
             if !event.isARepeat { forwardedKeyDowns.removeValue(forKey: event.keyCode) }
             super.keyDown(with: event)
             return
@@ -2115,36 +1145,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
-        // Stamp the keystroke entry point for the input→pixel latency probe.
-        // No-op unless BB_LATENCY_PROBE=1. Placed after the ⌘ / no-session
-        // early returns so only keystrokes that actually dispatch toward the
-        // PTY get measured. The single-slot design collapses bursts to the
-        // most recent keystroke, which is exactly what the user perceives.
         LatencyProbe.shared.markKeystroke()
 
-        // Any shell-bound keystroke also cancels an active selection.
         if selection != nil { selection = nil }
 
-        // Any non-⌘ keystroke represents user input headed for the shell, so
-        // snap the viewport back to the live grid first. Users reading
-        // scrollback get pulled back to the prompt the moment they type —
-        // matching Terminal.app and iTerm2. No-op when already at bottom.
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()
         }
 
-        // IME arbitration first; if the composition absorbed the keystroke
-        // (preedit visible or a grapheme committed via insertText) we're done.
-        // A key that belongs to a composition (pending going in or still
-        // pending) never reaches the TUI, so it owes no release; a plain
-        // printable committed through insertText is the key's own press and
-        // does.
+        // A key that belongs to a composition never reaches the TUI, so it owes no release.
         let wasComposing = hasMarkedText()
         let imeAbsorbed = routeKeyDownThroughIME(event)
-        // Only the press records: an auto-repeat is stamped with whatever
-        // modifiers are down NOW (Option lifted mid-hold), which would
-        // overwrite the ones the TUI was told. A repeat with no entry (the
-        // press was never seen here) still records, as the TUI is given it.
+        // Only the press records: an auto-repeat carries the modifiers down NOW, which would
+        // overwrite the ones the TUI was told.
         if !(wasComposing || hasMarkedText()),
            !event.isARepeat || forwardedKeyDowns[event.keyCode] == nil {
             forwardedKeyDowns[event.keyCode] = ForwardedKeyDown(
@@ -2157,47 +1170,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         if imeAbsorbed { return }
 
-        // Control-byte fast path (Ctrl+letter → raw 0x01-0x1A); returns true
-        // when it wrote the byte directly, false to fall through to the encoder.
         if sendControlFastPath(event, session: session) { return }
 
-        // Special-key / printable encoding + protocol framing.
         encodeAndSendKey(event)
     }
 
-    /// Hand the keystroke to macOS's input context FIRST. If the IME is mid-
-    /// composition (Japanese kana → kanji, Korean combining jamo, Option-E dead
-    /// key → ´) it calls back into our `NSTextInputClient` methods
-    /// (setMarkedText / insertText / unmarkText). Returns `true` when the
-    /// keystroke was ABSORBED — either still composing (`hasMarkedText()`) or a
-    /// grapheme committed during this event (`didInsertTextViaIME`, set by
-    /// `insertText`) — so `keyDown` must NOT also encode it (double-write).
-    /// A key that arrives while a composition is pending is the IME's even if it
-    /// ENDS that composition: Esc cancels it (`doCommand(cancelOperation:)`) and
-    /// Backspace can empty it (`setMarkedText("")` / `unmarkText`), none of which
-    /// raise `didInsertTextViaIME` or leave marked text behind, so the post-event
-    /// state alone would let the key through to the shell as ESC / DEL.
-    /// Returns `false` when the IME did nothing; the caller falls through to the
-    /// encoder.
-    ///
-    /// "Use Option as Meta" means an Option+key chord is a Meta keystroke (ESC +
-    /// base char), NOT dead-key / accent composition. Bypass the IME for that
-    /// chord so Option+e sends ESC 'e' instead of starting a "´" dead-key
-    /// preedit, and Option+a sends ESC 'a' instead of inserting "å" — otherwise
-    /// handleEvent's setMarkedText/insertText consumes the event and the
-    /// encoder's Meta path is never reached, breaking M-e/M-i/M-u/M-n and every
-    /// other Option+letter in Meta mode. Matches Terminal.app / iTerm2. A keypad
-    /// digit / operator under DECPAM, Ctrl+Return, Shift+Tab, Shift+keypad-Enter
-    /// and every Ctrl+Option chord skip the IME too (see the inline notes).
-    /// Other Ctrl chords and non-Option input (CJK/Korean IME) keep the normal
-    /// IME path.
+    /// Returns `true` when the IME absorbed the keystroke, so `keyDown` must NOT also encode it. A key
+    /// arriving mid-composition is the IME's even if it ENDS the composition (Esc, Backspace).
     private func routeKeyDownThroughIME(_ event: NSEvent) -> Bool {
         didInsertTextViaIME = false
-        // Every plain printable reaches the encoder through
-        // `insertText(_:replacementRange:)`, which AppKit calls with the
-        // resolved text and no modifier information. Stash this event's
-        // modifiers so that path can report Shift under kitty flags 4/8
-        // (`CSI 97:65;2u` for Shift+A, not `CSI 97u`); cleared again below.
+        // AppKit calls `insertText(_:replacementRange:)` with no modifier information; stash this
+        // event's so that path can report Shift under kitty flags 4/8.
         pendingInsertTextModifiers = KeyEncoder.Modifiers(event: event)
         pendingInsertTextIsRepeat = event.isARepeat
         keypadCommittedText[event.keyCode] = nil
@@ -2207,39 +1190,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             pendingInsertTextIsRepeat = false
             pendingInsertTextKeypadKeyCode = nil
         }
+        // With Option as Meta, an Option+key chord is ESC + base char, not dead-key composition.
         let optionMetaChord = KeyEventClassifier.isOptionMetaChord(
             optionIsMeta: encoder.optionIsMeta,
             modifierFlags: event.modifierFlags
         )
-        // Ctrl+Return arrives here via `ContextMenuKeyInterceptor`; it has
-        // nothing to compose, so keep the input context from absorbing it
-        // (an empty commit would drop the key, a non-empty one would skip the
-        // encoder's kitty framing). A live composition still owns the key.
+        // The chords below have nothing to compose, but the input context would commit them via
+        // `insertText` and bypass the encoder. A live composition still owns the key.
         let hadMarkedText = hasMarkedText()
         let isContextMenuChord = !hadMarkedText && KeyEventClassifier.isContextMenuKeyChord(
             keyCode: event.keyCode, modifierFlags: event.modifierFlags
         )
-        // Under DECPAM a keypad digit / operator must reach `encodeSpecial`
-        // (SS3 table, or the kitty form when the program pushed flag 1 / 8),
-        // but the input context would commit it as plain text. A live
-        // composition still owns the key (CJK IMEs pick candidates with the
-        // keypad digits).
+        // Under DECPAM a keypad digit / operator must reach `encodeSpecial`.
         let isApplicationKeypadKey = !hasMarkedText() && KeyEventClassifier.isApplicationKeypadKey(
             event, applicationKeypad: currentSnapshot?.termMode.contains(.appKeypad) ?? false
         )
-        // Shift+Tab has nothing to compose. With Option held (Native-Option
-        // mode) the input context commits its U+0019 through `insertText`,
-        // which would write a raw ^Y instead of letting the encoder send
-        // back-tab. A live composition still owns the key.
+        // With Option held the input context commits Shift+Tab's U+0019: a raw ^Y, not back-tab.
         let isBackTab = !hadMarkedText && KeyEventClassifier.isBackTab(
             keyCode: event.keyCode, chars: event.characters ?? ""
         )
-        // Shift+keypad-Enter and every Ctrl+Option chord (Return / Tab / Esc /
-        // Space / letters) have nothing to compose, yet the input context
-        // commits their raw control character via `insertText` with no
-        // modifiers: keypad Enter's U+0003 would reach the PTY as Ctrl+C, the
-        // rest with Ctrl / Meta dropped (M-C-k as C-k). Let the encoder frame
-        // them. A live composition still owns the key.
+        // The raw control character is committed with no modifiers: keypad Enter's U+0003 would
+        // reach the PTY as Ctrl+C, Ctrl+Option chords with Ctrl / Meta dropped.
         let isNonComposableChord = !hadMarkedText && KeyEventClassifier.isNonComposableControlChord(
             keyCode: event.keyCode, modifierFlags: event.modifierFlags
         )
@@ -2250,28 +1221,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return hadMarkedText || hasMarkedText() || didInsertTextViaIME
     }
 
-    /// Fast path for control characters: macOS translates Ctrl+letter into the
-    /// corresponding control byte (0x01-0x1A) in `event.characters`. Send that
-    /// byte directly to the PTY without round-tripping through the encoder —
-    /// the most reliable path for Ctrl+C (0x03), Ctrl+D (0x04), Ctrl+Z (0x1A).
-    /// Returns `true` iff it wrote the byte; `false` (incl. non-control events)
-    /// to fall through to the encoder.
-    ///
-    /// When a TUI enabled a protocol that expects CSI-u / CSI 27 framing for
-    /// Ctrl-combinations (kitty disambiguate / report-all-as-esc, or xterm
-    /// modifyOtherKeys), the four aliasing letters (Ctrl+i/m/[/h) and indeed all
-    /// Ctrl-combos must route through the encoder instead so they become
-    /// `CSI <cp>;5u` and stay distinguishable from Tab / Enter / Esc / Backspace
-    /// (F-S3-002). The Option clause: Ctrl+Option+letter in Meta mode is an
-    /// Emacs/readline M-C-* chord that must carry the ESC Meta prefix (the bare-
-    /// C0 fast path would drop it, degrading M-C-f to plain ^F).
+    /// With kitty disambiguate / report-all-as-esc or modifyOtherKeys active, every Ctrl combo goes
+    /// through the encoder so Ctrl+i/m/[/h stay distinguishable from Tab / Enter / Esc / Backspace.
     private func sendControlFastPath(_ event: NSEvent, session: TerminalSession) -> Bool {
         guard event.modifierFlags.contains(.control) else { return false }
-        // Ctrl+Return / Ctrl+keypad-Enter: the raw characters aren't an Enter
-        // byte (keypad Enter is ETX → SIGINT); the encoder decides instead.
+        // Keypad Enter's raw character is ETX (→ SIGINT); the encoder decides instead.
         if KeyEventClassifier.isEnterKey(keyCode: event.keyCode) { return false }
-        // Ctrl+Shift+Tab reports U+0019 (back-tab), which is not a ^Y press;
-        // the encoder maps it back to Tab so it never becomes a raw 0x19.
+        // Ctrl+Shift+Tab reports U+0019 (back-tab), which is not a ^Y press.
         if KeyEventClassifier.isBackTab(
             keyCode: event.keyCode, chars: event.characters ?? ""
         ) { return false }
@@ -2284,51 +1240,28 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let modifyOther = termModeForCtrl.contains(.modifyOtherKeys)
         if kittyActive || modifyOther
             || (encoder.optionIsMeta && event.modifierFlags.contains(.option)) {
-            // Route through the encoder (it picks the right protocol and
-            // handles Ctrl + C0-aliasing letters too).
+            // Encoder path. Ctrl+Option+letter in Meta mode must keep its ESC Meta prefix.
         } else if let chars = event.characters,
            let scalar = chars.unicodeScalars.first,
            scalar.value >= 1, scalar.value <= 0x1F {
-            // Synchronous write so there's no perceptible latency before the
-            // line discipline sees the byte. From here the kernel does exactly
-            // the right thing — without any kill() from us:
-            //
-            //   ISIG on  (shell prompt, `sleep 100`, cmatrix cbreak):
-            //     0x03 matches c_cc[VINTR] → echo `^C\n` (ECHOCTL) → SIGINT to
-            //     fg pgroup → shell/sleep handles, prints the new prompt on the
-            //     next line. Order is correct because the echo and the signal
-            //     come from the same code path inside the tty layer.
-            //
-            //   ISIG off (nvim, tmux, htop — apps in raw mode):
-            //     byte passes through to the app's stdin untouched.
-            //
-            // Getting VINTR/VSUSP/VEOF/VERASE right required passing nil termios
-            // to forkpty (see PTY.swift) so the kernel's TTYDEF_* defaults
-            // apply. Without that, c_cc was all-zeros and Ctrl+C was just data.
+            // The tty layer turns 0x03 into echo + SIGINT when ISIG is on; never kill() from here.
+            // Relies on forkpty getting nil termios (PTY.swift) so the kernel's c_cc defaults apply.
             session.sendImmediate(Data([UInt8(scalar.value)]))
             return true
         }
-        // Fast path didn't match — fall through to the encoder, which also
-        // handles Ctrl via controlByte().
         #if DEBUG
         Self.keyLogger.debug("keyDown: fast path didn't match, trying encoder")
         #endif
         return false
     }
 
-    /// Kitty flag 2: a key-down with `isARepeat` is event type 2, not a fresh
-    /// press. Gated on the mode here because the encoder drops every non-press
-    /// event unless `reportEventTypes` is set, which would silence ordinary
-    /// auto-repeat for every shell and TUI that never asked for it.
+    /// Kitty flag 2: a key-down with `isARepeat` is event type 2. Gated on the mode because the
+    /// encoder drops every non-press event unless `reportEventTypes` is set.
     static func keyDownEventType(isRepeat: Bool, mode: BBTermMode) -> KeyEncoder.EventType {
         isRepeat && mode.contains(.reportEventTypes) ? .repeat : .press
     }
 
-    /// Final keyDown stage: encode the event into PTY bytes and send. Special
-    /// keys (arrows / function / keypad) route through `encodeSpecial`; every
-    /// other printable through `encode(chars:)`. An empty encoding (F13–F24,
-    /// Mac system keys like brightness / media / eject) forwards to `super` so
-    /// AppKit's responder chain still sees the system key (audit M3).
+    /// An empty encoding (F13–F24, Mac system keys) forwards to `super` for the responder chain.
     private func encodeAndSendKey(_ event: NSEvent) {
         let mods = KeyEncoder.Modifiers(event: event)
         let termMode = currentSnapshot?.termMode ?? []
@@ -2342,10 +1275,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 modifiers: mods,
                 applicationCursorKeys: appCursor,
                 applicationKeypad: appKeypad,
-                // S3S-002: pass the full mode so a keypad key with DECPAM off
-                // can route its plain character through encode(chars:) and pick
-                // up Meta / Kitty / modifyOtherKeys framing instead of dropping
-                // the modifiers in the legacy fallback.
                 mode: termMode,
                 eventType: eventType
             )
@@ -2353,15 +1282,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
-        // NSTextInputClient now owns the dead-key + composition path. The
-        // previous `charactersIgnoringModifiers` / `characters` ternary for
-        // Native-Option dead keys (Option+E → ´) is dead code: the input
-        // context calls `setMarkedText("´")` before we ever reach this
-        // branch, and the follow-up keystroke commits through
-        // `insertText("é")`. `charactersIgnoringModifiers` is the right
-        // source here for every remaining non-special printable — Meta
-        // mode still wants the un-Option'd base letter so that Option+E
-        // encodes to ESC "e" rather than ESC "´".
+        // `charactersIgnoringModifiers`: Meta mode wants Option+E to encode ESC "e", not ESC "´".
         let chars = KeyEventClassifier.normalizedTabChars(
             keyCode: event.keyCode,
             chars: KeyEventClassifier.normalizedReturnChars(
@@ -2369,12 +1290,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
             )
         )
-        // A key with no SpecialKey mapping whose characters are wholly
-        // private-use is a function / editing / system key AppKit had no
-        // printable form for. `encoder.encode(chars:)` would fall through to
-        // its `Data(chars.utf8)` fallback and type the raw PUA bytes at the
-        // prompt. Suppress so the audit-M3 `super.keyDown` forward below runs
-        // and the responder chain still sees the event.
+        // Wholly private-use characters mean a function / system key with no printable form;
+        // `encoder.encode(chars:)` would type the raw PUA bytes at the prompt.
         guard !KeyEventClassifier.isPrivateUseOnly(chars) else {
             super.keyDown(with: event)
             return
@@ -2396,56 +1313,31 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             sendToSession(bytes)
             return
         }
-        // Audit M3. Encoder produced no bytes — typical for F13–F24
-        // and Mac system keys (brightness, media, eject) where
-        // `event.charactersIgnoringModifiers` is empty or a private-
-        // use scalar that doesn't map to a shell-meaningful sequence.
-        // Without the super-forward, AppKit's responder chain never
-        // sees the event: F15 brightness-up (and similar) is silently
-        // swallowed while Blackbird is key.
         super.keyDown(with: event)
     }
 
-    /// Key release. Only surfaces bytes when Kitty progressive-enhancement
-    /// flag 2 (`reportEventTypes`) is active — the encoder's release path
-    /// returns empty `Data` otherwise, and no shell binding depends on
-    /// post-keystroke traffic we synthesise ourselves. Audit key-encoder F1
-    /// (partial — flag 2 of the four progressive-enhancement flags).
+    /// Emits bytes only under Kitty progressive-enhancement flag 2 (`reportEventTypes`).
     public override func keyUp(with event: NSEvent) {
         let press = forwardedKeyDowns.removeValue(forKey: event.keyCode)
         let committedKeypadText = keypadCommittedText.removeValue(forKey: event.keyCode)
-        // `session != nil` rather than a binding: the release bytes go out
-        // through `sendToSession`, so nothing here needs the session itself —
-        // this is purely "is there anywhere to send".
         guard session != nil else {
             super.keyUp(with: event)
             return
         }
         let termMode = currentSnapshot?.termMode ?? []
-        // Fast path: if the TUI hasn't enabled release reporting the
-        // encoder will return empty anyway, so skip the whole work.
         guard termMode.contains(.reportEventTypes) else {
             super.keyUp(with: event)
             return
         }
-        // A release without a forwarded press is an app shortcut's key-up
-        // (⌘C, ⌘↑ with ⌘ lifted first, or a key-down the menu consumed before
-        // it reached the view). The TUI never saw the press, so it gets no
-        // release either. The key-up's own `.command` flag does not decide it:
-        // with a forwarded press on the ledger (⌘ went down while the key was
-        // held) the TUI is still owed its release; without one it isn't.
+        // A release without a forwarded press is an app shortcut's key-up: the TUI never saw the
+        // press, so it gets no release. The key-up's own `.command` flag does not decide it.
         guard let press else {
             super.keyUp(with: event)
             return
         }
-        // The PRESS's modifiers and characters, not this event's: with Option
-        // lifted before the letter the key-up reads as a plain release, but
-        // the TUI was told `CSI 97;3u` and pairs on `CSI 97;3:3u`; with Shift
-        // pressed after a `2` the key-up reads `@`, a different key code.
         let mods = press.modifiers
-        // A keypad key whose press the input context committed as layout text
-        // releases as that same text, like a main-row key (which re-encodes its
-        // own characters below). `encodeSpecial` would use the US table instead.
+        // A keypad key whose press the input context committed as layout text releases as that
+        // same text; `encodeSpecial` would use the US table instead.
         if let text = committedKeypadText {
             let bytes = encoder.encode(chars: text, modifiers: mods, mode: termMode, eventType: .release)
             if !bytes.isEmpty {
@@ -2456,13 +1348,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
         if let special = KeyEventClassifier.specialKey(for: event) {
-            // F-S3-005: arrows / nav / F-keys DO have flag-2 release events in
-            // the Kitty spec — `CSI <n> ; <mod>:3 <final>`. encodeSpecial emits
-            // that under reportEventTypes and returns empty otherwise (keypad
-            // keys release via `encode(chars:)`, empty for SS3 DECPAM and for
-            // plain-text presses; a press the IME committed as text was
-            // handled above), so the fallthrough is preserved for keys/modes
-            // that produce nothing.
+            // Kitty flag-2 release for arrows / nav / F-keys: `CSI <n> ; <mod>:3 <final>`.
             let appCursor = termMode.contains(.appCursor)
             let appKeypad = termMode.contains(.appKeypad)
             let bytes = encoder.encodeSpecial(
@@ -2494,35 +1380,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Keyboard-state teardown for a window that stops being key: drop an
-    /// in-flight IME composition (`discardCompositionOnResignKey`) and the
-    /// forwarded-press ledger (`forgetForwardedKeyDowns`). One body shared by
-    /// the `didResignKey` observer and `_testOnly_simulateWindowResignKey`, so
-    /// the test seam cannot drift from production.
     func discardKeyboardStateOnResignKey() {
         discardCompositionOnResignKey()
         forgetForwardedKeyDowns()
     }
 
-    /// Forget the presses the TUI was given. Called when focus leaves (first
-    /// responder or key window): the matching key-ups go to another app /
-    /// window, so an entry left behind would pair with an unrelated later
-    /// key-up of the same physical key (a ⌘ shortcut's, typically) and report
-    /// a release for a press the TUI never saw.
+    /// After focus leaves, key-ups go elsewhere; a leftover entry would pair with an unrelated later key-up.
     private func forgetForwardedKeyDowns() {
         forwardedKeyDowns.removeAll()
     }
 
-    /// Resolve a font from the preferences value. `name` can be either:
-    ///   - a family name like "Hack Nerd Font Mono" (what the Settings font
-    ///     picker stores — it iterates `availableFontFamilies`),
-    ///   - a PostScript name like "HackNerdFontMono-Regular" or
-    ///     "SFMono-Regular" (older stored values).
-    ///
-    /// NSFontManager.font(withFamily:traits:weight:size:) handles the family
-    /// case cleanly; NSFont(name:size:) handles the PS-name case. Fall back
-    /// to the system monospace font so a typo'd preferences value can't
-    /// leave the user with an unreadable terminal.
     private static func resolveFont(name: String, size: CGFloat) -> NSFont {
         let mgr = NSFontManager.shared
         // 5 is the regular weight in the NSFontManager scale (0…15).
@@ -2537,37 +1404,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func copy(_ sender: Any?) {
         guard let sel = selection, let session, let snap = currentSnapshot else { return }
-        // nil: the selection no longer names live cells (logged by the
-        // session); "": the highlighted cells are blank. Neither has text to
-        // put on the clipboard, which stays as it was.
         guard let raw = session.selectedText(sel, displayedIn: snap), !raw.isEmpty else { return }
-        // Cap + scrub before writing. A compromised remote can spam the
-        // scrollback with bidi-override + C0 payloads; if the user
-        // selects that span and copies, those bytes land on the system
-        // clipboard and poison every subsequent paste into Safari /
-        // Mail / Chat. 16 MiB covers every realistic "select the whole
-        // world" case. Same sanitizer as paste-inbound (symmetric).
+        // Cap + scrub: a hostile remote's bidi-override / C0 payloads must not reach the system clipboard.
         let copyMax = 16 * 1024 * 1024
-        // A Data slice is fine here: the sanitizers scan via withUnsafeBytes
-        // (slice-safe), so no zero-based re-copy of up to 16 MiB is needed.
+        // A Data slice is fine here: the sanitizers scan via withUnsafeBytes (slice-safe).
         let data = Data(raw.utf8).prefix(copyMax)
         let scrubbed = PasteSanitizer.stripBidiOverrides(
             PasteSanitizer.sanitizePasteControls(data)
         )
         var clean = String(decoding: scrubbed, as: UTF8.self)
-        // The byte cap can land inside a multi-byte scalar; `String(decoding:)`
-        // then ends the string with U+FFFD. Drop it rather than paste garbage.
+        // The byte cap can land inside a multi-byte scalar; `String(decoding:)` then ends with U+FFFD.
         if data.count == copyMax, clean.hasSuffix("\u{FFFD}") {
             clean.removeLast()
         }
         let pb = NSPasteboard.general
         if clean.isEmpty {
-            // Sanitization dropped everything — likely a user who selected
-            // a span that was entirely bidi-overrides / control bytes.
-            // Clear the pasteboard rather than leaving the previous copy
-            // stale; that's more honest UX than ⌘C appearing to succeed
-            // while keeping the last clipboard content intact. Audit
-            // terminal-view-2 F3.
             pb.clearContents()
             return
         }
@@ -2577,10 +1428,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public override func selectAll(_ sender: Any?) {
         guard let snap = currentSnapshot else { return }
-        // Match Terminal.app: ⌘A selects the full retained buffer —
-        // scrollback history through the bottom visible row. Buffer
-        // lines run from -historySize (oldest retained) through
-        // rows-1 (current live bottom). Audit terminal-view-2 F19.
+        // Buffer lines run from -historySize (oldest retained) through rows-1 (live bottom).
         let topLine    = -Int32(clamping: snap.historySize)
         let bottomLine = Int32(clamping: snap.rows - 1)
         let top = BufferPoint(line: topLine,    col: 0)
@@ -2588,23 +1436,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         selection = Selection(anchor: top, cursor: bot, mode: .character)
     }
 
-    /// Kept for system-originated `performFindPanelAction:` sends; the Edit >
-    /// Find > Find… item targets `showFindBar(_:)` instead.
+    /// Kept for system-originated `performFindPanelAction:` sends.
     @objc public func performFindPanelAction(_ sender: Any?) {
         showFindBar(sender)
     }
 
-    /// ⌘F (Edit → Find → Find…): open the bar and focus the query field with
-    /// its text selected, so a repeat ⌘F with focus already in the bar (or in
-    /// the replace field) re-selects the query like Safari / Terminal.app.
     @objc public func showFindBar(_ sender: Any?) {
         if findController.findBar == nil { findController.installFindBar() }
         findController.findBar?.focusAndSelectQuery()
     }
 
-    /// ⌘E (Edit → Find → Use Selection for Find): the standard macOS item.
-    /// Takes the selection's first line (a multi-row selection can't be a
-    /// substring query) and installs the bar if needed.
     @objc public func useSelectionForFind(_ sender: Any?) {
         guard let raw = selectedStringForServices(), !raw.isEmpty else {
             bellController.ring()
@@ -2621,10 +1462,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         findController.findBar?.focus()
     }
 
-    /// File → Export Scrollback… (⌘⇧S): the whole retained buffer as UTF-8
-    /// text, scrollback first. Goes through the same clipboard scrub as ⌘C
-    /// so a hostile remote's control / bidi bytes never land in a file
-    /// either.
     @objc public func exportScrollback(_ sender: Any?) {
         guard let session, currentSnapshot != nil, let window else {
             bellController.ring()
@@ -2636,11 +1473,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         panel.allowedContentTypes = [.plainText]
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, self != nil else { return }
-            // Ask for the whole buffer and let the core clamp to the live
-            // grid at Save time. Bounds taken from a menu-time snapshot go
-            // stale while the sheet is up: output that scrolls into history
-            // meanwhile moves the oldest line above the remembered start, so
-            // the head of the file was silently cut.
+            // Ask for the whole buffer and let the core clamp at Save time: bounds from a menu-time
+            // snapshot go stale while the sheet is up.
             let raw = session.textRange(
                 from: BufferPoint(line: .min, col: 0),
                 to:   BufferPoint(line: .max, col: .max),
@@ -2662,14 +1496,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     @objc public func performFindNextAction(_ sender: Any?)     { findController.advanceFind(direction: .forward) }
     @objc public func performFindPreviousAction(_ sender: Any?) { findController.advanceFind(direction: .backward) }
 
-    /// ⌘⌥C: toggle case-sensitive find. Installs the find bar if
-    /// needed so the menu item works even when the bar is closed.
     @objc public func toggleFindCaseSensitive(_ sender: Any?) {
         if findController.findBar == nil { findController.installFindBar() }
         findController.findBar?.toggleCaseSensitive(sender)
     }
 
-    /// ⌘⌥R: toggle regex find.
     @objc public func toggleFindRegex(_ sender: Any?) {
         if findController.findBar == nil { findController.installFindBar() }
         findController.findBar?.toggleRegexMode(sender)
@@ -2683,12 +1514,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func decreaseFontSize(_ sender: Any?) { adjustFontSizeOverride(by: -1) }
 
-    /// ⌘0 "Actual Size": drop this view's override and re-follow the global
-    /// default. No-op when already following it — deliberately does NOT
-    /// touch `Preferences.shared.fontSize` (the Settings slider owns the
-    /// default; issue #28 design review 2026-07-13).
-    ///
-    /// Rolls back on a failed apply — see `adjustFontSizeOverride(by:)`.
+    /// Drops this view's override; deliberately does NOT touch `Preferences.shared.fontSize`.
     @objc public func resetFontSize(_ sender: Any?) {
         guard let previous = fontSizeOverride else { return }
         fontSizeOverride = nil
@@ -2697,22 +1523,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Step the per-view size (issue #28: size gestures are scoped to this
-    /// tab/window; the global default is only ever set by the Settings
-    /// slider). Clamped to the shared envelope — inputs are finite by
-    /// construction (the pref is clamped by its didSet, the override by
-    /// this function). An at-bound step that changes nothing must NOT
-    /// materialize an override — otherwise ⌘+ at max would silently pin
-    /// the tab to the current global value.
-    ///
-    /// The override only commits when the apply succeeded. Unlike the
-    /// global path — where the Preferences sink retries a failed apply on
-    /// the next emission because the dedupe key wasn't stamped — nothing
-    /// re-fires for a per-view override (the sink's key tracks GLOBAL
-    /// values only), so a committed-but-unapplied override would leave
-    /// `fontSizeOverride` permanently disagreeing with the rendered
-    /// metrics. Rolling back keeps the two consistent; the user's next
-    /// keypress simply retries.
+    /// An at-bound step that changes nothing must NOT materialize an override.
     private func adjustFontSizeOverride(by delta: Double) {
         let target = min(
             Preferences.fontSizeRange.upperBound,
@@ -2721,54 +1532,30 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         guard target != effectiveFontSize else { return }
         let previous = fontSizeOverride
         fontSizeOverride = target
+        // Roll back on a failed apply: nothing re-fires for a per-view override, so it would
+        // permanently disagree with the rendered metrics.
         if !applyEffectiveFont() {
             fontSizeOverride = previous
         }
     }
 
-    /// True when the audible bell should be swallowed: set by the test
-    /// harness via `BB_SUPPRESS_BELL=1` (which `scripts/test.sh` passes as
-    /// `TEST_RUNNER_BB_SUPPRESS_BELL`) so an automated full-suite run doesn't
-    /// emit a stream of system beeps. Read once; production and Xcode Cmd-U
-    /// runs (env unset) ring normally.
-    /// AppKit rings NSBeep here for a key event that no responder handled.
-    /// Under the test harness, swallow it so key-input tests that drive
-    /// `keyDown(with:)` on an out-of-window view don't beep; real runs defer
-    /// to `super` for the normal feedback.
     public override func noResponder(for eventSelector: Selector) {
         guard !BellController.suppressed else { return }
         super.noResponder(for: eventSelector)
     }
 
-    /// Scroll the viewport up to the previous OSC 133 prompt mark. Hooked
-    /// to the "View → Previous Prompt" menu item (⌘⇧↑). No visible effect
-    /// unless the user has sourced the bundled shell-integration snippet,
-    /// because otherwise the session has no prompt marks recorded.
     @objc public func jumpToPreviousPrompt(_ sender: Any?) {
         if session?.jumpToPreviousPrompt() != true {
-            // Ring empty (no shell integration, or no commands yet) OR
-            // already at the oldest prompt. NSBeep is the standard macOS
-            // "no-op" feedback — quiet, doesn't steal focus. Audit
-            // terminal-view-2 F25. Via bellController.ring() so the test
-            // harness mutes it.
             bellController.ring()
         }
     }
 
-    /// Scroll the viewport down to the next (newer) OSC 133 prompt mark.
-    /// No-op when the user isn't already cycling through prompts — the
-    /// newest prompt is always live.
     @objc public func jumpToNextPrompt(_ sender: Any?) {
         if session?.jumpToNextPrompt() != true {
             bellController.ring()
         }
     }
 
-    /// Trackpad pinch-to-zoom → font-size step. Accumulate the continuous
-    /// magnification delta and trigger one step per threshold crossing.
-    /// 0.15 is the same threshold Safari / Xcode use for "gesture felt a
-    /// click worth"; finer values fire too aggressively on a single finger
-    /// slip, coarser miss small deliberate zooms.
     public override func magnify(with event: NSEvent) {
         wakeRenderLoop()
         pinchAccumulator += event.magnification
@@ -2782,46 +1569,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    // MARK: - ⌘-click URL resolution (OSC 8 first, regex fallback)
+    // MARK: - ⌘-click URL resolution
 
-    /// Resolve a click to a URL. OSC 8 attribution on the cell wins; only
-    /// when the cell has no OSC 8 href do we fall back to regex URL
-    /// detection (matching pre-Task-7 behaviour for tools that don't emit
-    /// OSC 8 hyperlinks). Returns nil when neither path produces a URL.
-    ///
-    /// `screenRow` is 0-based from the top of the visible viewport — OSC 8
-    /// attribution is stored keyed to screen cells, not buffer lines.
+    /// OSC 8 wins; regex is the fallback. `screenRow` is 0-based from the top of the visible viewport.
     func resolveClickURL(screenRow: Int, col: Int) -> URL? {
-        // Whatever the URL origin — OSC 8 attribution or regex detection —
-        // the final NSWorkspace.open surface is the same hostile one.
-        // Apply the allowlist on every exit path so a future loosening
-        // of the regex (e.g. to include `ssh://`) doesn't silently light
-        // up a new attack path. OSC8URLPolicy is intentionally named
-        // generically: it's the single URL-open policy for the app.
+        // The allowlist applies on every exit path, whatever the URL's origin.
         let allow: (URL?) -> URL? = { url in
             guard let url, OSC8URLPolicy.isAllowed(url) else { return nil }
             return url
         }
-        // OSC 8 anchor-divergence gate. The href and the visible text
-        // are decoupled in OSC 8 — a hostile remote can render
-        // `https://apple.com/login` while the click target is
-        // `https://evil.tld/login`. The hover tooltip shows the href
-        // (after the audit C1 scrub), but ⌘-click is single-action
-        // and never gives the dwell tooltip a chance to surface. Block
-        // the click when the rendered anchor claims a different host
-        // than the href. A legitimately-divergent link is NOT permanently
-        // unreachable: right-click offers a deliberate "Copy Link (host
-        // mismatch)" that copies the real href (see blockedDivergentOSC8Href
-        // + menu(for:)) — copy, not auto-open, so the user pastes into the
-        // browser and sees the real host. Regex-fallback URLs have no
-        // separate anchor (the URL IS the visible text), so the gate
-        // applies only to the OSC 8 path. Audit high-1.
+        // OSC 8 decouples the href from the visible text: block the click when the rendered anchor
+        // claims a different host than the href. Regex URLs have no separate anchor.
         let acceptOSC8: (HyperlinkResolver, URL) -> URL? = { resolver, url in
             guard let allowedURL = allow(url) else { return nil }
-            // P2-01: divergence detection runs unconditionally now that
-            // `osc8AnchorText` returns a non-optional String. An empty
-            // anchor short-circuits inside `anchorDivergesFromHost` (no
-            // URL-shaped match → not divergent).
             let anchor = resolver.osc8AnchorText(row: screenRow, col: col)
             if OSC8URLPolicy.anchorDivergesFromHost(
                 anchorText: anchor, url: allowedURL
@@ -2837,14 +1597,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             return allowedURL
         }
-        // OSC 8 attribution wins when present: either we accept it
-        // (allowed scheme + non-divergent anchor) or we block fully —
-        // we do NOT fall through to regex on a blocked OSC 8. Falling
-        // through would let a hostile remote whose href is divergent
-        // smuggle the user to the visible anchor URL via the regex
-        // fallback, which is a different shape of the same trust
-        // violation. Regex is consulted only when the cell carries no
-        // OSC 8 attribution at all.
+        // A blocked OSC 8 link does NOT fall through to regex: that would open the visible anchor
+        // URL instead. Regex is consulted only when the cell carries no OSC 8 attribution.
         #if DEBUG
         if let override = hyperlinkResolverOverride {
             if let raw = override.osc8URL(row: screenRow, col: col) {
@@ -2864,25 +1618,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return allow(resolver.regexURL(row: screenRow, col: col))
     }
 
-    /// The hover path's URL-match scan when it is current for `snap`, so the
-    /// click path reuses it instead of re-running the O(rows × cols) regex
-    /// sweep. `SnapshotHyperlinkResolver`'s own doc has always promised this;
-    /// no production call site actually passed the slice until now — which
-    /// mattered more once ⌘-mousedown began resolving on every ⌘-click,
-    /// including the ones that go on to become window drags.
     private func cachedRegexMatches(for snap: BBSnapshot) -> [URLMatch]? {
         guard hoverCoordinator.cachedURLMatchesSeq == snap.sequenceID else { return nil }
         return hoverCoordinator.cachedURLMatches
     }
 
-    /// The real OSC 8 href under a click ONLY when `resolveClickURL` is
-    /// blocking it because the visible anchor's host diverges from the href's
-    /// (the anti-phishing gate). Returns nil when there is no OSC 8 link, the
-    /// scheme isn't allowed, or the anchor does NOT diverge (in which case
-    /// `resolveClickURL` already returns the URL normally). Lets `menu(for:)`
-    /// offer a deliberate "Copy Link (host mismatch)" escape hatch so a
-    /// legitimately-divergent link that ⌘-click intentionally blocks isn't
-    /// permanently unreachable. Copy-only — never an auto-open path.
+    /// Non-nil only when `resolveClickURL` blocks the href for anchor/host divergence. Copy-only.
     func blockedDivergentOSC8Href(screenRow: Int, col: Int) -> URL? {
         let resolveDivergent: (HyperlinkResolver) -> URL? = { resolver in
             guard let raw = resolver.osc8URL(row: screenRow, col: col),
@@ -2903,51 +1644,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         ))
     }
 
-    // MARK: - NSAccessibility -------------------------------------------
+    // MARK: - NSAccessibility
 
-    /// Cached accessibility value keyed by snapshot identity. Building the
-    /// string walks the entire grid (rows × cols) and allocates a fresh
-    /// `String` per row, so VoiceOver's habit of polling `accessibilityValue`
-    /// many times per snapshot would otherwise turn into a per-frame tax on
-    /// the main thread. Identity-via-raw-pointer works because BBSnapshot
-    /// instances are immutable + ref-counted: equal address ⇒ equal content.
-    ///
-    /// Visibility: the struct and property are `internal` so the
-    /// extension file `TerminalView+Accessibility.swift` can read/write
-    /// them. Swift's `private` doesn't cross file boundaries even for
-    /// extensions on the same type.
     struct A11yCache {
         var snapshotIdentity: UnsafeRawPointer? = nil
         var value: String = ""
-        /// Number of times `accessibilityValue()` walked the grid. Used by
-        /// tests to assert the cache short-circuits repeat reads.
         var computations: Int = 0
-        /// Per-line UTF-16 code-unit offsets, computed lazily on first
-        /// `accessibilityRange(forLine:)` / `accessibilityLine(for:)` call.
-        /// Element `i` is the UTF-16 code-unit index of the FIRST character
-        /// of line `i` in `value`; the last element equals
-        /// `value.utf16.count` (NOT `value.count`, which is the grapheme-
-        /// cluster count and would diverge for any value containing emoji
-        /// or other multi-code-unit scalars). `nil` until first line-
-        /// related call after a snapshot swap.
-        ///
-        /// Why UTF-16 code units: NSAccessibility's `NSRange`-based API
-        /// is defined in terms of UTF-16 code units (matching NSTextView).
-        /// Using grapheme indices would silently mis-count whenever the
-        /// terminal renders an emoji.
-        ///
-        /// Why on the cache (not free): a VO line-by-line read traverses
-        /// every line in order, calling `accessibilityRange(forLine:)`
-        /// once per line. Recomputing the offsets per call would turn an
-        /// O(N) read into O(N²) for grids with hundreds of lines.
-        /// Invalidated alongside `value` on snapshot identity change.
+        /// UTF-16 code-unit offset of each line's first character in `value`; the last element is
+        /// `value.utf16.count`. NSAccessibility's `NSRange` API counts UTF-16 units, not graphemes.
         var lineOffsets: [Int]? = nil
 
-        /// Cache a freshly-computed `value` under `identity`, atomically
-        /// clearing the derived `lineOffsets` (keyed on `value`, so a stale
-        /// table would mis-map line ranges) and bumping the recompute counter
-        /// tests assert on. The ONE place value + identity + lineOffsets move
-        /// together — callers can't update one and forget the correlated others.
         mutating func store(value: String, identity: UnsafeRawPointer?) {
             self.value = value
             self.snapshotIdentity = identity
@@ -2955,10 +1661,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             self.computations += 1
         }
 
-        /// Invalidate so the next `accessibilityValue()` recomputes: drop the
-        /// `identity` (forces a cache miss) and the `value`-keyed `lineOffsets`.
-        /// The stale `value` is left in place — it's gated behind the now-nil
-        /// identity, so it can never be returned without a recompute first.
         mutating func invalidate() {
             self.snapshotIdentity = nil
             self.lineOffsets = nil
@@ -2967,15 +1669,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     var a11yCache = A11yCache()
 
-    /// True while exactly one `.valueChanged` post is queued (see
-    /// `scheduleAccessibilityValueChanged`). Main-thread only.
+    /// Main-thread only.
     var a11yValueChangedPending = false
 
     #if DEBUG
-    /// Headless constructor for tests. Uses the system Metal device so the
-    /// renderer's command-queue requirement is satisfied; tests never call
-    /// `draw(in:)` so no frames are rendered. Skips the test entirely on
-    /// hosts without a Metal device (CI runners sometimes don't have one).
     static func makeHeadlessForTests() -> TerminalView? {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
         return TerminalView(
@@ -2984,19 +1681,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
     }
 
-    /// Test mutator for `urlOpener`. Kept as a DEBUG property so production
-    /// code can't accidentally repoint it — the click path uses the
-    /// internal `urlOpener` directly.
     var urlOpenerForTests: URLOpener {
         get { urlOpener }
         set { urlOpener = newValue }
     }
 
-    /// Install a fake hyperlink resolver that answers both OSC 8 and regex
-    /// queries without needing a live `BBTerm`. `rows` is the visible grid
-    /// as strings (one per row) and `spans` describes every OSC 8 region.
-    /// Any cell inside a span resolves its `osc8URL`; everything else
-    /// falls through to regex detection against the row text.
     func installHyperlinkSnapshotForTests(
         rows: [String],
         linkAt spans: [(row: Int, cols: Range<Int>, url: String)]
@@ -3004,47 +1693,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         hyperlinkResolverOverride = FakeHyperlinkSnapshot(rows: rows, spans: spans)
     }
 
-    /// Exercise the production ⌘-click resolution against the current
-    /// snapshot (real or fake). Tests call this instead of synthesising
-    /// NSEvents so the mouse-reporting / option-modifier gating above
-    /// doesn't need a full windowed host.
     func performCmdClickForTests(row: Int, col: Int) {
         if let url = resolveClickURL(screenRow: row, col: col) {
             urlOpener.open(url)
         }
     }
 
-    /// Swap the encoder's Option-is-Meta setting without going through the
-    /// full `Preferences.shared` publisher chain. IME tests use this to pin
-    /// Native-Option mode before exercising dead-key composition.
     func setOptionIsMetaForTests(_ flag: Bool) {
         if encoder.optionIsMeta != flag {
             encoder = KeyEncoder(optionIsMeta: flag)
         }
     }
 
-    /// Pin the cursor row/col that the IME path reads for
-    /// `firstRect(forCharacterRange:…)`. Lets tests assert the candidate-
-    /// window anchor without feeding the Rust term a full grid of input.
     func installCursorForTests(row: Int, col: Int) {
         cursorOverrideForTests = (row: row, col: col)
     }
 
-    /// Read the effective frame-rate cap that the power-aware controller
-    /// has applied to this MTKView. Returns `0` when the view is paused
-    /// (occluded, or the policy chose `.paused`); otherwise the current
-    /// `preferredFramesPerSecond`. Used by `PowerAwareRenderingTests` to
-    /// assert the notification observers actually drive
-    /// `applyPowerAwareFrameRate()` — without this hook, the observer
-    /// plumbing is invisible from the test harness.
     var _testOnly_currentFrameRateCap: Int {
         return self.isPaused ? 0 : self.preferredFramesPerSecond
     }
 
-    /// Force-run the power-aware-rate recompute as if a notification had
-    /// fired. Tests use this to validate the `applyPowerAwareFrameRate`
-    /// path when they can't guarantee a notification observer fires
-    /// synchronously on the current RunLoop iteration.
     func _testOnly_applyPowerAwareFrameRate() {
         self.applyPowerAwareFrameRate()
     }
@@ -3076,8 +1744,6 @@ extension TerminalView: FindBarDelegate {
     }
 
     public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {
-        // Re-run the current query with the new options. Safe no-op
-        // when the query is empty (performSearch short-circuits).
         findController.performSearch(query: findController.findQuery)
     }
 
@@ -3088,12 +1754,8 @@ extension TerminalView: FindBarDelegate {
     public func findBarDidClose(_ bar: FindBar) {
         findController.findBar?.removeFromSuperview()
         findController.findBar = nil
-        // F10: wipe match state so ⌘G after close doesn't cycle stale
-        // coordinates against a mutated buffer or a new (yet-unissued) query.
         findController.reset()
-        // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
-        // match still copies. The selection is wiped by the next mouse click
-        // or shell-bound keystroke (see keyDown handler).
+        // `selection` is deliberately preserved so Esc-then-⌘C on a found match still copies.
         window?.makeFirstResponder(self)
     }
 
@@ -3104,8 +1766,6 @@ extension TerminalView: FindBarDelegate {
         }
     }
 
-    /// F3 TUI-guard. The find+replace engine (incl. the TUI-mode check) lives in
-    /// `FindController`; the FindBarDelegate conformance forwards here.
     public func findBarShouldAllowReplace(_ bar: FindBar) -> Bool {
         findController.shouldAllowReplace()
     }
@@ -3114,11 +1774,6 @@ extension TerminalView: FindBarDelegate {
 // MARK: - Replace responder action
 
 extension TerminalView {
-    /// Responder action for ⌘⌥E. Behaviour:
-    ///   - Bar hidden  → install the bar, expand the replace row, focus find field.
-    ///   - Bar visible, replace collapsed → expand the replace row.
-    ///   - Bar visible, replace already expanded → trigger replace-current on
-    ///     the active match (same effect as clicking the "Replace" button).
     @objc public func performReplaceCurrent(_ sender: Any?) {
         if findController.findBar == nil {
             findController.installFindBar()

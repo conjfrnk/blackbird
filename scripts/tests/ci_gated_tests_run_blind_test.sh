@@ -35,7 +35,7 @@
 # no-argument `scripts/test.sh` (documented as CI parity, ASan off) must
 # export TEST_RUNNER_BB_RUN_STRESS_TESTS=1.
 # Out of scope on purpose: BB_RUN_FLAKY_PTY_TESTS (real-shell rigs the CI
-# image cannot run), BB_RUN_LATENCY_PROBE, BB_RUN_STARTUP_BENCH.
+# image cannot run), BB_RUN_LATENCY_PROBE.
 #
 # How it observes that WITHOUT launching Xcode, the app, or the network:
 #   * The Swift test sources are scanned for the skip guards and mapped to

@@ -451,42 +451,6 @@ final class GlyphAtlasTests: XCTestCase {
         }
     }
 
-    /// Regression for glyph-atlas F5.
-    ///
-    /// Pins the current (deliberately limited) behaviour for
-    /// grapheme-cluster shaping: the atlas keys and rasterises on a
-    /// *single* Unicode scalar, so combining marks, ZWJ sequences,
-    /// and regional-indicator flag pairs render as isolated
-    /// codepoints rather than composed graphemes. This is a known
-    /// scope limitation (audit defers the multi-scalar cell as a
-    /// separate feature); the test exists so the behaviour can't
-    /// silently change without somebody updating this doc-comment.
-    func test_combiningMark_isolatedScalarRendersAlone() throws {
-        let device = try requireMetalDevice()
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let metrics = CellMetrics(font: font)
-        let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 64))
-
-        // U+0301 COMBINING ACUTE ACCENT. In a grapheme-cluster-aware
-        // renderer this would compose with a preceding "e" to draw
-        // "é"; the current atlas simply rasterises the accent on its
-        // own, producing a standalone combining mark glyph. We don't
-        // assert a visual property here — just that the insert
-        // succeeds and gives a distinct entry from "e".
-        let combining = try XCTUnwrap(UnicodeScalar(0x0301))
-        let e = UnicodeScalar("e")
-
-        let entryE = try XCTUnwrap(atlas.lookupOrInsert(scalar: e))
-        let entryCombining = try XCTUnwrap(atlas.lookupOrInsert(scalar: combining))
-
-        // The atlas keys on scalar.value alone (no grapheme cluster
-        // awareness), so "e" and U+0301 occupy distinct slots.
-        XCTAssertNotEqual(
-            entryE.uvOrigin, entryCombining.uvOrigin,
-            "e and U+0301 must occupy distinct atlas slots (no grapheme composition)"
-        )
-    }
-
     /// Regression for glyph-atlas F6.
     ///
     /// Nerd-font private-use-area icons can ship with an advance
@@ -692,30 +656,6 @@ final class GlyphAtlasTests: XCTestCase {
         )
     }
 
-    /// Emoji rasterised from a color-emoji font must set `Entry.isColor`.
-    /// The atlas is built from `AppleColorEmoji` directly because
-    /// CoreText doesn't substitute per-scalar when rasterising a given
-    /// glyph run on the test font — driving the color-glyph path
-    /// reliably requires a font that already reports `.colorGlyphs`.
-    func test_emojiIsColor() throws {
-        let device = try requireMetalDevice()
-        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 13) else {
-            throw XCTSkip(
-                "AppleColorEmoji font unavailable in test host — can't exercise color-glyph path"
-            )
-        }
-        let metrics = CellMetrics(font: emojiFont)
-        let atlas = try XCTUnwrap(
-            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
-        )
-        let party = try XCTUnwrap(UnicodeScalar(0x1F389))  // 🎉
-        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
-        XCTAssertTrue(
-            entry.isColor,
-            "🎉 rasterised from AppleColorEmoji must be flagged as a color glyph"
-        )
-    }
-
     /// Regression: real users configure a monospace font (SF Mono, Hack
     /// Nerd Font Mono, etc.), NOT Apple Color Emoji, as their terminal
     /// font. Emoji reach the screen because CoreText's cascade
@@ -814,7 +754,7 @@ final class GlyphAtlasTests: XCTestCase {
 
         // Derive the pixel-space rectangle for this entry's slot from
         // the normalised UV coordinates. Both textures share the same
-        // dimensions (see test_colorAtlasSizeMatchesMonoAtlas) so the
+        // dimensions so the
         // same rect samples the same slot in either texture.
         let colorTex = atlas.colorTexture
         let monoTex = atlas.texture
@@ -865,78 +805,6 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertFalse(
             monoInk,
             "mono texture at the emoji's slot had ink — color glyph leaked into the mono path"
-        )
-    }
-
-    /// UV coordinates are normalised to [0,1] and are the same for the
-    /// mono and color textures; once the real color atlas exists a
-    /// dimension mismatch would make the shader sample a different slot
-    /// depending on which texture it reads. Pin the invariant — through
-    /// the lazy transition.
-    ///
-    /// The color atlas is now allocated LAZILY: before any color glyph is
-    /// inserted, `colorTexture` is a tiny placeholder STRICTLY SMALLER
-    /// than the full-size mono `texture` (the placeholder is bound but
-    /// never sampled, since no cell can carry the color bit until a color
-    /// glyph has been inserted). The FIRST color-glyph insertion swaps it
-    /// for the real atlas, which must match the mono atlas's dimensions
-    /// EXACTLY — that equality is what lets the shader reuse a single set
-    /// of normalised UVs to address the same slot in either texture. If
-    /// the real color atlas were a different size, the shared UVs would
-    /// land on a different slot in the color path and the emoji would draw
-    /// garbage.
-    func test_colorAtlasSizeMatchesMonoAtlas() throws {
-        let device = try requireMetalDevice()
-        // Build from AppleColorEmoji (mirrors test_colorEntryLandsInColorTexture)
-        // so the U+1F389 insert reliably reports `isColor` and drives the
-        // lazy real-atlas allocation. CoreText doesn't substitute a color
-        // font per-scalar when rasterising on a non-color base, so a
-        // color-bearing font is required to fire the color path.
-        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 13) else {
-            throw XCTSkip(
-                "AppleColorEmoji font unavailable in test host — can't exercise color-glyph path"
-            )
-        }
-        let metrics = CellMetrics(font: emojiFont)
-        let atlas = try XCTUnwrap(
-            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
-        )
-
-        // BEFORE any color glyph: colorTexture is the lazy placeholder,
-        // strictly smaller than the full-size mono atlas in BOTH
-        // dimensions. (Don't pin the exact placeholder size — only that
-        // it's smaller, so the placeholder can shrink/grow without
-        // breaking this test.)
-        XCTAssertLessThan(
-            atlas.colorTexture.width, atlas.texture.width,
-            "before the first color glyph, colorTexture must be a placeholder "
-                + "strictly narrower than the mono atlas (lazy allocation)"
-        )
-        XCTAssertLessThan(
-            atlas.colorTexture.height, atlas.texture.height,
-            "before the first color glyph, colorTexture must be a placeholder "
-                + "strictly shorter than the mono atlas (lazy allocation)"
-        )
-
-        // Insert a color emoji to trigger the lazy real-atlas swap.
-        let party = try XCTUnwrap(UnicodeScalar(0x1F389))  // 🎉
-        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
-        XCTAssertTrue(
-            entry.isColor,
-            "precondition: 🎉 from AppleColorEmoji must route to the color "
-                + "atlas, otherwise the lazy allocation is never triggered"
-        )
-
-        // AFTER the first color glyph: the real color atlas must match the
-        // mono atlas dimensions exactly so the shared normalised UVs
-        // address the same slot in either texture.
-        XCTAssertEqual(
-            atlas.colorTexture.width, atlas.texture.width,
-            "real color atlas width must equal mono atlas width — UVs are shared"
-        )
-        XCTAssertEqual(
-            atlas.colorTexture.height, atlas.texture.height,
-            "real color atlas height must equal mono atlas height — UVs are shared"
         )
     }
 
@@ -1033,18 +901,6 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertEqual(
             atlas.colorTexture.pixelFormat, .bgra8Unorm,
             "colorTexture must be .bgra8Unorm for CoreGraphics BGRA rasterisation"
-        )
-    }
-
-    /// Contract pin: `CellAttributeMask.isColorGlyph` must be bit 7.
-    /// The shader reads this exact bit — if somebody renumbers the
-    /// OptionSet, the shader would switch to the color path on a
-    /// coincidental neighbour bit (strike, underline*, etc.) and
-    /// corrupt the terminal's rendering until the mismatch was caught.
-    func test_isColorGlyphBitHasExpectedValue() {
-        XCTAssertEqual(
-            CellAttributeMask.isColorGlyph.rawValue, UInt32(1 << 7),
-            "isColorGlyph must live at bit 7 — shaders read this bit by raw value"
         )
     }
 

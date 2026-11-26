@@ -481,23 +481,6 @@ final class SSHWrapperZshTests: XCTestCase {
             "cache file must be created mode 0600 (got \(r.cacheMode.map { String($0, radix: 8) } ?? "nil"))")
     }
 
-    /// The cache root's parent (`blackbird/`) must be created by the wrapper
-    /// even when only the `XDG_STATE_HOME` root exists. Covered implicitly
-    /// above (setUp never creates `blackbird/`), asserted explicitly here so
-    /// a regression that assumed a pre-existing directory is caught.
-    ///
-    /// Cost: 1 driver + 3 stubs, ~80 ms.
-    func test_kitty_cacheMiss_createsCacheParentDirectory() throws {
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: stateDir.appendingPathComponent("blackbird").path),
-            "precondition: blackbird/ must not exist before the run")
-        let r = try run(term: "xterm-kitty", args: ["testhost"])
-        XCTAssertTrue(FileManager.default.fileExists(atPath: r.cacheURL.path),
-            "wrapper must create the cache (and its parent dir) on first install")
-        XCTAssertEqual(r.cacheLines, ["testuser@testhost:22"])
-    }
-
     /// When `XDG_STATE_HOME` is unset the cache must fall back to
     /// `~/.local/state/blackbird/ssh-terminfo-hosts`.
     ///

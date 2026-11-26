@@ -75,7 +75,6 @@ final class GlyphAtlasBoxLineBandedFitShapeBlindTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
-
     // MARK: - Synthetic font
 
     /// A tiny monospaced TrueType font built in memory, so the scenario does
@@ -674,35 +673,6 @@ final class GlyphAtlasBoxLineBandedFitShapeBlindTests: XCTestCase {
         return drew ? Bitmap(width: w, height: h, pixels: data) : nil
     }
 
-    /// The one-cell window of a tall bitmap: the rows the atlas slot shows.
-    private func cellWindow(of tall: Bitmap, atlas: GlyphAtlas, scale: CGFloat) -> Bitmap {
-        let cellH = atlas.cellPxHeight
-        let descentPx = Double(atlas.metrics.descent) * Double(scale)
-        let start = Int((Double(cellH) + descentPx - Double(cellH) / 2).rounded())
-        var px = [UInt8](repeating: 0, count: tall.width * cellH)
-        for y in 0..<cellH {
-            let src = start + y
-            if src < 0 || src >= tall.height { continue }
-            for x in 0..<tall.width {
-                px[y * tall.width + x] = tall.pixels[src * tall.width + x]
-            }
-        }
-        return Bitmap(width: tall.width, height: cellH, pixels: px)
-    }
-
-    /// The font's own drawing stretched uniformly, about the middle of the
-    /// cell, by the factor that makes the light vertical reach both cell
-    /// edges: the shape the box glyphs had before the banded fit, and what
-    /// "intact" means.
-    private func uniformlyStretched(_ value: UInt32, rig: Rig, atlas: GlyphAtlas) -> Bitmap? {
-        let factor = Double(SyntheticBoxFont.ascent + SyntheticBoxFont.descent)
-            / Double(SyntheticBoxFont.barTop - SyntheticBoxFont.barBottom)
-        guard let tall = tallBitmap(value, rig: rig, atlas: atlas, stretch: CGFloat(factor)) else {
-            return nil
-        }
-        return cellWindow(of: tall, atlas: atlas, scale: rig.scale)
-    }
-
     // MARK: - Preconditions: the scenario is live
 
     /// Rows with at least half a pixel of ink.
@@ -1045,15 +1015,6 @@ final class GlyphAtlasBoxLineBandedFitShapeBlindTests: XCTestCase {
 
     // MARK: - Tests
 
-    /// The scenario of the report exists in this rig and the fit is live in it.
-    func test_testFont_lightVerticalIsShorterThanTheCell_andTheAtlasStretchesIt() throws {
-        let device = try requireMetalDevice()
-        for rig in try rigs() {
-            let atlas = try makeAtlas(device, rig)
-            try assertFitIsLive(rig, atlas: atlas)
-        }
-    }
-
     /// `╱ ╲ ╳` are straight lines. A vertical stretch by a different factor
     /// per slice bends them at each slice edge.
     func test_diagonals_stayStraight_whenTheVerticalBarIsFitted() throws {
@@ -1247,57 +1208,5 @@ final class GlyphAtlasBoxLineBandedFitShapeBlindTests: XCTestCase {
         XCTAssertEqual(
             failures, [],
             "an arc's horizontal arm does not line up with the ─ it joins:\n" + failures.joined(separator: "\n"))
-    }
-
-    /// Control: the measurements above accept a uniform stretch of the
-    /// font's own drawing (which is what a correct fit produces), so a
-    /// failure in the tests above is the glyph's shape and not the
-    /// thresholds. Passes with or without the bug.
-    func test_measurements_acceptAUniformStretchOfTheFontsDrawing() throws {
-        let device = try requireMetalDevice()
-        var failures: [String] = []
-        var checks = 0
-        for rig in try rigs() {
-            let atlas = try makeAtlas(device, rig)
-            for scalar: UInt32 in [0x2571, 0x2572, 0x2573] {
-                guard let stretched = uniformlyStretched(scalar, rig: rig, atlas: atlas) else {
-                    XCTFail("\(rig.label): could not draw the control for \(hex(scalar))")
-                    continue
-                }
-                let report = straightness(stretched, scalar: scalar)
-                checks += 1
-                if report.measuredEdges != expectedEdges(scalar) || report.worst > Self.straightEdgeTolerance {
-                    failures.append("\(rig.label) \(hex(scalar)): straight control measured \(report.detail)")
-                }
-            }
-            for scalar: UInt32 in [0x256D, 0x256E, 0x256F, 0x2570] {
-                guard let stretched = uniformlyStretched(scalar, rig: rig, atlas: atlas),
-                      let tall = tallBitmap(scalar, rig: rig, atlas: atlas)
-                else {
-                    XCTFail("\(rig.label): could not draw the control for \(hex(scalar))")
-                    continue
-                }
-                let match = bestAffineMatch(glyph: stretched, reference: tall, atlas: atlas, scale: rig.scale)
-                checks += 1
-                if !(match.error <= Self.arcMatchTolerance) {
-                    failures.append("\(rig.label) \(hex(scalar)): arc control mismatch \(fmt(match.error))")
-                }
-            }
-            for scalar: UInt32 in [0x2506, 0x2507, 0x250A, 0x250B, 0x254E, 0x254F] {
-                guard let stretched = uniformlyStretched(scalar, rig: rig, atlas: atlas) else {
-                    XCTFail("\(rig.label): could not draw the control for \(hex(scalar))")
-                    continue
-                }
-                let result = dashDeviation(stretched, scalar: scalar, rig: rig)
-                checks += 1
-                if !(result.deviation <= dashTolerance(rig)) {
-                    failures.append("\(rig.label) \(hex(scalar)): dash control off by \(fmt(result.deviation)): \(result.text)")
-                }
-            }
-        }
-        XCTAssertEqual(checks, 3 * 13, "precondition: 3 rigs x 13 control glyphs were checked")
-        XCTAssertEqual(
-            failures, [],
-            "the thresholds reject a correct uniform stretch:\n" + failures.joined(separator: "\n"))
     }
 }

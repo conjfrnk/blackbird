@@ -3,11 +3,6 @@ import Foundation
 import UserNotifications
 import os
 
-/// A program-originated notification (OSC 9 iTerm2 form, OSC 777
-/// `;notify;title;body`, kitty OSC 99) after the core scrubbed control
-/// characters and capped the lengths. The core never emits one with both
-/// halves empty; the view fills an empty title with the tab title before
-/// posting, so a presented notification always has a title.
 public struct TerminalNotification: Equatable {
     public let title: String
     public let body: String
@@ -17,60 +12,30 @@ public struct TerminalNotification: Equatable {
     }
 }
 
-/// When a bell or notification from a session should reach the user
-/// through means other than the tab's own surface. Pure; the view feeds
-/// it the live AppKit state.
 enum AttentionPolicy {
-    /// True unless the user is already looking at exactly this tab: the
-    /// app is active, its window is key, and the tab is the group's
-    /// selected one. Every peer terminal (iTerm2, kitty, Ghostty) applies
-    /// the same "not if you're already here" rule.
     static func needsAttention(appActive: Bool, windowKey: Bool, tabSelected: Bool) -> Bool {
         !(appActive && windowKey && tabSelected)
     }
 }
 
-/// Posts user notifications for OSC 9 / 777 / 99 that arrive while the
-/// user is elsewhere. `UNUserNotificationCenter` is only reachable from a
-/// real app bundle, so an xctest host (no bundle identifier of its own, or
-/// the XCTest environment marker) records the request instead of posting;
-/// tests read `posted`.
-///
-/// The presenter is the centre's delegate so that a notification posted
-/// while Blackbird is the ACTIVE app (another tab or window has the
-/// user's attention — the common "Claude Code finished in a background
-/// tab" case) still shows a banner: without `willPresent` macOS files a
-/// foreground app's notification silently into the list. Clicking a
-/// banner selects the originating tab.
+/// `UNUserNotificationCenter` is only reachable from a real app bundle; an xctest host records into `posted` instead.
+/// Must be the centre's delegate: without `willPresent`, macOS files a foreground app's notification silently into the list.
 final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationPresenter()
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "notifications")
 
-    /// Notifications this presenter was asked to post, newest last. Bounded
-    /// so a chatty program can't grow it without limit.
     private(set) var posted: [TerminalNotification] = []
     private static let postedCap = 64
 
-    /// Whether the system notification centre can be used from this
-    /// process. Evaluated once; the answer cannot change at run time.
     let isSystemCenterAvailable: Bool
 
-    /// Authorization is a three-state affair: unknown until asked (and again
-    /// after a request that left macOS undecided), pending while the
-    /// permission prompt is up (or a post re-reads the status after a
-    /// denial), then granted or denied. Posting during `pending` used to
-    /// call `add` unauthorized and lose the notification; posting after
-    /// `denied` kept calling `add` and logging.
+    /// `pending` while the permission prompt is up or a post re-reads the status after a denial.
     enum AuthState: Equatable { case unknown, pending, granted, denied }
     private(set) var authState: AuthState = .unknown
-    /// Notifications that arrived while the prompt was up; delivered on
-    /// grant, dropped on denial. Bounded like `posted`.
     private var queuedWhilePending: [(TerminalNotification, Int?)] = []
     private static let queueCap = 16
 
-    /// `userInfo` key carrying the originating window number so a click
-    /// on the banner can select that tab.
     static let windowNumberKey = "bb.windowNumber"
 
     init(systemCenterAvailable: Bool? = nil) {
@@ -89,9 +54,6 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// Post (or record) a notification. Main thread. `windowNumber` is the
-    /// originating tab's `NSWindow.windowNumber`, selected when the banner
-    /// is clicked.
     func post(_ notification: TerminalNotification, windowNumber: Int? = nil) {
         dispatchPrecondition(condition: .onQueue(.main))
         posted.append(notification)
@@ -103,11 +65,8 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         case .granted:
             deliver(notification, windowNumber: windowNumber)
         case .denied:
-            // The permission is macOS's, and the denial log line tells the
-            // user to flip it in System Settings while we keep running, so
-            // a cached denial must not outlive the setting. Re-read the live
-            // status before dropping; `.pending` makes posts racing the
-            // async reply queue behind this one instead of issuing more reads.
+            // The user can flip the permission in System Settings while we run, so re-read the live
+            // status before dropping. `.pending` queues posts racing the async reply behind this one.
             authState = .pending
             queuedWhilePending = [(notification, windowNumber)]
             UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
@@ -118,11 +77,9 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                     case .authorized, .provisional, .ephemeral:
                         self.settlePending(.granted)
                     case .notDetermined:
-                        // Not a denial: macOS holds no decision (the user reset
-                        // the permission), so ask again with the queued post.
+                        // macOS holds no decision (the user reset the permission), so ask again.
                         self.requestAuthorization()
                     default:
-                        // Still off: drop silently, the denial was logged once.
                         self.settlePending(.denied)
                     }
                 }
@@ -139,8 +96,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// Puts the permission prompt in front of the user. Main thread, in
-    /// `.pending` with the triggering notification queued.
+    /// Main thread, in `.pending` with the triggering notification queued.
     private func requestAuthorization() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
             DispatchQueue.main.async {
@@ -152,10 +108,8 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                 if granted {
                     self.settlePending(.granted)
                 } else if error != nil {
-                    // A failed request records no decision with macOS, so
-                    // latching a denial would mute notifications until
-                    // relaunch over something the user never said. Back to
-                    // `.unknown`: the next post asks again.
+                    // A failed request records no decision with macOS; latching a denial
+                    // would mute notifications until relaunch.
                     self.settlePending(.unknown)
                     Self.logger.log("notification authorization request failed; \(dropped, privacy: .public) queued program notification(s) dropped, the next one asks again")
                 } else {
@@ -166,8 +120,6 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// Ends `.pending` in `state`: the queued notifications are delivered on
-    /// a grant and dropped otherwise.
     private func settlePending(_ state: AuthState) {
         let queued = queuedWhilePending
         queuedWhilePending = []
@@ -198,9 +150,6 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: - UNUserNotificationCenterDelegate
 
-    /// Show the banner even while Blackbird is the active app: the policy
-    /// that decided to post already knows the user is on another tab or
-    /// window.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
@@ -209,7 +158,6 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         completionHandler([.banner, .list, .sound])
     }
 
-    /// A click on the banner selects the originating tab.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,

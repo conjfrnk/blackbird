@@ -1,9 +1,5 @@
-//! The parallel OSC tap: a second, stateful `vte::Perform` (`OscScanner`)
-//! driven alongside alacritty's own parser to handle the sequences alacritty
-//! 0.26 leaves unhandled — OSC 7 (cwd), OSC 133 (prompt marks), and Kitty's
-//! XTGETTCAP capability protocol. Kept strictly separate from the grid-
-//! mutation path (Part I §8). Moved out of the monolith verbatim
-//! (REFACTOR.md Wave 1); behavior unchanged.
+//! The parallel OSC tap: a second `vte::Perform` driven alongside alacritty's own parser for the
+//! sequences alacritty leaves unhandled (OSC 7, OSC 133, notifications, XTGETTCAP).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -21,16 +17,8 @@ use crate::scrub::{
 };
 use crate::BBPromptMarkKind;
 
-/// Build an [`OscScanner`] borrowing the scanner-relevant `BBTerm` fields.
-///
-/// A macro rather than a `fn osc_scanner(&mut self)` method on purpose: the
-/// scanner borrows `cell` shared and nine other fields mutably, while the
-/// caller still needs a *disjoint* `&mut bb.osc_parser` to drive it
-/// (`bb.osc_parser.advance(&mut scanner, …)`). A `&mut self` method would lock
-/// the whole `BBTerm` and the parser borrow would conflict; a macro expands
-/// inline so the borrow checker sees the per-field split. Kills the verbatim
-/// 14-field constructor that was copy-pasted at both `process_input` sites
-/// (REFACTOR.md Part IV).
+/// A macro rather than a `&mut self` method: the caller needs a disjoint `&mut bb.osc_parser`
+/// to drive the scanner, and a method would lock the whole `BBTerm`.
 macro_rules! osc_scanner {
     ($bb:expr) => {
         $crate::osc::OscScanner {
@@ -49,109 +37,43 @@ macro_rules! osc_scanner {
 }
 pub(crate) use osc_scanner;
 
-// ---------------------------------------------------------------------------
-// OscScanner — parallel vte::Parser tap for OSC sequences we handle outside
-// of alacritty: OSC 7 (cwd) and OSC 133 (prompt marks).
-// ---------------------------------------------------------------------------
-
-/// Minimal `vte::Perform` impl that fires on OSC 7, OSC 133, and
-/// XTGETTCAP (DCS `+ q` ... ST) payloads.
-///
-/// `alacritty_terminal` 0.26 / `vte` 0.15 do not handle these themselves —
-/// they fall through vte's `osc_dispatch` to the unhandled branch. Rather
-/// than wrap alacritty's `Handler` (which has a ~90-method surface we'd
-/// have to forward perfectly), we run a second, stateful `vte::Parser`
-/// owned by `BBTerm` and driven from `bb_term_input` with the same byte
-/// stream. That parser drives this scanner, which dispatches by the first
-/// OSC param and no-ops every other Perform method — except `hook`/`put`/
-/// `unhook`, which implement Kitty's XTGETTCAP capability query protocol.
-///
-/// Consolidated from two separate parsers (one per OSC number) into one —
-/// the earlier split cost ~15% of throughput because every byte was run
-/// through three parsers total (alacritty's main + two parallels). One
-/// scanner with an inexpensive first-param check is strictly cheaper.
-///
-/// XTGETTCAP state lives on `BBTerm` rather than this scanner because DCS
-/// sequences can fragment across multiple `bb_term_input` calls; the
-/// scanner is re-created per call and borrows the state via `&mut`.
 pub(crate) struct OscScanner<'a> {
     pub(crate) cell: &'a CallbackCell,
-    /// The grid, read only to stamp an OSC 133;A mark with where the cursor is
-    /// when the mark is parsed. `process_input` advances the tap over exactly
-    /// the bytes that precede a `133;A`, so the grid is in step with it there
-    /// UNLESS a DEC 2026 synchronized update is open (`sync_pending`): then
-    /// the grid parser is only buffering, and the cursor is where it was
-    /// before the update began.
+    /// Read only to stamp an OSC 133;A mark; in step with the tap unless `sync_pending`.
     pub(crate) term: &'a Term<RoutingListener>,
-    /// A DEC 2026 synchronized update is open as this scanner is built, so the
-    /// grid has NOT consumed the bytes the tap is about to see. A prompt mark
-    /// parsed now cannot be stamped from `term`; it is held on
-    /// `tap.held_prompt_marks` until the update closes
-    /// (`release_held_prompt_marks`).
+    /// A DEC 2026 synchronized update is open, so the grid has NOT consumed the bytes the tap
+    /// is about to see; prompt marks are held on `tap.held_prompt_marks` until it closes.
     pub(crate) sync_pending: bool,
-    /// DCS / OSC 99 / `modifyOtherKeys` state that must persist across
-    /// `bb_term_input` calls (the scanner is rebuilt per call).
     pub(crate) tap: &'a mut OscTapState,
-    /// Per-instance one-shot reject-log latches.
     pub(crate) latches: &'a mut OscLatches,
-    /// Sliding-window state for OSC 133 A/B/C rate limiting (audit
-    /// synthesis #10 — prompt-mark forgery DoS / phishing). Persisted
-    /// on `BBTerm` and threaded in via `&mut` because the scanner is
-    /// rebuilt per `bb_term_input` call.
     pub(crate) prompt_mark_rate: &'a mut EventRateState,
-    /// Sliding-window state for OSC 7 (CWD) ingest rate limiting (audit
-    /// M-7 — `classifyForegroundNamespace()` proc_listpids amplification).
-    /// Same threading reason as `prompt_mark_rate`.
     pub(crate) osc7_rate: &'a mut EventRateState,
-    /// `gethostname(3)` as of `bb_term_new`, i.e. what the shell spawned
-    /// right after it captured for `$hostname` / `$HOST` / `$HOSTNAME`.
-    /// OSC 7 accepts it alongside the current name; see `local_hostname`.
+    /// `gethostname(3)` as of `bb_term_new`; see `local_hostname`.
     pub(crate) startup_hostname: &'a [u8],
-    /// Budget for OSC 7's live `gethostname(3)` read; see `BBTerm`.
     pub(crate) osc7_hostname_rate: &'a mut EventRateState,
-    /// App version string for XTVERSION replies (`bb_term_set_terminal_version`).
     pub(crate) terminal_version: &'a str,
 }
 
-/// Parser state the OSC tap carries across `bb_term_input` calls, owned by
-/// `BBTerm` and borrowed by each per-call `OscScanner`.
+/// Carried across `bb_term_input` calls: a DCS can fragment across PTY reads.
 #[derive(Debug)]
 pub(crate) struct OscTapState {
-    /// XTGETTCAP (Kitty capability query) parser state. `in_xtgettcap`
-    /// latches true between `hook` (header `DCS + q` seen) and `unhook`
-    /// (ST terminator seen); `xtgettcap_buf` accumulates the payload
-    /// bytes. Persists across `bb_term_input` calls so a DCS fragmented
-    /// across PTY reads resolves to a single reply. See `OscScanner`'s
-    /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
     pub(crate) in_xtgettcap: bool,
     pub(crate) xtgettcap_buf: Vec<u8>,
-    /// DECRQSS (`DCS $ q <Pt> ST`) parser state, same shape as XTGETTCAP.
     pub(crate) in_decrqss: bool,
     pub(crate) decrqss_buf: Vec<u8>,
     /// In-flight kitty OSC 99 (`d=0` chunks) awaiting its final chunk.
     pub(crate) osc99_pending: Option<Osc99Pending>,
-    /// xterm `modifyOtherKeys` level. `0` = off, `1` = level 1
-    /// (encode colliders + "unmapped" Ctrl combos), `2` = level 2
-    /// (encode every modified printable, overriding legacy byte
-    /// mappings). `csi_dispatch` updates this when it sees
-    /// `CSI > 4 ; N m`. Swift-side KeyEncoder reads this indirectly via
-    /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level -> bit set).
+    /// xterm `modifyOtherKeys` level (0 = off, 1, 2), set by `CSI > 4 ; N m`.
     pub(crate) modify_other_keys: u8,
-    /// OSC 133 marks parsed while a DEC 2026 synchronized update was open,
-    /// oldest first, awaiting the replay that moves the grid to where the
-    /// stream is. Every kind is held (not just A) so A/B/C/D reach the host in
-    /// the order they were parsed. Bounded by the mark rate cap and by the
-    /// 2 MiB sync buffer, since every held mark's bytes sit inside it.
+    /// OSC 133 marks parsed while a DEC 2026 synchronized update was open, oldest first.
+    /// Every kind is held (not just A) so A/B/C/D reach the host in the order they were parsed.
     pub(crate) held_prompt_marks: Vec<HeldPromptMark>,
 }
 
-/// An OSC 133 mark that passed the scanner's checks but was parsed while the
-/// grid lagged the stream (a DEC 2026 synchronized update was open).
 #[derive(Debug)]
 pub(crate) struct HeldPromptMark {
     /// `BBPromptMarkKind` as `u8` (A/B/C/D = 1..=4).
     pub(crate) kind: u8,
-    /// Exit code (D) or shell-supplied metadata (A/B/C), already validated.
     pub(crate) payload: Vec<u8>,
 }
 
@@ -170,9 +92,6 @@ impl Default for OscTapState {
 }
 
 impl OscTapState {
-    /// Back to the freshly-constructed state, keeping the buffers'
-    /// capacity. Used by `bb_term_clear_all` (a mid-DCS XTGETTCAP must not
-    /// accumulate post-clear bytes into its reply).
     pub(crate) fn reset(&mut self) {
         self.in_xtgettcap = false;
         self.xtgettcap_buf.clear();
@@ -184,47 +103,20 @@ impl OscTapState {
     }
 }
 
-/// One-shot log latches for the scanner's reject paths. Per-instance rather
-/// than process-wide so every session leaves its own breadcrumb, and one-shot
-/// so a hostile flood cannot drown the log. Deliberately NOT reset by
-/// `bb_term_clear_all`: a reject class that already logged stays quiet across
-/// ⌘K. (The snapshot-side OSC 8 latches live on `BBTerm`; they are not the
-/// scanner's business.)
+/// One-shot reject-log latches, per instance. Deliberately NOT reset by `bb_term_clear_all`.
 #[derive(Debug, Default)]
 pub(crate) struct OscLatches {
-    /// OSC 7 reject-log latches, one bool per `OSC7_REJECT_*` class
-    /// index. Audit L3: pre-fix these were a process-wide
-    /// `static [Once; 8]`, so the first BBTerm in the process to hit
-    /// each rejection class consumed the latch and sibling tabs (or
-    /// reborn shells in the same tab) silently dropped the same
-    /// reject. Per-instance flags restore one-shot-per-session log
-    /// semantics without re-introducing log flood.
     pub(crate) osc7_reject: [bool; 9],
-    /// OSC 133 D non-digit / over-long reject path (audit L1 + reviewer
-    /// follow-up). Same per-instance / one-shot rule as `osc7_reject`
-    /// but only one class so a single bool suffices.
     pub(crate) osc133_d_nondigit: bool,
-    /// OSC 133 A/B/C tainted-payload reject path (audit S3R-001/S3R-002 +
-    /// silent-failure review). Same rule as `osc133_d_nondigit`, so a
-    /// hostile flood can't drown the log while still leaving one
-    /// breadcrumb when prompt marks are dropped.
     pub(crate) osc133_abc_tainted: bool,
-    /// OSC 133 rate-cap drop path (audit S5-009). Dropped marks are
-    /// user-visible (missing ⌘-navigation entries, lost exit codes), so
-    /// the first drop per session must leave a breadcrumb; per-drop
-    /// logging would amplify the flood the cap defends against.
     pub(crate) osc133_rate_limited: bool,
 }
 
-/// One-shot latch: returns `true` exactly once per flag (the first call),
-/// `false` afterwards. Callers keep their own `breadcrumb!` so the message is
-/// only formatted on the first hit.
 #[inline]
 pub(crate) fn once(flag: &mut bool) -> bool {
     !std::mem::replace(flag, true)
 }
 
-/// Accumulator for a chunked kitty OSC 99 notification.
 #[derive(Debug, Default)]
 pub(crate) struct Osc99Pending {
     pub(crate) id: Vec<u8>,
@@ -232,49 +124,19 @@ pub(crate) struct Osc99Pending {
     pub(crate) body: Vec<u8>,
 }
 
-/// Per-field (title, body) byte cap on a pending chunked OSC 99. The
-/// emitted notification is cut to 128/1024 chars anyway, so 64 KiB is
-/// invisible to real senders; without it a stream of same-id `d=0`
-/// chunks grows the accumulator without bound (the vte 8 MiB cap is per
-/// sequence, not per sum). Bytes past the cap are silently dropped.
+/// Per-field byte cap: the vte 8 MiB cap is per sequence, not per sum of same-id `d=0` chunks.
 const OSC99_PENDING_FIELD_MAX_BYTES: usize = 64 * 1024;
 
-/// Append `src` to `dst`, never letting `dst` exceed
-/// [`OSC99_PENDING_FIELD_MAX_BYTES`]. A cut inside a UTF-8 scalar is
-/// harmless: `notification_field` decodes lossily.
+/// A cut inside a UTF-8 scalar is harmless: `notification_field` decodes lossily.
 fn append_capped(dst: &mut Vec<u8>, src: &[u8]) {
     let room = OSC99_PENDING_FIELD_MAX_BYTES.saturating_sub(dst.len());
     dst.extend_from_slice(&src[..src.len().min(room)]);
 }
 
-/// Maximum byte length of a single OSC 7 URL accepted for percent-decode
-/// (audit L-20, 2026-04-29). OSC 8's `OSC8_URI_MAX` is 4096 by the same
-/// reasoning: a legitimate `file://` URL for a cwd is at most a few
-/// hundred bytes; oversized payloads are either malicious spam or a
-/// bug, and the unbounded `Vec::with_capacity(bytes.len())` inside
-/// `percent_decode` would otherwise let a remote allocate megabytes per
-/// OSC 7 chunk.
 pub(crate) const OSC7_URL_MAX: usize = 4096;
 
 impl Perform for OscScanner<'_> {
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        // Dispatch by OSC number. The first param is always the
-        // semicolon-separated numeric prefix (e.g. `7`, `133`).
-        //
-        // We deliberately handle only the OSC numbers that need a
-        // Blackbird-side hook: 7 (CWD reporting) and 133 (semantic prompt
-        // marks). All other OSC numbers fall through to alacritty's main
-        // `Processor` driving `bb.term`. Alacritty handles 0/1/2 (window
-        // titles), 4 (palette set), 8 (hyperlinks via the cell hyperlink
-        // path), 10/11/12 + 104/110/111/112 (default fg/bg/cursor color
-        // get/reset, surfaced via our color-query hook), 50 (cursor),
-        // 52 (clipboard — pinned `Disabled`), 110/111/112 (color resets),
-        // and a few it explicitly ignores.
-        //
-        // Anything not matched here AND not handled by alacritty (OSC 6
-        // working-file, OSC 1337 iTerm2 extensions, etc.) is silently
-        // dropped at both layers. If you add a new Blackbird-owned OSC
-        // hook, list it here so this catch-all stays auditable.
         match params.first().copied() {
             Some(b"7") => self.handle_osc7(params),
             Some(b"133") => self.handle_osc133(params),
@@ -283,15 +145,11 @@ impl Perform for OscScanner<'_> {
             Some(b"99") => self.handle_osc99(params),
             _ => {}
         }
-        // bell_terminated is irrelevant to downstream semantics; included
-        // here only to satisfy the Perform signature.
         let _ = bell_terminated;
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         // XTVERSION: `CSI > q` / `CSI > 0 q` → `DCS > | Blackbird <ver> ST`.
-        // tmux 3.4+ and nvim 0.10+ send it to identify the terminal; with
-        // no reply they timed out and recorded "unknown".
         if action == 'q' && intermediates == [b'>'] {
             let first = params
                 .iter()
@@ -318,12 +176,8 @@ impl Perform for OscScanner<'_> {
             }
             return;
         }
-        // xterm `modifyOtherKeys`: `CSI > 4 ; N m`. `>` is the only
-        // intermediate; first param == 4; second param == 0 (off), 1
-        // (level 1), or 2 (level 2). We also accept `CSI > 4 m` (no
-        // second param) as the reset form, matching xterm's manpage.
-        // alacritty_terminal 0.26.0 does not handle this sequence —
-        // we own the entire parse path for it.
+        // xterm `modifyOtherKeys`: `CSI > 4 ; N m`, N = 0 (off), 1 or 2; `CSI > 4 m` is the
+        // reset form. alacritty_terminal does not handle this sequence.
         if action == 'm' && intermediates == [b'>'] {
             let mut it = params.iter();
             let first = it.next().and_then(|p| p.first().copied());
@@ -332,7 +186,7 @@ impl Perform for OscScanner<'_> {
                 let clamped: u8 = match level {
                     0 => 0,
                     1 | 2 => level as u8,
-                    _ => return, // unknown level — ignore, don't poison state
+                    _ => return,
                 };
                 self.tap.modify_other_keys = clamped;
             }
@@ -340,27 +194,8 @@ impl Perform for OscScanner<'_> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        // RIS (`ESC c`): full terminal reset. The main alacritty
-        // `Processor` driving `bb.term` resets its `TermMode` to
-        // defaults on this same byte (via `Term::reset_state`),
-        // clearing the Kitty-keyboard / app-cursor / bracketed-paste
-        // bits. `modify_other_keys` is Blackbird-side sidecar state
-        // that alacritty never sees (we own the entire `CSI > 4 ; N m`
-        // parse — see `csi_dispatch` above), so without mirroring the
-        // reset here it stays latched across RIS:
-        // `extract_mode_with_extras` keeps OR-ing in MODIFY_OTHER_KEYS
-        // and Swift's KeyEncoder keeps emitting `CSI 27 ; <mod> ; <cp>
-        // ~` for modified keys to a shell that just reset itself and no
-        // longer understands the encoding. Clear it so the reported
-        // mode tracks the reset, matching xterm semantics (the bit doc
-        // at the top of this file states RIS clears modifyOtherKeys).
-        //
-        // RIS only — deliberately NOT DECSTR (`CSI ! p`): this
-        // alacritty/vte version has no DECSTR handler, so a soft reset
-        // leaves alacritty's own modes untouched. Clearing
-        // modify_other_keys on DECSTR while Kitty / app-cursor /
-        // bracketed-paste stay set would introduce the opposite
-        // desync. Mirror alacritty exactly.
+        // RIS (`ESC c`) resets alacritty's modes; mirror it for this sidecar state. Not DECSTR
+        // (`CSI ! p`): alacritty has no handler for it, so clearing there would desync.
         if byte == b'c' && intermediates.is_empty() {
             self.tap.modify_other_keys = 0;
         }
@@ -371,7 +206,7 @@ impl Perform for OscScanner<'_> {
             self.tap.in_xtgettcap = true;
             self.tap.xtgettcap_buf.clear();
         } else if intermediates == b"$" && action == 'q' {
-            // DECRQSS: `DCS $ q <Pt> ST`. vim probes `$qm` (SGR) at startup.
+            // DECRQSS: `DCS $ q <Pt> ST`.
             self.tap.in_decrqss = true;
             self.tap.decrqss_buf.clear();
         }
@@ -389,12 +224,8 @@ impl Perform for OscScanner<'_> {
         if self.tap.in_decrqss {
             self.tap.in_decrqss = false;
             let buf = std::mem::take(&mut self.tap.decrqss_buf);
-            // Valid (`1$r`) only for the requests whose current value the
-            // tap can state without reaching into the grid: SGR reports the
-            // reset state (what every other terminal answers), cursor style
-            // reports the default block. Everything else is `0$r`, the
-            // spec's "invalid request", which vim/tmux treat as "not
-            // supported" instead of waiting for a timeout.
+            // Valid (`1$r`) only for SGR (the reset state) and cursor style (the default block);
+            // everything else is `0$r`, the spec's "invalid request".
             let reply: &[u8] = match buf.as_slice() {
                 b"m" => b"\x1bP1$r0m\x1b\\",
                 b" q" => b"\x1bP1$r0 q\x1b\\",
@@ -421,18 +252,11 @@ impl Perform for OscScanner<'_> {
     }
 }
 
-/// Fire one `PtyWrite` reply per `;`-delimited cap. Unknown caps reply
-/// with status 0 and no `=value`. Match replies echo the request's cap
-/// hex verbatim (preserving casing) so TUIs can correlate requests and
-/// replies without canonicalizing.
-///
 /// # Safety
-/// Caller must ensure single-threaded access to `cell` (standard BBTerm
-/// thread discipline).
+/// Caller must ensure single-threaded access to `cell` (standard BBTerm thread discipline).
 unsafe fn dispatch_xtgettcap(cell: &CallbackCell, payload: &[u8]) {
     for cap_hex in payload.split(|&b| b == b';') {
         if cap_hex.is_empty() {
-            // `;;` or leading/trailing `;` — skip silently.
             continue;
         }
         let reply = build_xtgettcap_reply(cap_hex);
@@ -444,42 +268,23 @@ unsafe fn dispatch_xtgettcap(cell: &CallbackCell, payload: &[u8]) {
             cursor_row: 0,
             lines_scrolled: 0,
         });
-        // `reply` drops here; `fire` is synchronous so the C callback
-        // has already consumed the bytes by the time we release.
     }
 }
 
 fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
-    // Reject anything that isn't pure hex. XTGETTCAP specifies the payload
-    // as hex-encoded cap name bytes (each cap name byte = 2 hex digits),
-    // but nothing upstream enforced it — an ssh'd attacker could smuggle
-    // `\x1b\\` (ST) or other control bytes inside the cap_hex echo of the
-    // DCS-0-r "unknown" response, terminating the DCS early and landing
-    // the tail bytes as top-level input (shell-injection primitive on the
-    // remote). Audit rust-core-1 F8. Unknown non-hex cap → reply with an
-    // empty cap name so the reply stays well-formed and the echo channel
-    // closes.
-    //
-    // S3-004: also require EVEN length. Odd-length all-hex payloads
-    // (e.g. a 3-char query, or a 4097-byte query truncated mid-pair)
-    // are still "pure hex" but echo as a malformed cap name with a
-    // half-byte at the tail — every legitimate downstream consumer
-    // expects paired hex digits. Reject as malformed alongside the
-    // non-hex case.
+    // Echo only even-length pure hex: anything else (an embedded ST) would terminate the DCS
+    // early and land the tail bytes as top-level input.
     let is_valid_hex = !cap_hex.is_empty()
         && cap_hex.len() % 2 == 0
         && cap_hex.iter().all(|b| b.is_ascii_hexdigit());
-    // Only look up well-formed hex: an invalid token is answered without
-    // touching the index, so a storm of garbage tokens costs nothing here.
     let found = if is_valid_hex {
         find_cap_value(cap_hex)
     } else {
         None
     };
+    // Found: `DCS 1 + r <cap>[=<value>] ST`. Unknown: `DCS 0 + r <cap> ST`.
     match (is_valid_hex, found) {
         (true, Some(answer)) => {
-            // DCS 1 + r <cap>=<value> ST; a boolean has no value, so
-            // DCS 1 + r <cap> ST.
             let mut v = Vec::with_capacity(cap_hex.len() + 8);
             v.extend_from_slice(b"\x1bP1+r");
             v.extend_from_slice(cap_hex);
@@ -491,7 +296,6 @@ fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
             v
         }
         (true, None) => {
-            // DCS 0 + r <cap> ST — hex echo is safe.
             let mut v = Vec::with_capacity(cap_hex.len() + 7);
             v.extend_from_slice(b"\x1bP0+r");
             v.extend_from_slice(cap_hex);
@@ -505,39 +309,27 @@ fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
     }
 }
 
-/// What an XTGETTCAP lookup found. Values are hex-encoded, as on the wire.
+/// Values are hex-encoded, as on the wire.
 enum CapAnswer {
-    /// A boolean capability: asserted, carries no value.
     Flag,
-    /// A string capability's un-evaluated terminfo bytes (`%p1`-style
-    /// escapes are left for the caller's tparm).
+    /// Un-evaluated terminfo bytes (`%p1`-style escapes are left for the caller's tparm).
     Value(Vec<u8>),
 }
 
-/// The terminfo source `TERM=xterm-kitty` resolves to (the app compiles this
-/// same file with `tic`). XTGETTCAP answers from it so a TUI that trusts the
-/// query over terminfo cannot see a different capability set.
+/// The terminfo source `TERM=xterm-kitty` resolves to; the app compiles this same file with `tic`.
 static KITTY_TERMINFO: &str =
     include_str!("../../Sources/Blackbird/Resources/Terminfo/kitty.terminfo");
 
-/// Every capability XTGETTCAP can answer, keyed by the decoded capability
-/// name. Built once, on the first query (see [`cap_index`]).
 struct CapIndex {
     caps: HashMap<Vec<u8>, CapAnswer>,
-    /// Longest name in `caps`, in bytes: a longer query cannot match.
     max_name_len: usize,
 }
 
-/// The process-wide [`CapIndex`]. A query is attacker-controlled (a remote
-/// can send ~1300 caps per DCS), so each lookup must stay O(1): re-scanning
-/// the terminfo text per cap would make the `PtyWrite` rate cap bound the
-/// replies but not the work done to build them.
+/// A query is attacker-controlled (~1300 caps per DCS), so each lookup must stay O(1).
 fn cap_index() -> &'static CapIndex {
     static INDEX: OnceLock<CapIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
         let mut caps = terminfo_caps();
-        // `XTGETTCAP_TABLE` rows are Blackbird's own answers and win over
-        // the terminfo's. Their keys are canonical hex, so `unhex` is total.
         for (key, value) in XTGETTCAP_TABLE {
             if let (Some(name), Some(value)) = (unhex(key), unhex(value)) {
                 caps.insert(name, CapAnswer::Value(hex_upper(&value)));
@@ -548,21 +340,15 @@ fn cap_index() -> &'static CapIndex {
     })
 }
 
-/// Look `cap_hex` up in [`cap_index`]. The cap hex is matched
-/// ASCII-case-insensitively (it is decoded first): it is canonically
-/// uppercase, but some ncurses builds lowercase hex when emitting
-/// `tput`-style queries.
+/// Matched ASCII-case-insensitively: some ncurses builds lowercase the query hex.
 fn find_cap_value(cap_hex: &[u8]) -> Option<&'static CapAnswer> {
     let index = cap_index();
-    // A token longer than any known name cannot match: reject it before
-    // decoding so an oversized token costs O(1), not O(its length).
     if cap_hex.len() > index.max_name_len * 2 {
         return None;
     }
     index.caps.get(unhex(cap_hex)?.as_slice())
 }
 
-/// Decode a hex string; `None` when it is odd-length or not pure hex.
 fn unhex(hex: &[u8]) -> Option<Vec<u8>> {
     if hex.len() % 2 != 0 {
         return None;
@@ -573,17 +359,11 @@ fn unhex(hex: &[u8]) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Parse every boolean / string capability of `KITTY_TERMINFO` into a map
-/// keyed by capability name. Numeric capabilities (`colors#256`, ...) are not
-/// answered: `Co` is the one XTGETTCAP count and it deliberately differs from
-/// the file, see `XTGETTCAP_TABLE`. A string using an escape
-/// [`unescape_terminfo`] does not know is left out, so it reads as
-/// unsupported instead of being answered wrongly. The first definition of a
-/// name wins, as it did when the text was scanned per query.
+/// Numeric capabilities are not answered. A string using an escape `unescape_terminfo` does not
+/// know is left out, so it reads as unsupported. The first definition of a name wins.
 fn terminfo_caps() -> HashMap<Vec<u8>, CapAnswer> {
     let mut caps = HashMap::new();
-    // One capability per line, each indented and ending in `,`; the
-    // unindented first line is the `name|description,` header.
+    // One capability per indented line ending in `,`; the unindented first line is the header.
     for line in KITTY_TERMINFO.lines() {
         if !line.starts_with(char::is_whitespace) {
             continue;
@@ -608,7 +388,6 @@ fn terminfo_caps() -> HashMap<Vec<u8>, CapAnswer> {
     caps
 }
 
-/// Upper-case hex encoding, two digits per byte.
 fn hex_upper(bytes: &[u8]) -> Vec<u8> {
     const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = Vec::with_capacity(bytes.len() * 2);
@@ -619,10 +398,8 @@ fn hex_upper(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Terminfo-source string escapes (`\E`, `\007`, `^G`, `\s`, `\,`, ...) to
-/// the bytes a compiled entry holds. `%` sequences and `$<..>` padding stay
-/// as written. `None` on an escape this file does not use, so such a
-/// capability reads as unsupported instead of being answered wrongly.
+/// Terminfo-source string escapes (`\E`, `\007`, `^G`, `\s`, `\,`, ...) to bytes. `%` sequences
+/// and `$<..>` padding stay as written. `None` on an escape the bundled file does not use.
 fn unescape_terminfo(raw: &str) -> Option<Vec<u8>> {
     let b = raw.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -670,42 +447,14 @@ fn unescape_terminfo(raw: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// XTGETTCAP answers that are Blackbird's own rather than the bundled
-/// terminfo's; `cap_index` lets them override the terminfo. Each row is
-/// (hex-encoded cap name, hex-encoded value).
-///
-/// - TN     = "xterm-kitty"  — the terminal identity string some TUIs
-///   key on to enable advanced protocols.
-/// - Co     = "16777216"     — color count. Pre-LOW-sweep this was
-///   "256" (legacy default), which made `tput colors` report 256 even
-///   though Blackbird decodes truecolor SGR 38;2;R;G;Bm — TUIs that
-///   gate truecolor branches on the terminfo Co value (mc, less +F,
-///   ranger, some neovim plugins) fell back to 256-color paths.
-///   Audit NEW-DF-004.
-/// - RGB    = "8"             — truecolor bits per channel.
-///
-/// Every other boolean / string capability (`Smulx`, `Setulc`, `Su`, `Tc`,
-/// `Ms`, `Sync`, ...) is answered from `KITTY_TERMINFO`, the single source
-/// of truth for `TERM=xterm-kitty`. A second hand-copied table drifted:
-/// its `Setulc` was wrong under any calling convention. nvim probes
-/// `Smulx`/`Setulc` before emitting coloured undercurl (`spellbad`, LSP
-/// diagnostics).
-///
-/// `core/tests/xtgettcap.rs` pins the rows below and the `Smulx`/`Setulc`
-/// strings; `core/tests/xtgettcap_terminfo_parity_blind.rs` checks every
-/// terminfo capability.
+/// (hex cap name, hex value) rows that override the terminfo: TN = "xterm-kitty",
+/// Co = "16777216" (TUIs gate truecolor on the colour count), RGB = "8" (bits per channel).
 static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
-    // TN     = "TN"     → 544E        value "xterm-kitty"  → 787465726D2D6B69747479
     (b"544E", b"787465726D2D6B69747479"),
-    // Co     = "Co"     → 436F        value "16777216"     → 3136373737323136
     (b"436F", b"3136373737323136"),
-    // RGB    = "RGB"    → 524742      value "8"            → 38
     (b"524742", b"38"),
 ];
 
-/// Reject-class indices for `osc7_reject` — keep stable so the per-class
-/// `Once` instances (and any future test that asserts a specific class
-/// fired) line up across builds.
 const OSC7_REJECT_RATE: usize = 0;
 const OSC7_REJECT_PERCENT_DECODE: usize = 1;
 const OSC7_REJECT_UTF8: usize = 2;
@@ -715,18 +464,6 @@ const OSC7_REJECT_BIDI: usize = 5;
 const OSC7_REJECT_NON_ABSOLUTE: usize = 6;
 const OSC7_REJECT_TRAVERSAL: usize = 7;
 const OSC7_REJECT_HOST: usize = 8;
-/// Per-class one-shot latches. Audit follow-up (2026-04-29): the eight
-/// silent `return` paths in `handle_osc7` made an attacker / shell-misbehaving
-/// regression invisible. One-shot per class so a sustained flood doesn't
-/// drown the log; the first reject of each shape produces a breadcrumb.
-///
-/// Audit L3: latches live in `BBTerm` rather than a process-wide static.
-/// Pre-fix, the first BBTerm to fire each rejection class consumed the
-/// `Once` for the whole process; sibling tabs (or the same tab on a
-/// fresh shell) silently dropped the same reject — a multi-tab session
-/// that hits one class on tab 1 lost the breadcrumb on tabs 2..N.
-/// Per-instance bool flags restore one-shot-per-tab semantics without
-/// re-introducing log floods.
 fn osc7_reject(latches: &mut [bool; 9], class: usize, name: &str) {
     if let Some(slot) = latches.get_mut(class) {
         if once(slot) {
@@ -735,22 +472,10 @@ fn osc7_reject(latches: &mut [bool; 9], class: usize, name: &str) {
     }
 }
 
-/// This machine's `gethostname(3)` name (empty on failure).
-///
-/// OSC 7 matches an authority against two reads of it: the snapshot
-/// `bb_term_new` stores in `BBTerm::startup_hostname`, and a live read for an
-/// authority the snapshot does not match (budgeted by
-/// `BBTerm::osc7_hostname_rate`, so a flood of foreign hosts is not a syscall
-/// flood). A shell reads its own copy once at startup
-/// (fish `$hostname`, zsh `$HOST`, bash `$HOSTNAME`) and never refreshes
-/// it, while macOS renames the host at runtime (DHCP, VPN, mDNS conflict,
-/// `scutil --set HostName`). The snapshot, taken just before the shell is
-/// spawned, keeps matching what that shell prints after a rename; the live
-/// read covers shells started after one. A process-lifetime cache would
-/// cover neither.
+/// `gethostname(3)`, empty on failure. Not cached for the process: macOS renames the host at
+/// runtime, while a shell keeps the name it read at startup.
 pub(crate) fn local_hostname() -> Vec<u8> {
-    // Declared here, not at module level, so cbindgen (which exports
-    // module-level `extern "C"` declarations) keeps it out of BBCore.h.
+    // Declared here, not at module level, so cbindgen keeps it out of BBCore.h.
     unsafe extern "C" {
         fn gethostname(name: *mut std::os::raw::c_char, len: usize) -> std::os::raw::c_int;
     }
@@ -765,18 +490,8 @@ pub(crate) fn local_hostname() -> Vec<u8> {
     buf[..end].to_vec()
 }
 
-/// `rest` is the text after `file://`. When its authority names `local`
-/// (case-insensitive, percent-decoded, and ignoring an mDNS `.local`
-/// suffix on either side), return the path part including its leading `/`.
-///
-/// fish prints `file://$hostname/pwd` on every `cd` and prompt, and the
-/// Apple Terminal / VTE / kitty / WezTerm / Ghostty snippets do the same,
-/// so rejecting the machine's own name drops the cwd of every such shell.
-/// The core can't tell a remote shell's cwd from a local one by name alone,
-/// which is why other hostnames are still rejected; the Swift side's
-/// foreground-process-tree gate is the real remote check. The `.local`
-/// tolerance covers macOS flipping `gethostname()` between `foo` and
-/// `foo.local` after the shell captured its own copy.
+/// `rest` is the text after `file://`. Returns the path, leading `/` included, when the authority
+/// names `local` (case-insensitive, percent-decoded, ignoring an mDNS `.local` suffix on either).
 pub(crate) fn strip_own_hostname<'a>(rest: &'a [u8], local: &[u8]) -> Option<&'a [u8]> {
     fn without_mdns_suffix(host: &[u8]) -> &[u8] {
         match host.len().checked_sub(6) {
@@ -786,9 +501,7 @@ pub(crate) fn strip_own_hostname<'a>(rest: &'a [u8], local: &[u8]) -> Option<&'a
     }
     let slash = rest.iter().position(|&b| b == b'/')?;
     let (authority, path) = rest.split_at(slash);
-    // Percent-escaping at most triples a byte, so an authority longer than
-    // that cannot be this machine; skip the decode (and its allocation) for
-    // the foreign-host flood, whose authority may run to the URL cap.
+    // Percent-escaping at most triples a byte: skip the decode for an authority too long to match.
     if local.is_empty() || authority.len() > (local.len() + b".local".len()) * 3 {
         return None;
     }
@@ -799,14 +512,11 @@ pub(crate) fn strip_own_hostname<'a>(rest: &'a [u8], local: &[u8]) -> Option<&'a
     Some(path)
 }
 
-/// Length caps for notification text, in chars. Notification Center
-/// truncates far earlier; the cap bounds the event payload.
 const NOTIFICATION_TITLE_MAX_CHARS: usize = 128;
 const NOTIFICATION_BODY_MAX_CHARS: usize = 1024;
 
 impl OscScanner<'_> {
-    /// Join OSC parameters `from..` back with ';' — vte splits the body on
-    /// every ';', but a notification body may legitimately contain them.
+    /// vte splits the OSC body on every ';', but a body may legitimately contain them.
     fn join_params(params: &[&[u8]], from: usize) -> Vec<u8> {
         let mut out = Vec::new();
         for (i, p) in params.iter().enumerate().skip(from) {
@@ -818,14 +528,9 @@ impl OscScanner<'_> {
         out
     }
 
-    /// Scrub + cap one notification field. Lossy UTF-8 so a hostile
-    /// stream can't make the scrub itself fail; `scrub_title_controls`
-    /// drops C0/C1/bidi/invisible scalars (ZWNJ, ZWJ and variation
-    /// selectors stay: they are part of emoji and Persian/Indic spelling).
     fn notification_field(bytes: &[u8], max_chars: usize) -> String {
         let s = String::from_utf8_lossy(bytes);
-        // The scrub drops every C0 scalar, newline included, which glued a
-        // multi-line body's lines together; a space keeps the words apart.
+        // The scrub drops newlines; a space keeps a multi-line body's words apart.
         let s = s.replace(['\r', '\n'], " ");
         let scrubbed = crate::scrub::scrub_title_controls(&s);
         scrubbed
@@ -842,14 +547,12 @@ impl OscScanner<'_> {
         if title.is_empty() && body.is_empty() {
             return;
         }
-        // The separator is unambiguous only because `scrub_title_controls`
-        // strips every C0 scalar from both halves; pin that here.
+        // The separator is unambiguous only because the scrub strips every C0 scalar.
         debug_assert!(!title.contains('\u{1F}') && !body.contains('\u{1F}'));
         let mut payload = title.into_bytes();
         payload.push(0x1F);
         payload.extend_from_slice(body.as_bytes());
-        // SAFETY: `fire` is the same single-thread-per-BBTerm discipline
-        // every other tap dispatch uses; the payload outlives the call.
+        // SAFETY: single-thread-per-BBTerm discipline; the payload outlives the synchronous call.
         unsafe {
             self.cell.fire(BBEvent {
                 kind: BBEventKind::Notification,
@@ -862,14 +565,12 @@ impl OscScanner<'_> {
         }
     }
 
-    /// iTerm2 form: `OSC 9 ; message ST`. `OSC 9 ; 4 ; …` is the ConEmu /
-    /// Windows Terminal progress-bar sequence and is not a notification.
+    /// iTerm2 form: `OSC 9 ; message ST`.
     fn handle_osc9(&mut self, params: &[&[u8]]) {
         if params.len() < 2 {
             return;
         }
-        // `9;4;…` is the ConEmu / Windows Terminal progress bar and `9;9;…`
-        // ConEmu's cwd report — neither is a notification.
+        // `9;4;…` is the ConEmu / Windows Terminal progress bar, `9;9;…` ConEmu's cwd report.
         if params.len() >= 3 && (params[1] == b"4" || params[1] == b"9") {
             return;
         }
@@ -887,19 +588,8 @@ impl OscScanner<'_> {
         self.emit_notification(title, &body);
     }
 
-    /// kitty form: `OSC 99 ; metadata ; payload ST`, metadata being
-    /// `key=value` pairs joined by ':'. Supported: `p=title` (the payload
-    /// is the title), `p=body` / absent (the payload is the body), and
-    /// `d=0` (a partial chunk; more follow) is delivered as-is rather
-    /// than reassembled — kitty's multi-chunk protocol is rare in the
-    /// wild and reassembly would need per-id state.
-    /// kitty OSC 99. kitty's own example is two chunks: `i=1:d=0;<title>`
-    /// then `i=1:p=body;<body>` (`kitten notify "Title" "Body"` produces
-    /// the same). `d=0` means "more chunks follow"; chunks accumulate in
-    /// the scanner's pending slot (keyed by `i=`) and one notification is
-    /// emitted on the final chunk (`d=1` or no `d`). `p=` values other than
-    /// title/body (icon, buttons, alive, …) are ignored; `e=1` (base64
-    /// payload) is dropped rather than shown raw.
+    /// kitty form: `OSC 99 ; metadata ; payload ST`, metadata being `key=value` pairs joined by
+    /// ':'. `d=0` chunks accumulate (keyed by `i=`) until the final chunk; `e=1` is dropped.
     fn handle_osc99(&mut self, params: &[&[u8]]) {
         if params.len() < 3 {
             return;
@@ -922,7 +612,6 @@ impl OscScanner<'_> {
         if encoded {
             return;
         }
-        // A chunk for a different notification id flushes the pending one.
         if self.tap.osc99_pending.is_some()
             && self.tap.osc99_pending.as_ref().map(|p| &p.id) != Some(&id)
         {
@@ -951,9 +640,6 @@ impl OscScanner<'_> {
         if params.len() < 2 {
             return;
         }
-        // vte splits the OSC body on every ';'. A path containing ';' used
-        // to be truncated at the first one (`file:///a;b` → `/a`); join the
-        // tail back the way alacritty's own OSC 8 handler does.
         let joined: Vec<u8>;
         let url: &[u8] = if params.len() == 2 {
             params[1]
@@ -962,67 +648,30 @@ impl OscScanner<'_> {
             &joined
         };
 
-        // Audit L-20 (2026-04-29): cap the input length BEFORE
-        // `percent_decode`. percent_decode does
-        // `Vec::with_capacity(bytes.len())`, so an unbounded URL lets a
-        // hostile remote allocate megabytes per OSC 7 chunk. OSC 8 caps
-        // its URI at the same shape (`OSC8_URI_MAX = 4096`); legitimate
-        // `file://` cwd URLs are at most a few hundred bytes.
-        //
-        // The length check stays FIRST (free, no allocation, no state
-        // mutation) so an oversized hostile URL never even consumes a
-        // rate-limit slot.
+        // Length cap first: it is free, and `percent_decode` allocates the input's length.
         if url.len() > OSC7_URL_MAX {
             return;
         }
 
-        // Audit S4-001 (2026-05-30): EVERY reject path — structural (scheme,
-        // authority, below) AND semantic (percent-decode, UTF-8, NUL,
-        // control, bidi, absolute-path, traversal) — runs BEFORE the rate
-        // gate, which now sits immediately before the CwdChanged emission at
-        // the end of this function. So a hostile remote firing OSC 7s that
-        // will be rejected — wrong scheme `http://x`, or `file://`-valid-but-
-        // tainted like `file:///%E2%80%AE` (bidi) / `file:///%2e%2e/x`
-        // (traversal) — consumes ZERO budget, and a legitimate
-        // `OSC 7;file:///Users/foo/proj` from the user's own shell can't be
-        // starved out of the 1-second window by a flood that was never going
-        // to emit an event. (The earlier 2026-04-29 reorder moved the gate
-        // past scheme+authority only; this moves it past every reject path.)
-        // L-20's length cap (above) and the M-7 proc_listpids gate (below)
-        // both remain enforced.
-
-        // Accept only `file://` with an empty, `localhost` or this-machine
-        // authority.
-        // Audit fix-#08 (2026-05-21): RFC 3986 §3.1 / §3.2.2 define
-        // scheme and host as case-insensitive. Match the literal prefix
-        // case-insensitively so shell emitters that produce `FILE://`,
-        // `File://localhost/...`, `file://LocalHost/...` etc. are not
-        // silently dropped at ingest. The path portion stays
-        // case-sensitive (POSIX paths are).
+        // RFC 3986 §3.1 / §3.2.2: scheme and host are case-insensitive; the path is not.
         let Some(rest) = strip_prefix_ascii_case_insensitive(url, b"file://") else {
             return;
         };
         let path_bytes: &[u8] = if rest.starts_with(b"/") {
-            rest // "file:///path" → "/path"
+            rest
         } else if let Some(r) =
             strip_prefix_ascii_case_insensitive(rest, b"localhost").filter(|r| r.starts_with(b"/"))
         {
-            r // "file://localhost/path" → "/path"
+            r
         } else if let Some(r) = strip_own_hostname(rest, self.startup_hostname).or_else(|| {
-            // Rejects consume no `osc7_rate` slot (S4-001), so the live
-            // read has its own budget; past it the host is not verified.
+            // Rejects consume no `osc7_rate` slot, so the live read has its own budget.
             if !self.osc7_hostname_rate.allow() {
                 return None;
             }
             strip_own_hostname(rest, &local_hostname())
         }) {
-            // "file://<this-machine>/path" → "/path". Checked after the
-            // `localhost` form (which a machine named `localhost-foo` does
-            // not satisfy: no `/` follows the prefix), snapshot first so
-            // the common case costs no syscall.
             r
         } else {
-            // Another machine's cwd, a malformed authority, or no path.
             osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_HOST, "host");
             return;
         };
@@ -1035,37 +684,17 @@ impl OscScanner<'_> {
             );
             return;
         };
-        // Spec (2026-04-17-blackbird-gaps-design.md §4.1): "Malformed UTF-8
-        // in the path is ignored." Percent-decoding can produce arbitrary
-        // byte sequences (e.g. `file:///%ff`), so validate before firing.
-        // The event's payload contract in `BBEventKind::CwdChanged` is
-        // UTF-8 bytes — Swift wraps the pointer in a Swift String which
-        // assumes UTF-8 validity.
+        // The `CwdChanged` payload contract is UTF-8; percent-decoding can produce arbitrary bytes.
         let Ok(decoded_str) = std::str::from_utf8(&decoded) else {
             osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_UTF8, "utf8");
             return;
         };
-        // Reject embedded NUL bytes. `%00` is valid UTF-8 and slips past
-        // the str::from_utf8 gate, but a pathname containing NUL is
-        // nonsense at the OS level (C string terminator) and lets a
-        // hostile payload truncate what downstream consumers see when
-        // they cast through a C API. TST-S1-014.
+        // `%00` is valid UTF-8 but truncates the path for consumers that go through a C API.
         if decoded.contains(&0) {
             osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_NUL, "nul");
             return;
         }
-        // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) AND
-        // C1 controls (U+0080..=U+009F). Same shape as OSC title scrub
-        // (scrub_title_controls): control codepoints in a chrome-
-        // displayed string can fool screen readers, log shippers, or
-        // any downstream parser that doesn't pre-scrub.
-        //
-        // Audit S3-001: this used to be a byte-wise sweep that missed
-        // C1 controls — U+0080..U+009F encodes as `0xC2 0x80..0xC2 0x9F`
-        // in UTF-8, and neither byte is `< 0x20`. The title path was
-        // already codepoint-level (see scrub_title_controls comment at
-        // L525-527: "byte sweep would corrupt multi-byte UTF-8"). This
-        // gate now walks `chars()` so the two paths agree.
+        // Codepoint-level: C1 controls encode as `0xC2 0x80..0xC2 0x9F`, which a byte sweep misses.
         if decoded_str.chars().any(|c| {
             let cp = c as u32;
             cp <= 0x1F || cp == 0x7F || (0x80..=0x9F).contains(&cp)
@@ -1077,25 +706,11 @@ impl OscScanner<'_> {
             );
             return;
         }
-        // Reject Unicode bidi-control / zero-width / invisible-payload
-        // codepoints in the path. Without this gate a hostile shell can
-        // emit `OSC 7;file:///Users/foo/%E2%80%AE.bashrc` and the
-        // titlebar proxy icon / "Open in Finder" affordance displays
-        // the path RTL-flipped (visual `cqahsab.<rtl>oof/sresU/` while
-        // the actual filesystem target is what Finder will open). Same
-        // codepoint list the Swift paste sanitizer strips. Audit M2.
         if contains_bidi_or_invisible(decoded.as_slice()) {
             osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_BIDI, "bidi");
             return;
         }
-        // Audit synthesis #13 — path-traversal via percent-encoded `..`.
-        // An attacker can emit `OSC 7;file:///%2e%2e/%2e%2e/etc/`. After
-        // percent-decode the path is `../../../../etc/`; downstream
-        // consumers (titlebar proxy icon, "Open in Finder", new-tab cwd
-        // inheritance) all use the raw value via NSWorkspace. Drop the
-        // event silently on any `..` segment OR any non-absolute path.
-        // OSC 7 specifies an absolute path; relative paths are illegal
-        // by spec.
+        // OSC 7 specifies an absolute path; any `..` segment (e.g. `%2e%2e`) is refused.
         if !decoded_str.starts_with('/') {
             osc7_reject(
                 &mut self.latches.osc7_reject,
@@ -1106,7 +721,6 @@ impl OscScanner<'_> {
         }
         for component in std::path::Path::new(decoded_str).components() {
             match component {
-                // The standard parent-dir component.
                 std::path::Component::ParentDir => {
                     osc7_reject(
                         &mut self.latches.osc7_reject,
@@ -1115,11 +729,6 @@ impl OscScanner<'_> {
                     );
                     return;
                 }
-                // Defensive paranoia for the `\..` shape on
-                // case-insensitive HFS+ / APFS — a literal `Normal`
-                // component whose bytes equal `..` would mean some
-                // higher layer mis-parsed components, but we'd still
-                // refuse it.
                 std::path::Component::Normal(s) if s.as_encoded_bytes() == b".." => {
                     osc7_reject(
                         &mut self.latches.osc7_reject,
@@ -1131,23 +740,10 @@ impl OscScanner<'_> {
                 _ => {}
             }
         }
-        // Audit synthesis #4 (SSH-trust): the gate lives on the Swift
-        // side because the Rust core can't see the foreground process
-        // tree. `TerminalSession` walks `proc_listpids(PROC_PPID_ONLY)`
-        // from the fg pgroup and drops `.cwdChanged` events at ingest
-        // when the tree contains an `ssh`/`mosh-client`/`docker`/etc
-        // binary. Shipped 2026-04-28; this site stays validation-only.
+        // The ssh / docker gate lives on the Swift side: the core can't see the process tree.
 
-        // Audit M-7 (2026-04-29) + S4-001 (2026-05-30): rate-limit ingest,
-        // positioned AFTER every validation/reject path so that ONLY OSC 7s
-        // which will actually emit a CwdChanged consume a budget slot — a
-        // flood of rejected payloads (wrong scheme, bidi, traversal, …) can
-        // no longer starve a legitimate cwd update out of the window
-        // (S4-001). Legitimate shells emit one OSC 7 per `cd`; a hostile
-        // remote streaming VALID `file://` cwds in a tight loop still forces
-        // Swift's `classifyForegroundNamespace()` to run a `proc_listpids`
-        // BFS per event (main-thread work that beachballs the UI), so excess
-        // valid events are still dropped within the sliding window (M-7).
+        // Rate gate last, after every reject path: only OSC 7s that will emit consume budget, so
+        // a flood of rejected payloads cannot starve a legitimate cwd update.
         if !self.osc7_rate.allow() {
             osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_RATE, "rate");
             return;
@@ -1161,10 +757,7 @@ impl OscScanner<'_> {
             cursor_row: 0,
             lines_scrolled: 0,
         };
-        // SAFETY: `cell` is a live reference for the duration of this call;
-        // `fire` invokes the C callback synchronously, so `decoded` (owned
-        // by this stack frame) outlives the borrow the callback receives.
-        // `decoded` drops at the end of this scope, after `fire` returns.
+        // SAFETY: `fire` invokes the C callback synchronously, so `decoded` outlives the borrow.
         unsafe { self.cell.fire(ev) };
     }
 
@@ -1173,17 +766,13 @@ impl OscScanner<'_> {
             return;
         };
         let kind_param = *kind_param;
-        // The common split: some shells emit `OSC 133 ; D ; <code> ST` →
-        // params = [b"133", b"D", b"0"]. Others combine: `OSC 133 ; D;0` →
-        // params = [b"133", b"D;0"]. Handle both so snippets from iTerm2,
-        // kitty, fish, starship, etc. all work.
+        // `OSC 133 ; D ; <code> ST` arrives as [b"133", b"D", b"0"]; shells that combine
+        // (`OSC 133 ; D;0`) arrive as [b"133", b"D;0"].
         let (kind_byte, exit_code_bytes): (u8, &[u8]) = if kind_param.len() == 1 {
             (kind_param[0], params.get(2).copied().unwrap_or(b""))
         } else if let Some(idx) = kind_param.iter().position(|&b| b == b';') {
-            // `D;<code>` — split on the first ';'.
             (kind_param[0], &kind_param[idx + 1..])
         } else {
-            // Longer than 1 byte without a ';' — unknown extension.
             return;
         };
 
@@ -1192,28 +781,12 @@ impl OscScanner<'_> {
             b'B' => BBPromptMarkKind::B as u8,
             b'C' => BBPromptMarkKind::C as u8,
             b'D' => BBPromptMarkKind::D as u8,
-            _ => return, // unknown sub-kind — silently ignore rather than crash.
+            _ => return,
         };
 
-        // Audit synthesis #10 + RC-03 — OSC 133 prompt-mark forgery DoS / phishing.
-        // Rate-limit ALL mark kinds (A = prompt start, B = command start,
-        // C = command output, D = command end with exit code) at
-        // PROMPT_MARK_PER_SECOND per rolling 1-second window.
-        //
-        // Earlier versions exempted D on the assumption it was tied 1:1
-        // to an accepted C, but the code never enforced that pairing. A
-        // hostile remote could spam `OSC 133;D;0\x07` to rotate
-        // legitimate D entries out of Swift's bounded prompt ring. A
-        // marks (the navigation targets) were already protected, so the
-        // realistic impact was exit-code history corruption rather than
-        // navigable-prompt forgery — but the comment claimed an
-        // invariant the code didn't keep. Including D in the gate
-        // restores the comment-vs-code contract.
+        // All four kinds are rate-limited, D included: a D flood would rotate legitimate entries
+        // out of Swift's bounded prompt ring.
         if matches!(kind_byte, b'A' | b'B' | b'C' | b'D') && !self.prompt_mark_rate.allow() {
-            // Audit S5-009: dropped marks silently degrade ⌘ prompt
-            // navigation and exit-code chrome — leave one breadcrumb
-            // per session (same one-shot stance as the sibling reject
-            // latches above/below).
             if once(&mut self.latches.osc133_rate_limited) {
                 breadcrumb!(
                     "[blackbird_core] OSC 133 prompt-mark rate cap ({PROMPT_MARK_PER_SECOND}/s) \
@@ -1223,12 +796,7 @@ impl OscScanner<'_> {
             return;
         }
 
-        // Cap exit-code payload at 16 bytes. A well-behaved shell emits
-        // at most 3–4 digits; anything longer is either malicious spam or
-        // a bug and the hosting TUI wouldn't know what to do with it
-        // either.
-        // A 17+-digit "exit code" is hostile or broken, not a number to
-        // truncate: reject it instead of delivering a bogus 16-digit prefix.
+        // A 17+-digit "exit code" is rejected, not truncated to a bogus 16-digit prefix.
         if exit_code_bytes.len() > 16 {
             if once(&mut self.latches.osc133_d_nondigit) {
                 breadcrumb!("[blackbird_core] OSC 133 D rejected (exit code longer than 16 bytes)");
@@ -1237,47 +805,15 @@ impl OscScanner<'_> {
         }
         let payload = exit_code_bytes;
 
-        // Audit L1. Validate the D-kind payload as ASCII decimal digits
-        // before delivering. A hostile shell can emit OSC 133;D;<bytes>
-        // ST with arbitrary control characters; the Swift consumer
-        // turns the payload into a String for display alongside the
-        // prompt-mark UI. Non-digit bytes (NUL, ESC, OSC re-entry,
-        // bidi controls) reach Swift as a String containing those
-        // bytes' UTF-8 replacement-character interpretation, which
-        // can confuse downstream rendering. Be symmetric with the
-        // OSC 7 cwd path which already refuses control bytes.
-        // Drop the whole event when the payload is non-numeric —
-        // we'd rather omit the exit code than display garbage.
+        // The Swift consumer turns the payload into a String for display: drop a non-numeric D.
         if kind_byte == b'D' && !payload.is_empty() && !payload.iter().all(|b| b.is_ascii_digit()) {
-            // Mirror L3's per-instance one-shot logging stance:
-            // first reject of this class on this BBTerm produces a
-            // breadcrumb; subsequent rejects stay silent so a flood
-            // can't drown the log.
             if once(&mut self.latches.osc133_d_nondigit) {
                 breadcrumb!("[blackbird_core] OSC 133 D rejected (non-digit payload)");
             }
             return;
         }
 
-        // Audit fix-#07 (2026-05-21) + S3R-001/S3R-002 (2026-05-30): A/B/C
-        // kinds also accept payload bytes (e.g. shell-supplied prompt
-        // metadata) and forward them to Swift as a String. The Swift
-        // consumer's `String(decoding:as:UTF8.self)` passes valid-UTF-8
-        // control codepoints through — so they could leak into any future
-        // chrome surface that renders TerminalSession's lastPromptMark.
-        // Screen the payload at the CODEPOINT level, NOT byte level: a byte
-        // sweep (b < 0x20 || b == 0x7F) misses C1 controls (U+0080..=U+009F
-        // encode as 0xC2 0x80..=0xC2 0x9F — neither byte is < 0x20) and bidi
-        // / invisible scalars (U+202E RIGHT-TO-LEFT OVERRIDE, zero-width
-        // joiners, variation selectors, …), which a hostile shell can use to
-        // visually spoof or confuse downstream consumers. This is the exact
-        // gap the OSC 7 cwd path (the `decoded_str.chars()` gate above) and
-        // the title scrubber (`scrub_title_controls`) already close; the
-        // A/B/C path was the lone byte-level holdout. Reject the whole mark
-        // when the payload is not well-formed UTF-8, or contains any C0 / DEL
-        // / C1 control or bidi/invisible scalar. The de-facto A/B/C payload
-        // is empty, so this tightening has no real-world false-positive
-        // surface.
+        // A/B/C payloads are screened at the codepoint level, not byte level, like OSC 7.
         if matches!(kind_byte, b'A' | b'B' | b'C') {
             let payload_clean = match std::str::from_utf8(payload) {
                 Ok(s) => !s.chars().any(|c| {
@@ -1290,12 +826,6 @@ impl OscScanner<'_> {
                 Err(_) => false,
             };
             if !payload_clean {
-                // One-shot breadcrumb (silent-failure review): mirror the
-                // D-path and OSC 7 reject latches so a dropped prompt mark
-                // isn't invisible to an operator debugging why command
-                // navigation / exit-code chrome stopped working. Subsequent
-                // rejects on this instance stay silent so a flood can't drown
-                // the log.
                 if once(&mut self.latches.osc133_abc_tainted) {
                     breadcrumb!(
                         "[blackbird_core] OSC 133 A/B/C rejected (control/bidi/non-UTF-8 payload)"
@@ -1305,11 +835,8 @@ impl OscScanner<'_> {
             }
         }
 
-        // The grid lags the stream while a synchronized update is open (vte
-        // only buffers until ESU, the timeout, or the 2 MiB cap), so the
-        // cursor read below would predate everything the update drew. Hold
-        // the mark, and every mark behind it so A/B/C/D keep their order, for
-        // `release_held_prompt_marks` to stamp once the update is replayed.
+        // The grid lags the stream while a synchronized update is open, so the cursor read below
+        // would be stale. Hold the mark, and every mark behind it so A/B/C/D keep their order.
         if self.sync_pending || !self.tap.held_prompt_marks.is_empty() {
             self.tap.held_prompt_marks.push(HeldPromptMark {
                 kind,
@@ -1318,27 +845,19 @@ impl OscScanner<'_> {
             return;
         }
         let ev = prompt_mark_event(self.term, kind, payload);
-        // SAFETY: `payload` borrows `params` which the caller (vte parser)
-        // owns for the duration of this callback. `fire` delivers
-        // synchronously, so the borrow is alive for the full dispatch.
+        // SAFETY: `payload` borrows `params`, alive for this callback; `fire` is synchronous.
         unsafe { self.cell.fire(ev) };
     }
 }
 
-/// Build the `PromptMark` event for `kind` (`BBPromptMarkKind` as `u8`).
-///
-/// Kind A carries the cursor position of `term` at the moment of the call, the
-/// same expressions `snapshot()` uses for `cursor_row` and `lines_scrolled`;
-/// the caller must call it when `term` has consumed exactly the bytes before
-/// the mark. B/C/D carry zeroes.
+/// Kind A carries the cursor position of `term` at the moment of the call: call it only when
+/// `term` has consumed exactly the bytes before the mark. B/C/D carry zeroes.
 pub(crate) fn prompt_mark_event(term: &Term<RoutingListener>, kind: u8, payload: &[u8]) -> BBEvent {
     let is_prompt_start = kind == BBPromptMarkKind::A as u8;
     BBEvent {
         kind: BBEventKind::PromptMark,
         payload: payload.as_ptr(),
         len: payload.len(),
-        // Pack kind (A/B/C/D as 1..=4) into i32_arg so Swift can
-        // branch without parsing the payload.
         i32_arg: kind as i32,
         cursor_row: if is_prompt_start {
             term.grid().cursor.point.line.0.max(0) as u16

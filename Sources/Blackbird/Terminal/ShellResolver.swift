@@ -1,29 +1,10 @@
 import Foundation
 
-/// Which program a new tab runs.
-///
-/// Through v0.8.0 this was `$SHELL` or `/bin/zsh`. The login shell of record
-/// (`getpwuid().pw_shell`, what `dscl` / System Settings › Users set) was never
-/// consulted, so launching Blackbird from another terminal, via `open -a`
-/// from a bash session, or nested inside Blackbird with a different `SHELL`
-/// exported changed which shell every tab ran — and there was no way to pick
-/// a custom shell at all.
-///
-/// Resolution order, first executable wins:
-///   1. the `bb.shellPath` preference (empty = "login shell");
-///   2. the account's login shell (`pw_shell`);
-///   3. `$SHELL` from the parent environment;
-///   4. `/bin/zsh`.
-///
-/// Pure: the executability probe is injected so the order is unit-testable.
 enum ShellResolver {
     static let lastResort = "/bin/zsh"
 
     struct Resolution: Equatable {
         let path: String
-        /// True when the preference named a program that could not be run
-        /// and resolution fell through to a lower rung. The caller surfaces
-        /// this once so a typo in Settings is not a silent downgrade.
         let preferenceRejected: Bool
     }
 
@@ -48,40 +29,26 @@ enum ShellResolver {
         return Resolution(path: lastResort, preferenceRejected: preferenceRejected)
     }
 
-    /// Arguments a NEW session passes to the resolved program. Shells get
-    /// the interactive-login pair; a non-shell program named in Settings
-    /// (the field invites "the absolute path of another program") would
-    /// reject `-il`, so it gets none.
     static func launchArguments(for path: String) -> [String] {
-        // Only the shells known to accept the combined `-il`: tcsh wants
-        // `-l` alone, nu/elvish/xonsh spell the flags differently, and a
-        // non-shell would reject it. Those run with no arguments (still
-        // interactive on a tty) rather than fail to start.
+        // Only shells known to accept the combined `-il`: tcsh wants `-l` alone, nu/elvish/xonsh
+        // spell the flags differently, and a non-shell program would reject it.
         let name = (path as NSString).lastPathComponent
         return posixLikeShells.contains(name) ? ["-il"] : []
     }
 
     private static let posixLikeShells: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh"]
 
-    /// Shells that run with no launch arguments (see `launchArguments`) but
-    /// are still shells, so `$SHELL` may name them.
+    /// Shells that take no launch arguments but may still be named by `$SHELL`.
     private static let otherShells: Set<String> = ["tcsh", "csh", "nu", "elvish", "xonsh"]
 
-    /// Env a NEW session's child needs so `$SHELL` names the program it runs.
-    /// We exec the shell directly (no `login(1)`, which exports
-    /// `SHELL=<shell it execs>`), so the child otherwise keeps whatever the
-    /// launcher had: usually `/bin/zsh` from the login session, stale after
-    /// `chsh` and wrong whenever Settings → Shell picks another shell. tmux's
-    /// `default-shell`, vim's `'shell'` and `sudo -s` read it. A non-shell
-    /// program named in Settings (`/usr/bin/top`) is left alone: exporting it
-    /// would make those tools try to run it as a shell.
+    /// The shell is exec'd directly, without `login(1)` to export `SHELL`. A non-shell program is
+    /// not exported: tmux's `default-shell`, vim's `'shell'` and `sudo -s` would run it as a shell.
     static func environmentOverrides(for path: String, loginShell: String?) -> [String: String] {
         let name = (path as NSString).lastPathComponent
         let isShell = path == loginShell || posixLikeShells.contains(name) || otherShells.contains(name)
         return isShell ? ["SHELL": path] : [:]
     }
 
-    /// `access(path, X_OK)` on a regular file.
     static func isExecutableFile(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
@@ -90,7 +57,6 @@ enum ShellResolver {
         return access(path, X_OK) == 0
     }
 
-    /// The current account's login shell from the passwd database.
     static func loginShellFromPasswd() -> String? {
         guard let pw = getpwuid(getuid()), let shell = pw.pointee.pw_shell else { return nil }
         let s = String(cString: shell)

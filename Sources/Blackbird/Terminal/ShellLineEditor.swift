@@ -1,27 +1,11 @@
 import Foundation
 import BBCore
 
-/// The find-replace byte engine: given the matches on the live shell input line
-/// and an already-sanitized replacement, synthesize the readline byte stream
-/// (CSI C / CSI D cursor moves + DEL erasures + replacement bytes) that splices
-/// every match in one consistent pass. Extracted verbatim from the splice path
-/// (now `FindController.spliceReplacements`; REFACTOR.md Part IV "critical": the
-/// most correctness-critical logic in the subsystem, mis-tuned by five prior
-/// audits) into a pure, view-independent seam so its cursor math can be
-/// exercised on raw byte arrays. The only responsibilities left to the caller
-/// are sanitizing the replacement, surfacing the refusal toast, and writing the
-/// bytes to the PTY.
 enum ShellLineEditor {
-    /// Why a replacement was refused. The shell would mis-execute these, so the
-    /// engine emits no bytes and the caller shows a transient message.
     enum RefusalReason: Error {
-        /// LF/CR — would run the leading fragment as a separate command (L20).
         case lineBreak
-        /// TAB — would fire readline/ZLE completion mid-stream (S3-009).
         case tab
-        /// A multi-scalar grapheme — readline moves per codepoint while the
-        /// DEL/arrow counts here are cell units, so a Replace All would land the
-        /// next span's DELs off-target. Refuse rather than corrupt.
+        /// readline moves per codepoint while the DEL/arrow counts here are cell units.
         case multiCodepoint
 
         var message: String {
@@ -33,20 +17,8 @@ enum ShellLineEditor {
         }
     }
 
-    /// Build the splice byte stream over `snapshot`. `matches` must be non-empty
-    /// and `cleanedReplacement` must already be sanitized (bidi/control-stripped)
-    /// by the caller — this engine only refuses the line-break/tab/multi-codepoint
-    /// shapes the shell can't consume. `.success(Data())` means "nothing to do"
-    /// (every match collapsed to zero length); the caller skips the write.
-    ///
-    /// Matches are processed RIGHT-TO-LEFT so original-space coordinates stay
-    /// valid throughout (edits never move content left of the next region).
-    /// Moves are bidirectional (the cursor may sit left of or inside a match).
-    /// The +1 pending-wrap correction handles width-exact input lines where the
-    /// grid cursor parks on the last cell but the shell's logical position is one
-    /// past it. The final reposition maps the user's original cursor through the
-    /// edits (positions right of a span shift by replacement−match; a position
-    /// inside a span anchors to just after its replacement).
+    /// `matches` must be non-empty and `cleanedReplacement` already sanitized. Matches are processed
+    /// right-to-left so original-space coordinates stay valid. `.success(Data())` means nothing to write.
     static func spliceBytes(
         matches: [(line: Int32, startCol: Int, endCol: Int)],
         cleanedReplacement: Data,
@@ -55,16 +27,13 @@ enum ShellLineEditor {
         let snap = snapshot
         let line = matches[0].line
         let screenRow = Int(line) + snap.displayOffset
-        // Character count over the ORIGINAL snapshot; the whole splice is
-        // computed against one consistent line state (the shell echoes
-        // asynchronously, so re-reading mid-splice would see stale cells).
+        // Count against the original snapshot: the shell echoes asynchronously, so a mid-splice re-read is stale.
         func chars(_ startCol: Int, _ endCol: Int) -> Int {
             guard startCol <= endCol else { return 0 }
             return snap.nonSpacerCellCount(
                 row: screenRow, startCol: startCol, endCol: endCol
             ) ?? (endCol - startCol + 1)
         }
-        // Shell-character length of the replacement, for cursor math.
         let replacementChars = String(decoding: cleanedReplacement, as: UTF8.self).count
         if cleanedReplacement.contains(0x0A) || cleanedReplacement.contains(0x0D) {
             return .failure(.lineBreak)
@@ -86,6 +55,7 @@ enum ShellLineEditor {
                 for _ in 0..<(-delta) { bytes.append(contentsOf: escLeft) }
             }
         }
+        // +1 on pending wrap: the grid cursor parks on the last cell while the shell's position is one past it.
         let p0 = chars(0, snap.cursorCol - 1) + (snap.cursorPendingWrap ? 1 : 0)
         var p = p0
         var bytes = Data()

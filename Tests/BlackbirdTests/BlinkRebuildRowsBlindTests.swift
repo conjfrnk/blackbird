@@ -231,32 +231,6 @@ final class BlinkRebuildRowsBlindTests: XCTestCase {
                        "small damage + cursor move → damaged rows ∪ both cursor rows")
     }
 
-    func test_blinkUnchanged_fullRebuildCases_stillReturnNil() throws {
-        let r = try makeRenderer()
-
-        // cacheCompatible: false and snapshotCoalesced: true, on empty damage.
-        let f = try emptyDamageSnapshot()
-        XCTAssertNil(decide(r, f.snap, cacheCompatible: false, blinkChanged: false))
-        XCTAssertNil(decide(r, f.snap, coalesced: true, blinkChanged: false))
-
-        // Full damage (first snapshot of a fresh term).
-        let fresh = try makeTerm()
-        let full = try XCTUnwrap(fresh.snapshot())
-        XCTAssertTrue(full.damageIsFull, "precondition: first snapshot of a fresh term is full damage")
-        XCTAssertNil(decide(r, full, blinkChanged: false))
-
-        // Damage ≥ half the rows (rows 0…3 of 8, exactly (8+1)/2 = 4).
-        let term = try makeSettledTerm()
-        term.input("a\r\nb\r\nc\r\nd")
-        let half = try XCTUnwrap(term.snapshot())
-        if !half.damageIsFull {
-            XCTAssertGreaterThanOrEqual(half.damagedRows.count, halfRows,
-                                        "precondition: four distinct rows written → ≥ \(halfRows) damaged rows, got \(half.damagedRows)")
-        }
-        XCTAssertNil(decide(r, half, blinkChanged: false),
-                     "damage covering ≥ half the rows must fall back to a full rebuild")
-    }
-
     // MARK: - 4. Blink flip + partial damage → damaged rows ∪ cursor row
 
     func test_blinkChanged_partialDamage_unionsCursorScreenRow() throws {

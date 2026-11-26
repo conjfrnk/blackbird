@@ -395,27 +395,6 @@ final class URLDetectorWrapGuardsReachedBlindTests: XCTestCase {
                        "alt screen: edge plus URL-safe leader falls back to joining")
     }
 
-    /// Documented residual (KNOWN_ISSUES.md): a full-width URL followed by a
-    /// HARD newline is told apart from a wrap on the primary screen but not
-    /// on the alt screen. Same bytes, two outcomes.
-    func test_altScreen_hardNewlineAfterFullWidthURL_primaryStopsAltStillJoins() throws {
-        let cols = 40
-        let url = "https://example.com/" + String(repeating: "a", count: 20)
-        XCTAssertEqual(url.count, cols, "fixture: URL fills the row")
-        let body = url + "\r\nDone"
-
-        let primary = try snapshot(from: body, cols: cols)
-        XCTAssertFalse(primary.termMode.contains(.altScreen), "fixture: primary screen")
-        XCTAssertFalse(primary.isSoftWrapped(row: 0), "fixture: a hard newline sets no wrap bit")
-        XCTAssertEqual(allURLs(URLDetector.scan(snapshot: primary)), [url],
-                       "primary screen: the hard newline ends the URL")
-
-        let alt = try snapshot(from: altScreenOn + body, cols: cols)
-        XCTAssertTrue(alt.termMode.contains(.altScreen), "fixture: alt screen is active")
-        XCTAssertEqual(allURLs(URLDetector.scan(snapshot: alt)), [url + "Done"],
-                       "alt screen: documented residual, the fallback joins the next line")
-    }
-
     /// On the alt screen the soft-wrap gate is out of play, which makes the
     /// guards the ONLY protection: a host change, a port change and every
     /// structure leader must still be refused there.

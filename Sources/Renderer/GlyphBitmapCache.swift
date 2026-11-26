@@ -1,69 +1,25 @@
 import Foundation
 import os
 
-/// Process-wide cache of rasterised glyph bitmaps, shared across every
-/// `GlyphAtlas` (i.e. across every window and tab).
-///
-/// WHY: each new tab / startup window builds a fresh `GlyphAtlas` and calls
-/// `prewarmCommonGlyphs()`, which rasterises ~223 glyphs (printable ASCII +
-/// box-drawing) through CoreText (`CTLineCreateWithAttributedString` +
-/// `CTLineDraw`). That CoreText work — measured as the bulk of the
-/// post-lazy-color `MetalRenderer.init` cost — is **identical** for every
-/// atlas that shares the same font, point size and backing scale (which all
-/// tabs do). Caching the rasterised bytes lets the 2nd..Nth atlas blit the
-/// cached bitmap straight into its texture (`texture.replace`) and skip
-/// CoreText entirely, so per-tab prewarm drops from "rasterise 223 glyphs"
-/// to "memcpy 223 small blobs."
-///
-/// The cache also helps any glyph re-rasterised on demand in more than one
-/// atlas (e.g. the same emoji shown in two tabs).
-///
-/// KEY: everything that determines the rasterised pixels — base font name,
-/// quantised point size + scale, scalar, bold/italic, wide (2-slot) and the
-/// mono-vs-color path. The mono path's cell-fill / nerd-font X-scaling and
-/// the color path's CoreText font substitution are both deterministic
-/// functions of (scalar, font, size, scale), so they need no extra key
-/// fields. Two distinct base fonts that both fall back to the same system
-/// font for a scalar key separately (a harmless duplicate, never wrong).
-///
-/// BOUNDED: capped at `maxEntries`; once full it stops admitting new entries
-/// (new glyphs simply rasterise fresh, uncached) rather than growing without
-/// limit. At ~1 KB/bitmap that ceilings the cache near a couple of MB —
-/// comfortably under the long-session RSS gate (the common 223-glyph set is
-/// ~110 KB). No eviction: the working set of glyphs a terminal renders is
-/// small and stable; a font-size change leaves its old entries as bounded
-/// dead weight rather than churning an LRU on the hot insert path.
+/// Process-wide cache of rasterised glyph bitmaps, shared across every `GlyphAtlas`.
 enum GlyphBitmapCache {
 
+    /// Everything that determines the rasterised pixels.
     struct Key: Hashable {
         let fontName: String
-        /// Point size × 100, rounded — avoids hashing raw CGFloat while
-        /// staying exact for the discrete sizes the UI offers.
+        /// Point size × 100, rounded.
         let sizeQ: Int
-        /// Backing scale × 100, rounded (200 on Retina, 100 on 1×).
+        /// Backing scale × 100, rounded.
         let scaleQ: Int
         let scalar: UInt32
         let bold: Bool
         let italic: Bool
         let wide: Bool
         let isColor: Bool
-        /// Which grapheme was rasterised: the bare base scalar vs. the
-        /// emoji-presentation sequence (base + VS16). These can share the same
-        /// `(scalar, wide, isColor)` yet rasterise to different pixels (⚠ vs
-        /// ⚠️), so this field keeps them in separate cache entries instead of
-        /// relying on `wide` differing — which would silently alias if a
-        /// width-table change ever set WIDE_CHAR on a base without a VS16.
+        /// Bare base scalar vs. base + VS16: these can share `(scalar, wide, isColor)` yet rasterise differently.
         let emojiPresentation: Bool
     }
 
-    /// A rasterised glyph bitmap, ready to hand to `MTLTexture.replace`.
-    /// The initializer enforces the byte-layout invariant the consumers rely
-    /// on (`bytes.count == height * bytesPerRow`, non-degenerate dims) so a
-    /// future caller that miscomputes the count or stride — e.g. passing a
-    /// mono `bytesPerRow` for a 4-bpp color bitmap — trips an assert in
-    /// DEBUG/ASan CI rather than driving `texture.replace` to read past the
-    /// end of `bytes` at a hit site. `assert` (not `precondition`) keeps it
-    /// zero-cost in Release.
     struct Bitmap {
         let bytes: [UInt8]
         let width: Int
@@ -86,19 +42,10 @@ enum GlyphBitmapCache {
         }
     }
 
-    /// Soft ceiling on cached glyphs. 4096 distinct (glyph, style, scale)
-    /// rasterisations covers the prewarm set many times over plus a long
-    /// session's on-demand glyphs; past it we stop admitting rather than
-    /// grow. ~1 KB each ⇒ a few MB worst case.
     private static let maxEntries = 4096
 
-    /// `OSAllocatedUnfairLock` (not @MainActor / dispatchPrecondition) so the
-    /// cache is correct from any thread — `GlyphAtlas` is main-confined in
-    /// production but tests construct atlases on the XCTest thread. macOS 14+
-    /// (the deployment floor); mirrors the project's existing lock idiom.
-    /// All cache state under ONE lock so the group/dict invariant (every
-    /// group in `order` has entries in `dict`, and vice versa) lives in a
-    /// single critical section.
+    /// A lock, not @MainActor: atlases are also constructed off the main thread.
+    /// Invariant: every group in `order` has entries in `dict`, and vice versa.
     private struct State {
         var dict: [Key: Bitmap] = [:]
         var order: [Group] = []
@@ -106,11 +53,7 @@ enum GlyphBitmapCache {
     }
     private static let storage = OSAllocatedUnfairLock<State>(initialState: State())
 
-    /// A (font, size, scale) set — the unit of eviction. When the cache is
-    /// full, the least-recently-INSERTED group other than the incoming
-    /// key's is dropped whole, so a long session that zoomed through many
-    /// sizes keeps warming the sizes it still uses. Through v0.8.0 a full
-    /// cache refused every new entry for the process lifetime.
+    /// The unit of eviction.
     struct Group: Hashable {
         let fontName: String
         let sizeQ: Int
@@ -119,41 +62,23 @@ enum GlyphBitmapCache {
     }
     static var evictionCount: Int { storage.withLock { $0.evictions } }
 
-    /// One-shot "cache saturated" breadcrumb. Only ever written inside
-    /// `storage.withLock`, so the lock that guards `storage` also serialises
-    /// it. Hitting the cap is a silent perf regression (every new glyph then
-    /// rasterises uncached, reverting the prewarm win) with no other field
-    /// signal — log once so it's diagnosable from the unified log. Not gated
-    /// on DEBUG: the saturation scenario (font-size churn + a large
-    /// multi-locale working set over a long session) only manifests in the
-    /// field. `os.Logger` per the project's NSLog-redaction rule.
+    /// Only written inside `storage.withLock`.
     private static var saturationLogged = false
     private static let logger = Logger(
         subsystem: "dev.conjfrnk.blackbird", category: "atlas"
     )
 
-    /// Quantise a CGFloat (point size / backing scale) to an Int key field.
-    /// ×100 + round is exact for the discrete, integer-stepped sizes the UI
-    /// offers and the {1,2,3}× backing scales. Presumes finite, in-range
-    /// input — `CellMetrics` already sanitises NaN/∞ upstream and
-    /// `GlyphAtlas.init` rejects scale ≤ 0, so the trap/overflow paths aren't
-    /// reachable here.
+    /// Presumes finite, in-range input.
     static func quantize(_ value: CGFloat) -> Int { Int((value * 100).rounded()) }
 
     static func get(_ key: Key) -> Bitmap? {
         storage.withLock { $0.dict[key] }
     }
 
-    /// Insert `bitmap` for `key`. No-op once the cache is full and `key` is
-    /// new (bounded growth); always refreshes an existing key. The first
-    /// declined insert logs once (see `saturationLogged`).
     static func put(_ key: Key, _ bitmap: Bitmap) {
         let group = Group(key)
         storage.withLock { state in
             if state.dict[key] == nil && state.dict.count >= maxEntries {
-                // Evict the oldest OTHER group. If the incoming group is the
-                // only one (a single font set really has > maxEntries
-                // distinct glyphs), refuse as before.
                 guard let victim = state.order.first(where: { $0 != group }) else {
                     if !saturationLogged {
                         saturationLogged = true
@@ -176,11 +101,7 @@ enum GlyphBitmapCache {
     }
 
     #if DEBUG
-    /// Test seam: current entry count. Lets a microbenchmark / unit test
-    /// observe a cache hit (count unchanged across a second identical
-    /// rasterisation) without exposing the storage.
     static var _countForTests: Int { storage.withLock { $0.dict.count } }
-    /// Test seam: drop all entries so a test starts from a known-cold cache.
     static func _resetForTests() {
         storage.withLock { $0 = State() }
     }

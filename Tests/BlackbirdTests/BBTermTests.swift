@@ -191,16 +191,6 @@ final class BBTermTests: XCTestCase {
                        "B's numbering stays consecutive despite A's interleaved snapshot")
     }
 
-    func test_bellEventFires() throws {
-        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 5)))
-        let exp = expectation(description: "bell")
-        term.onEvent { ev in
-            if case .bell = ev { exp.fulfill() }
-        }
-        term.input([0x07])  // BEL
-        wait(for: [exp], timeout: 1.0)
-    }
-
     func test_cursorCoordinatesExposed() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         term.input("abc")

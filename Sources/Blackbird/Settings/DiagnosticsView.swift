@@ -2,17 +2,6 @@ import SwiftUI
 import AppKit
 import os
 
-/// Settings → Diagnostics tab. Lists hang reports (written by
-/// `MainThreadWatchdog`) and macOS crash reports for Blackbird, with
-/// Reveal in Finder / Copy / Email Diagnostics actions per row.
-///
-/// Read-only — no `@AppStorage`, no auto-upload, no third-party network
-/// calls. The Email Diagnostics flow opens the user's mail client; nothing
-/// is transmitted automatically.
-///
-/// Visibility is `internal` (default): only `SettingsView` in the same
-/// module mounts the view. Promoting to `public` would widen the API
-/// surface for no benefit.
 struct DiagnosticsView: View {
     @StateObject private var store = DiagnosticReportStore()
     @State private var lastError: String?
@@ -22,16 +11,9 @@ struct DiagnosticsView: View {
         category: "diagnostics"
     )
 
-    /// Max file size to load into memory for Copy / Email Diagnostics.
-    /// Real-world hang reports run ~10–200 KB; macOS `.ips` crash reports
-    /// run ~1–3 MB. 16 MB gives ~50× headroom while bounding the worst
-    /// case (planted multi-GB file, a 32 GB unrelated process spew that
-    /// happened to match `Blackbird-*.ips`). Beyond the cap we ask the
-    /// user to Reveal in Finder and attach manually.
+    /// Bounds peak memory for Copy / Email; real reports run ~10 KB to ~3 MB.
     private static let inlineLoadCapBytes: Int64 = 16 * 1024 * 1024
 
-    /// Support address for the "Email Diagnostics" mailto flow. One definition
-    /// rather than inlined in the URL string (REFACTOR.md Area 7).
     private static let supportEmail = "conjfrnk@gmail.com"
 
     @ObservedObject private var prefs = Preferences.shared
@@ -96,8 +78,7 @@ struct DiagnosticsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .onAppear { store.reload() }
-        // The Settings window is cached and the selected pane survives a
-        // close, so reopening on Diagnostics never re-fires `.onAppear`.
+        // The Settings window is cached, so reopening on Diagnostics never re-fires `.onAppear`.
         .onReceive(NotificationCenter.default.publisher(for: SettingsWindowController.didShow)) { _ in
             store.reload()
         }
@@ -105,38 +86,12 @@ struct DiagnosticsView: View {
 
     // MARK: - Actions
 
-    /// Copy the report's text contents to the pasteboard. Sets `lastError`
-    /// on failure (read error OR non-text content OR oversized file).
-    ///
-    /// Crash report files (`.ips` modern format is JSON; older `.crash` is
-    /// plain text) are expected to be UTF-8 — we surface a clear error
-    /// rather than silently substituting `\u{FFFD}` so a user pasting
-    /// nonsense into an email knows why.
-    ///
-    /// Oversized files (> 16 MB) are rejected to bound peak memory and
-    /// main-thread stall. Reading a 2 GB file synchronously into Data,
-    /// then UTF-8-decoding it, then `NSPasteboard.setString` would each
-    /// be a copy — peak ~6 GB and seconds of beachball. Real-world
-    /// reports never approach the cap; if one does, it's adversarial
-    /// or a runaway log.
-    ///
-    /// Control characters in the report (BEL, OSC introducers, CSI bytes)
-    /// are stripped before placing on the pasteboard. A planted hang
-    /// report containing `\x1b]52;c;...\x07` (OSC 52 clipboard write)
-    /// would otherwise pose as inert text and, when pasted into another
-    /// terminal emulator, re-execute the escape sequence. The defense
-    /// is shallow but cheap.
     private func copy(_ report: DiagnosticReportStore.Report) {
         Task { @MainActor in
             _ = await loadSanitizedAndCopy(report)
         }
     }
 
-    /// Worker shared by Copy and Email Diagnostics. Runs the disk read
-    /// and the per-byte control-char scan on a detached background task
-    /// so a 16 MB report on a network home directory can't beachball
-    /// Settings. Returns `true` after the pasteboard write completes;
-    /// `false` (with `lastError` set) on every failure path.
     @MainActor
     private func loadSanitizedAndCopy(_ report: DiagnosticReportStore.Report) async -> Bool {
         if report.byteSize > Self.inlineLoadCapBytes {
@@ -171,19 +126,10 @@ struct DiagnosticsView: View {
             Self.log.error("copy decode failed: \(report.url.lastPathComponent, privacy: .public) is not UTF-8")
             return false
         case .failure(.symlinkRejected):
-            // Audit S5-003: enumerate filters symlinks, but a same-uid
-            // attacker can swap the inode between scan and click. The
-            // read-time O_NOFOLLOW gate refused; surface a clear
-            // diagnostic so the operator notices something changed.
             lastError = "\(report.url.lastPathComponent) is a symlink — refused for safety."
             Self.log.error("copy refused symlink: \(report.url.lastPathComponent, privacy: .public)")
             return false
         case .failure(.notRegularFile):
-            // Audit S2-001: enumerate admits only regular files, but a
-            // same-uid attacker can swap the inode for a FIFO/device node
-            // between scan and click. The read-time fstat gate refused
-            // (and O_NONBLOCK kept the open from hanging); surface a clear
-            // diagnostic so the operator notices something changed.
             lastError = "\(report.url.lastPathComponent) is not a regular file — refused for safety."
             Self.log.error("copy refused non-regular file: \(report.url.lastPathComponent, privacy: .public)")
             return false
@@ -191,9 +137,6 @@ struct DiagnosticsView: View {
     }
 
     private func reveal(_ report: DiagnosticReportStore.Report) {
-        // Stale `lastError` from a previous action would persist across a
-        // successful reveal otherwise — clear it so the UI matches what
-        // the user just saw work.
         lastError = nil
         guard FileManager.default.fileExists(atPath: report.url.path) else {
             lastError = "\(report.url.lastPathComponent) was deleted. Refresh to update the list."
@@ -208,10 +151,6 @@ struct DiagnosticsView: View {
         let hangDir = home.appendingPathComponent(DiagnosticReportStore.defaultHangDirectoryName)
         let crashDir = home.appendingPathComponent(DiagnosticReportStore.defaultCrashDirectoryName)
         let fm = FileManager.default
-        // Prefer the hang-report directory (Blackbird's own), but fall
-        // back to the crash directory if hangs don't exist yet — first-
-        // run users may have a crash before they ever experience a hang.
-        // If neither exists, surface the empty-state explanation.
         if fm.fileExists(atPath: hangDir.path) {
             NSWorkspace.shared.activateFileViewerSelecting([hangDir])
         } else if fm.fileExists(atPath: crashDir.path) {
@@ -221,31 +160,13 @@ struct DiagnosticsView: View {
         }
     }
 
-    /// Email Diagnostics: copy report → open mailto: with subject + brief
-    /// instructional body. mailto: URLs cap at ~2 KB on macOS so we can't
-    /// inline the report itself; the clipboard-and-paste pattern is the
-    /// reliable path that works regardless of whether the user has Mail.app
-    /// configured.
-    ///
-    /// Why not `NSSharingService(named: .composeEmail)`: returns non-nil
-    /// even when Mail.app isn't configured, then `perform(withItems:)`
-    /// fails asynchronously via a delegate. Without a delegate the failure
-    /// is silent (no compose window, no error). Wiring the delegate adds
-    /// boilerplate for a path that's strictly worse than mailto+clipboard
-    /// when it does work (Mail's compose window with attachment) and is
-    /// indistinguishable when it doesn't.
+    /// mailto: URLs cap at ~2 KB on macOS, so the report travels on the clipboard, not in the body.
+    /// `NSSharingService(named: .composeEmail)` fails silently when Mail.app isn't configured.
     private func email(_ report: DiagnosticReportStore.Report) {
         Task { @MainActor in
-            // Stage 1 — copy. If reading or decoding fails, abort so we
-            // don't open a mail compose window with stale clipboard
-            // contents.
             guard await loadSanitizedAndCopy(report) else { return }
 
-            // Stage 2 — mailto. URLQueryItem percent-encodes per RFC 3986
-            // but mail clients are inconsistent about treating `+` as
-            // space; the explicit encoding below adds a belt-and-
-            // suspenders pass for the subject line, which contains a
-            // filename that can have `+`, `&`, `?`, or non-ASCII.
+            // Mail clients are inconsistent about `+` as space, so `+&?#=/` are percent-encoded explicitly.
             let subject = "Blackbird \(SettingsChrome.versionString) diagnostic — \(report.url.lastPathComponent)"
             let body = "Diagnostic copied to clipboard — paste below this line, then describe what you were doing.\n\n"
             let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&?#=/"))
