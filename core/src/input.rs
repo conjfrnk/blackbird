@@ -17,10 +17,6 @@ use crate::{BBSyncStatus, BBTerm};
 /// `bb_term_clear_all` aborts the string at this count.
 pub(crate) const WEDGED_STRING_CHUNKS: u32 = 2;
 
-/// DEC 2026 synchronized-update end (`CSI ? 2026 l`), the exact bytes vte's
-/// sync handling scans for.
-const ESU_CSI: &[u8] = b"\x1b[?2026l";
-
 /// Feed one chunk of PTY bytes through the grid processor + parallel OSC tap.
 ///
 /// # Safety
@@ -194,13 +190,13 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
 /// parses meanwhile cannot be stamped from it (see `OscScanner::sync_pending`).
 /// The advance that replays the buffer is the one that moves the grid past
 /// those marks, and a mark is stamped from the grid right after it. So while
-/// marks are held, `bytes` is advanced in two steps at the first ESU: bytes
-/// after the ESU (the command's output, say) then cannot move the cursor before
-/// the held marks read it. A pure append grows the buffer by exactly the bytes
-/// fed; any other outcome, or the update no longer being open, means a replay
-/// happened. That also covers the replays the ESU scan cannot see: the 2 MiB
-/// cap, an ESU split across feeds, and an ESU followed by a further BSU, which
-/// leaves that BSU's bytes buffered.
+/// marks are held, `bytes` is advanced one step per `l`: an ESU ends in `l`
+/// wherever a read boundary cut it, so the step that completes one ends exactly
+/// there, and bytes after the ESU (the command's output, say) cannot move the
+/// cursor before the held marks read it. A pure append grows the buffer by
+/// exactly the bytes fed; any other outcome, or the update no longer being
+/// open, means a replay happened. That also covers the 2 MiB cap and an ESU
+/// followed by a further BSU, which leaves that BSU's bytes buffered.
 ///
 /// Marks held by `flush_sync_update` are released there instead.
 ///
@@ -208,10 +204,8 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
 /// Same single-thread discipline as `process_input`.
 unsafe fn advance_grid(bb: &mut BBTerm, mut bytes: &[u8]) {
     while !bytes.is_empty() && !bb.osc_tap.held_prompt_marks.is_empty() {
-        let (step, rest) = match memchr::memmem::find(bytes, ESU_CSI) {
-            Some(at) => bytes.split_at(at + ESU_CSI.len()),
-            None => (bytes, &bytes[bytes.len()..]),
-        };
+        let step_len = memchr::memchr(b'l', bytes).map_or(bytes.len(), |at| at + 1);
+        let (step, rest) = bytes.split_at(step_len);
         let buffered_if_appended = bb.processor.sync_bytes_count() + step.len();
         bb.processor.advance(&mut bb.term, step);
         let still_buffering = bb.processor.sync_timeout().sync_timeout().is_some()
