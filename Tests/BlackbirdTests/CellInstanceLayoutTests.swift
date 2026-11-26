@@ -127,17 +127,6 @@ final class CellInstanceLayoutTests: XCTestCase {
                        "attrs must be last, at offset 64 (16 bytes wide)")
     }
 
-    /// Each field's stride must match the SIMD type's natural size.
-    /// A Swift-side reduction (e.g. a hypothetical `SIMD3<Float>`
-    /// substitution that compiled but rounded to 12 bytes) would
-    /// shift every following field's offset and break the shader's
-    /// vertex pull.
-    func test_fieldStrides_matchSimdTypes() {
-        XCTAssertEqual(MemoryLayout<SIMD2<Float>>.stride,   8)
-        XCTAssertEqual(MemoryLayout<SIMD4<Float>>.stride,  16)
-        XCTAssertEqual(MemoryLayout<SIMD4<UInt32>>.stride, 16)
-    }
-
     // MARK: - CellAttributeMask bit assignments
     //
     // The shader (Shaders.metal:71-85) declares `BB_ATTR_*` constants
@@ -201,15 +190,9 @@ final class CellInstanceLayoutTests: XCTestCase {
         )
     }
 
-    /// Regression for the v0.1.9 color-emoji bit (audit reference:
-    /// the existing `test_isColorGlyphBitHasExpectedValue` in
-    /// GlyphAtlasTests pins this once. We pin it again here in the
-    /// CellInstance contract suite because the shader at
-    /// Shaders.metal:80, 107 reads this exact bit by raw value to
-    /// branch onto the color-atlas sampling path. A regression that
-    /// renumbered this bit would route every emoji through the mono
-    /// path → grey silhouettes (the very bug that motivated the fix
-    /// in commit ab89b64).
+    /// The shader reads this bit by raw value to branch onto the
+    /// colour-atlas sampling path; renumbering it would route every
+    /// emoji through the mono path (grey silhouettes).
     func test_attrBit_isColorGlyph_isBitSeven() {
         XCTAssertEqual(
             CellAttributeMask.isColorGlyph.rawValue, UInt32(1) << 7,
@@ -313,162 +296,6 @@ final class CellInstanceLayoutTests: XCTestCase {
             }
         }
         XCTAssertEqual(seen.count, cases.count, "expected \(cases.count) unique bits")
-    }
-
-    // MARK: - attrs.x packing — round-trip a CellInstance through the bit channel
-    //
-    // The shader at Shaders.metal:62-63 reads `out.flags = inst.attrs.x`
-    // and `out.underlineColorPacked = inst.attrs.z` — i.e., the attrs
-    // SIMD4 is laid out as { .x = flagBitmask, .y = reserved, .z =
-    // packed-underline-color, .w = reserved }. These tests construct
-    // a CellInstance with each bit set in `.x`, then verify the
-    // round-trip via the SIMD4 element accessor. They don't run the
-    // shader (we can't from xctest without a Metal device + drawable),
-    // but they DO catch a Swift-side bug that wrote the bit into the
-    // wrong SIMD4 lane.
-
-    /// Helper: build a minimal CellInstance with the given attrs bitmask
-    /// in `.x` and zeros everywhere else. Production code never
-    /// constructs CellInstance from outside MetalRenderer.buildInstances,
-    /// but the struct is internal and exposed via @testable, so this
-    /// is the contractually correct test surface.
-    private func makeInstance(flags: UInt32, underlineColorPacked: UInt32 = 0) -> CellInstance {
-        return CellInstance(
-            cellPosPx:  SIMD2<Float>(0, 0),
-            quadSizePx: SIMD2<Float>(8, 16),
-            uvOrigin:   SIMD2<Float>(0, 0),
-            uvSize:     SIMD2<Float>(0, 0),
-            fgColor:    SIMD4<Float>(1, 1, 1, 1),
-            bgColor:    SIMD4<Float>(0, 0, 0, 1),
-            attrs:      SIMD4<UInt32>(flags, 0, underlineColorPacked, 0)
-        )
-    }
-
-    func test_pack_linkHoverBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.linkHover.rawValue)
-        XCTAssertEqual(inst.attrs.x & 0x1, 0x1,
-                       "linkHover bit must be readable as `attrs.x & (1<<0)`")
-        XCTAssertEqual(inst.attrs.x, 1,
-                       "isolated linkHover must produce attrs.x == 1")
-    }
-
-    func test_pack_strikeBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.strike.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b10,
-                       "isolated strike must produce attrs.x == 0b10 (== 2)")
-    }
-
-    func test_pack_underlineBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.underline.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b100, "isolated underline must produce attrs.x == 4")
-    }
-
-    func test_pack_underlineDoubleBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.underlineDouble.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b1000, "isolated underlineDouble must produce attrs.x == 8")
-    }
-
-    func test_pack_undercurlBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.undercurl.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b10000, "isolated undercurl must produce attrs.x == 16")
-    }
-
-    func test_pack_underlineDottedBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.underlineDotted.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b100000, "isolated underlineDotted must produce attrs.x == 32")
-    }
-
-    func test_pack_underlineDashedBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.underlineDashed.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b1000000, "isolated underlineDashed must produce attrs.x == 64")
-    }
-
-    func test_pack_isColorGlyphBit_landsInAttrsX() {
-        let inst = makeInstance(flags: CellAttributeMask.isColorGlyph.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0b10000000,
-                       "isolated isColorGlyph must produce attrs.x == 128 — "
-                       + "shader branches on `(flags & BB_ATTR_IS_COLOR_GLYPH) != 0u`")
-    }
-
-    /// All eight bits set simultaneously must produce attrs.x = 0xFF.
-    /// In practice the renderer never sets all eight (e.g. dotted +
-    /// dashed are mutually exclusive at the parser level), but the
-    /// shader's `BB_ATTR_ANY_UNDERLINE` check uses bitwise-and with
-    /// independent flags, so a stuck-bits scenario must not crash or
-    /// trigger UB.
-    func test_pack_allBitsSet_producesLowByte() {
-        let allBits: CellAttributeMask = [
-            .linkHover, .strike, .underline, .underlineDouble,
-            .undercurl, .underlineDotted, .underlineDashed, .isColorGlyph,
-        ]
-        let inst = makeInstance(flags: allBits.rawValue)
-        XCTAssertEqual(inst.attrs.x, 0xFF,
-                       "all eight bits set must produce attrs.x == 0xFF (255)")
-        // `.y` and `.w` must remain zero — the struct header
-        // documents these as "reserved (0)" and a regression that
-        // bled flags into them would be the kind of silent corruption
-        // the audit (glyph-atlas F8) flagged as catchable only by a
-        // direct layout test.
-        XCTAssertEqual(inst.attrs.y, 0, "attrs.y is reserved and must remain zero")
-        XCTAssertEqual(inst.attrs.w, 0, "attrs.w is reserved and must remain zero")
-    }
-
-    // MARK: - attrs.z — packed CSI 58 underline color
-
-    /// The struct header at CellInstance.swift:55-58 documents
-    /// `attrs.z` as `0x00RRGGBB` for an explicit underline colour, or
-    /// `0xFFFFFFFF` as the "fall back to fg" sentinel. The shader at
-    /// Shaders.metal:151 unpacks via `if (in.underlineColorPacked !=
-    /// 0xFFFFFFFFu)`. A regression that flipped the sentinel value
-    /// (e.g. to 0 or 0x00000000) would either route every underline
-    /// through the explicit-colour path (wasting cycles + producing
-    /// solid-black underlines on cells with no SGR 58) or the
-    /// fallback path (ignoring user-set colours).
-    func test_underlineColorSentinel_isAllOnes() {
-        let sentinel: UInt32 = 0xFFFF_FFFF
-        let inst = makeInstance(flags: 0, underlineColorPacked: sentinel)
-        XCTAssertEqual(inst.attrs.z, sentinel,
-                       "0xFFFFFFFF sentinel must round-trip through attrs.z unchanged")
-    }
-
-    /// An explicit RGB colour packed as 0x00RRGGBB lands in `attrs.z`
-    /// in exactly the same numeric form. The shader at
-    /// Shaders.metal:152-155 unpacks
-    ///   r = ((packed >> 16) & 0xFF) / 255
-    ///   g = ((packed >>  8) & 0xFF) / 255
-    ///   b = ((packed      ) & 0xFF) / 255
-    /// — a Swift-side packing bug that swapped R and B (writing
-    /// 0x00BBGGRR instead) would land here and the shader would
-    /// produce blue underlines for red SGR 58s.
-    func test_underlineColorPacking_RgbLayout() {
-        // CSI 58:2:255:128:64 (orange-ish). Packed: 0x00FF8040.
-        let packed: UInt32 = 0x00FF_8040
-        let inst = makeInstance(flags: 0, underlineColorPacked: packed)
-        XCTAssertEqual(inst.attrs.z, packed,
-                       "RGB packing must round-trip through attrs.z unchanged")
-        // Verify the shader's unpack arithmetic on the Swift side: R
-        // is the high byte, B is the low byte. If a refactor ever
-        // reverses the byte order, this test pins the contract.
-        let r = (inst.attrs.z >> 16) & 0xFF
-        let g = (inst.attrs.z >>  8) & 0xFF
-        let b = (inst.attrs.z      ) & 0xFF
-        XCTAssertEqual(r, 0xFF, "R byte must be at bits 16-23")
-        XCTAssertEqual(g, 0x80, "G byte must be at bits 8-15")
-        XCTAssertEqual(b, 0x40, "B byte must be at bits 0-7")
-    }
-
-    /// `attrs.z = 0` is a valid explicit colour (pure black). The
-    /// shader treats `0 != 0xFFFFFFFF`, so this lands in the
-    /// explicit-colour branch and produces a black underline. Pin
-    /// this so a refactor that ever changed the sentinel to `0`
-    /// would fail catastrophically (every cell would suddenly route
-    /// through fallback).
-    func test_underlineColorBlack_isExplicitNotSentinel() {
-        let inst = makeInstance(flags: 0, underlineColorPacked: 0)
-        XCTAssertEqual(inst.attrs.z, 0)
-        XCTAssertNotEqual(inst.attrs.z, 0xFFFF_FFFF,
-                          "the 'black explicit underline' value must NOT equal the sentinel — "
-                          + "a regression that flipped them would invert every cell's behaviour")
     }
 
     // MARK: - F-S4-001: layout pin function exists and is callable

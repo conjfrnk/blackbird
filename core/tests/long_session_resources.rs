@@ -272,13 +272,3 @@ mod macos {
         );
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-#[test]
-#[ignore]
-fn resources_test_macos_only() {
-    // task_threads / proc_pidinfo are macOS-only. Blackbird itself is
-    // macOS-only, so this restriction is fine. Keep the test harness
-    // buildable on Linux (for fuzz CI) by stubbing out — same pattern as
-    // long_session_memory.rs.
-}

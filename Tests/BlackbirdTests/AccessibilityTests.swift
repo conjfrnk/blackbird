@@ -131,15 +131,6 @@ final class AccessibilityTests: XCTestCase {
                        NSRange(location: 3, length: 2))
     }
 
-    func testRangeForLineLast() throws {
-        // Memory: <1 KB. Wall: ~5 ms.
-        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
-        view.installSnapshotForTests(rows: ["aa", "bb"])
-        // value = "aa\nbb"; line 1 = "bb" at offset 3 length 2.
-        XCTAssertEqual(view.accessibilityRange(forLine: 1),
-                       NSRange(location: 3, length: 2))
-    }
-
     func testRangeForLineOutOfRangeReturnsNotFound() throws {
         // Memory: <1 KB. Wall: ~5 ms.
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())

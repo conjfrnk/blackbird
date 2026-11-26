@@ -14,6 +14,11 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
 
+# Pinned so every xcodegen release writes the same pbxproj: 2.46 defaults this
+# to 1430 and 2.48 to 1600, and CI installs whatever Homebrew serves.
+attributes:
+  LastUpgradeCheck: "1600"
+
 # UnitTest is Debug for every purpose except one: the Blackbird target's bundle
 # id (see the target's `configs:` below). The xctest bundle is hosted INSIDE
 # Blackbird.app, so the host's UserDefaults.standard (and Preferences.shared,

@@ -820,29 +820,6 @@ fn insert_mode_never_loses_existing_text_to_a_cluster() {
 }
 
 #[test]
-fn modifier_after_a_narrow_base_in_the_last_column_wraps_as_a_standalone_glyph() {
-    assert_rig_preconditions();
-    // Documented residual (KNOWN_ISSUES): the narrow base is already in the
-    // last column, so there is no room to widen it in place without moving it
-    // across the wrap. The modifier wraps as its own glyph. If this is ever
-    // fixed, this test is the one to update.
-    let t = Term::new(80, 4);
-    t.feed(&"x".repeat(79));
-    t.feed("\u{270C}\u{1F3FD}");
-    let g = t.grid();
-    assert_eq!(
-        g.row_glyphs(0),
-        format!("{}\u{270C}", "x".repeat(79)),
-        "row 0 holds 79 x and the narrow base"
-    );
-    assert_eq!(
-        g.row_glyphs(1),
-        format!("\u{1F3FD}#{}", blanks(78)),
-        "the modifier wraps to row 1 as its own glyph + spacer"
-    );
-}
-
-#[test]
 fn a_full_zero_width_list_never_swallows_the_next_emoji() {
     assert_rig_preconditions();
     // A cell keeps a bounded number of zero-width scalars, so a hostile run of

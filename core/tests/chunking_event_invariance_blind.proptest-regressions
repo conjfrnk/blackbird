@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc baa1a668d9e693f9b176d4e3b00f553c9fa2f5467f2571c16b3c6186a38d5cc8 # shrinks to stream = Stream(["\x1b]10;?", "\x1b[c"]), lens = [1]
+cc 4e23e08e2ce5db5c0c0837e49c11be210d288398e309e75ce5a9a5293855a49a # shrinks to stream = Stream(["\x1b]10;?", "\x1b[18t"]), lens = [1]
+cc fd098ba382115f9b37322a3e2f01df5fcc9a0ee0e3c64ee44a1e4cd813d90ebc # shrinks to stream = Stream(["\x1b]10;?", "\x1b[c"]), lens = [1]
+cc b1ea8639df3861afd20cb0f44f1f286f67b51399cb5aad98c650359fdd210f63 # shrinks to stream = Stream(["      \xe2\x82\xac   \xe2\x82\xac ", "\x1b[?2026h", "\x1b]133;A\x1b\\", "\x1b]133;A\x1b\\", "  \xf0\x9f\x98\x80     \r\n  ", "\x1b[?2026l", "line\r\n"]), lens = [11, 7, 7, 5]

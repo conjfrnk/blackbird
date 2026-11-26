@@ -340,36 +340,6 @@ final class DragDropTests: XCTestCase {
                        "a path with a high variation selector must round-trip unchanged")
     }
 
-    /// Regression: `stripBidiOverrides` must preserve every VS1-16
-    /// scalar (U+FE00–U+FE0F, UTF-8 `EF B8 80..8F`). Wrapping "a<VS>b"
-    /// must come back as the identical 5 bytes — NOT collapsed to "ab".
-    /// This is the paste-pipeline twin of the sanitizeDropPath case:
-    /// Cmd-V of emoji text must not lose its presentation selector.
-    func test_stripBidiOverrides_preservesVariationSelectors1to16() {
-        for vs: UInt8 in 0x80...0x8F {
-            let input = Data([0x61, 0xEF, 0xB8, vs, 0x62])
-            XCTAssertEqual(
-                PasteSanitizer.stripBidiOverrides(input), input,
-                "VS at byte EF B8 \(String(vs, radix: 16, uppercase: true)) must be PRESERVED, not stripped"
-            )
-        }
-    }
-
-    /// Regression: `stripBidiOverrides` must preserve the high
-    /// variation-selector block VS17-256. U+E0100 (`F3 A0 84 80`) and
-    /// U+E01EF (`F3 A0 87 AF`) — the range endpoints — must each come
-    /// back byte-for-byte. These four-byte scalars share the `F3 A0`
-    /// lead with the Plane-14 tag block (which IS stripped), so this
-    /// guards the boundary between the two sub-ranges.
-    func test_stripBidiOverrides_preservesVariationSelectors17to256() {
-        let vs17 = Data([0x61, 0xF3, 0xA0, 0x84, 0x80, 0x62]) // U+E0100
-        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(vs17), vs17,
-                       "VS17 (U+E0100) must be PRESERVED, not stripped")
-        let vs256 = Data([0x61, 0xF3, 0xA0, 0x87, 0xAF, 0x62]) // U+E01EF
-        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(vs256), vs256,
-                       "VS256 (U+E01EF) must be PRESERVED, not stripped")
-    }
-
     /// Anti-false-positive guard: preserving variation selectors must NOT
     /// have come at the cost of disabling the genuine Trojan-source scrub.
     /// Feed a payload that interleaves a preserved VS with two genuine

@@ -419,12 +419,6 @@ impl<T> Grid<T> {
         // Explicitly purge all lines from history.
         self.raw.shrink_lines(self.history_size());
 
-        // Blackbird fix (re-apply on bump): `shrink_lines` only frees the purged rows once more
-        // than `MAX_CACHE_SIZE` of them are spare. Below that they stay in the ring, cells and
-        // OSC 8 links intact, until scrolling wraps round to them, so erasing scrollback (ED 3,
-        // RIS, clear-all) did not credit the hyperlink byte budget. Free them now.
-        self.raw.truncate();
-
         // Reset display offset.
         self.display_offset = 0;
     }
@@ -442,7 +436,7 @@ impl<T> Grid<T> {
         self.raw.initialize(self.max_scroll_limit - self.history_size(), self.columns);
     }
 
-    /// This is used only for truncating before saving ref-tests.
+    /// Drop the rows the ring holds beyond its visible and history lines.
     #[inline]
     pub fn truncate(&mut self) {
         self.raw.truncate();

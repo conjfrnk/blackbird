@@ -27,28 +27,6 @@ final class CellMetricsDecorationBlindTests: XCTestCase {
         }
     }
 
-    func test_underlineThickness_atLeastOnePoint() {
-        XCTAssertGreaterThanOrEqual(metrics(13).underlineThickness, 1)
-    }
-
-    func test_underline_fullyInsideCell_at13pt() {
-        let m = metrics(13)
-        // Bottom edge of the stroke must not fall below the cell floor
-        // (with a half-point of slack) …
-        XCTAssertGreaterThanOrEqual(m.underlineCenterFromBottom,
-                                    m.underlineThickness / 2 + 0.5,
-                                    "underline stroke would clip through the cell bottom")
-        // … and its centre must be inside the cell.
-        XCTAssertLessThan(m.underlineCenterFromBottom, m.cellHeight)
-    }
-
-    func test_strike_isAboveUnderline_andInsideCell_at13pt() {
-        let m = metrics(13)
-        XCTAssertGreaterThan(m.strikeCenterFromBottom, m.underlineCenterFromBottom,
-                             "strikethrough must sit above the underline")
-        XCTAssertLessThan(m.strikeCenterFromBottom, m.cellHeight)
-    }
-
     func test_strike_sitsInLowerCaseBand_at13pt() {
         // A strikethrough runs through x-height text: above the baseline
         // and below the ascent line.

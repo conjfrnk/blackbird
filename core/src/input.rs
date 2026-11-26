@@ -17,10 +17,6 @@ use crate::{BBSyncStatus, BBTerm};
 /// `bb_term_clear_all` aborts the string at this count.
 pub(crate) const WEDGED_STRING_CHUNKS: u32 = 2;
 
-/// DEC 2026 synchronized-update end (`CSI ? 2026 l`), the exact bytes vte's
-/// sync handling scans for.
-const ESU_CSI: &[u8] = b"\x1b[?2026l";
-
 /// Feed one chunk of PTY bytes through the grid processor + parallel OSC tap.
 ///
 /// # Safety
@@ -97,10 +93,13 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // drain. Run whole-chunk, the wire order is tap, processor, colour
     // whatever order the queries were written in, so a DA1 / CPR sentinel
     // overtakes the answers it trails. Advance both parsers in lock-step
-    // instead, cutting before every ESC (each sequence starts at one, so a
-    // segment holds at most one query sequence) and drain after each
-    // segment. An ESC that finds a string open also ends it, which is what
-    // dispatches an unterminated OSC colour query, so that ESC is cut off
+    // instead, cutting before every ESC that can start a query or a tap
+    // sequence (`next_cut`; each sequence starts at an ESC, so a segment
+    // holds at most one query sequence) and drain after each segment. While
+    // a DEC 2026 synchronized update is open or the tap holds prompt marks
+    // the cut is before every ESC, so a replay is followed by as little of
+    // the stream as possible. An ESC that finds a string open also ends it,
+    // which is what dispatches an unterminated OSC colour query, so it is cut off
     // alone: the sequence it begins (a CPR, or an XTVERSION the tap answers
     // on sight) must not run before the colour reply is queued and drained.
     // Both parsers are streaming, so a cut anywhere, even between the ESC and
@@ -117,11 +116,15 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // `advance_grid` stamps them once the update has been replayed.
     let mut start = 0;
     while start < slice.len() {
+        let synchronized = bb.processor.sync_timeout().sync_timeout().is_some()
+            || !bb.osc_tap.held_prompt_marks.is_empty();
         let end = if slice[start] == 0x1B && bb.processor.in_string() {
             start + 1
-        } else {
+        } else if synchronized {
             memchr::memchr(0x1B, &slice[start + 1..])
                 .map_or(slice.len(), |next_esc| start + 1 + next_esc)
+        } else {
+            next_cut(slice, start + 1)
         };
         let segment = &slice[start..end];
         {
@@ -134,6 +137,46 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
         start = end;
     }
     finish_advance(bb);
+}
+
+/// Offset of the next ESC at or after `from` that `process_input` must cut
+/// before, or `slice.len()`.
+///
+/// Cutting before every ESC cost a coloured log a tenth of its throughput, so
+/// an ESC that starts an inert CSI is skipped: the segment runs on through it.
+/// That changes nothing observable. Whatever state either parser is in, the
+/// ESC moves it to the same one, the tap acts only on CSIs with a `>`
+/// intermediate, and the grid answers none of the finals `is_inert_csi`
+/// admits, so the skipped bytes add no reply and no tap event to the segment.
+fn next_cut(slice: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while let Some(offset) = memchr::memchr(0x1B, &slice[at..]) {
+        let esc = at + offset;
+        if !is_inert_csi(&slice[esc..]) {
+            return esc;
+        }
+        at = esc + 1;
+    }
+    slice.len()
+}
+
+/// SGR, cursor movement, erase, insert / delete, scroll and DECSTBM.
+const INERT_CSI_FINALS: &[u8] = b"mHfABCDEFGdJKLMPX@STr";
+
+/// Whether `bytes` opens with a CSI that is complete within
+/// `bytes`, carries only digit / `;` / `:` parameters, and ends in a final byte
+/// that styles, moves the cursor, erases or edits. `c` (DA), `n` (DSR) and `t`
+/// (window reports, title stack) are answered or fire events, and anything with
+/// a private marker or an intermediate may be a query (`CSI ? u`, `CSI > q`,
+/// `CSI ? 2026 h`), so none of those qualify.
+fn is_inert_csi(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"\x1b[") {
+        return false;
+    }
+    bytes[2..]
+        .iter()
+        .find(|byte| !matches!(byte, b'0'..=b'9' | b';' | b':'))
+        .is_some_and(|last| INERT_CSI_FINALS.contains(last))
 }
 
 /// The tail every parser-advance path owes: resolve deferred OSC 10/11/12
@@ -165,8 +208,9 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     // stale, and log only the first: a flood refuses one link per row.
     //
     // What an erase frees depends on WHICH SCREEN holds the links, not on how
-    // many rows the grid keeps: `Grid::clear_history` truncates, so the rows an
-    // erase reaches are released at once. `osc8_refusal_log_truth_blind.rs`
+    // many rows the grid keeps: `Term::free_purged_hyperlinks` truncates while a
+    // link is charged, so the rows an erase reaches are released at once.
+    // `osc8_refusal_log_truth_blind.rs`
     // measures each case and reads every clause below that names a remedy as a
     // claim about the screen holding the links, which it checks against the
     // measurement; keep them in step (a changed claim also needs the test's
@@ -193,13 +237,13 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
 /// parses meanwhile cannot be stamped from it (see `OscScanner::sync_pending`).
 /// The advance that replays the buffer is the one that moves the grid past
 /// those marks, and a mark is stamped from the grid right after it. So while
-/// marks are held, `bytes` is advanced in two steps at the first ESU: bytes
-/// after the ESU (the command's output, say) then cannot move the cursor before
-/// the held marks read it. A pure append grows the buffer by exactly the bytes
-/// fed; any other outcome, or the update no longer being open, means a replay
-/// happened. That also covers the replays the ESU scan cannot see: the 2 MiB
-/// cap, an ESU split across feeds, and an ESU followed by a further BSU, which
-/// leaves that BSU's bytes buffered.
+/// marks are held, `bytes` is advanced one step per `l`: an ESU ends in `l`
+/// wherever a read boundary cut it, so the step that completes one ends exactly
+/// there, and bytes after the ESU (the command's output, say) cannot move the
+/// cursor before the held marks read it. A pure append grows the buffer by
+/// exactly the bytes fed; any other outcome, or the update no longer being
+/// open, means a replay happened. That also covers the 2 MiB cap and an ESU
+/// followed by a further BSU, which leaves that BSU's bytes buffered.
 ///
 /// Marks held by `flush_sync_update` are released there instead.
 ///
@@ -207,10 +251,8 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
 /// Same single-thread discipline as `process_input`.
 unsafe fn advance_grid(bb: &mut BBTerm, mut bytes: &[u8]) {
     while !bytes.is_empty() && !bb.osc_tap.held_prompt_marks.is_empty() {
-        let (step, rest) = match memchr::memmem::find(bytes, ESU_CSI) {
-            Some(at) => bytes.split_at(at + ESU_CSI.len()),
-            None => (bytes, &bytes[bytes.len()..]),
-        };
+        let step_len = memchr::memchr(b'l', bytes).map_or(bytes.len(), |at| at + 1);
+        let (step, rest) = bytes.split_at(step_len);
         let buffered_if_appended = bb.processor.sync_bytes_count() + step.len();
         bb.processor.advance(&mut bb.term, step);
         let still_buffering = bb.processor.sync_timeout().sync_timeout().is_some()

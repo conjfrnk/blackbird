@@ -62,45 +62,6 @@ final class AccessibilityStringHugeLengthBlindTests: XCTestCase {
 
     // MARK: - The trap: location >= 1, length == Int.max
 
-    func testHugeLengthFromOffsetOneReturnsNil() throws {
-        let view = try makeViewWithKnownValue()
-        let range = NSRange(location: 1, length: Int.max)
-        let result = view.accessibilityString(for: range)
-        XCTAssertNil(result,
-                     "accessibilityString(for: {1, Int.max}) must be nil (out of bounds), got \(String(describing: result))")
-    }
-
-    func testHugeLengthFromOffsetFiveReturnsNil() throws {
-        let view = try makeViewWithKnownValue()
-        let range = NSRange(location: 5, length: Int.max)
-        let result = view.accessibilityString(for: range)
-        XCTAssertNil(result,
-                     "accessibilityString(for: {5, Int.max}) must be nil (out of bounds), got \(String(describing: result))")
-    }
-
-    func testNotFoundLengthFromNonZeroOffsetReturnsNil() throws {
-        // NSNotFound is a common "unbounded" sentinel that automation clients
-        // pass as a length. It equals Int.max on 64-bit, so it overflows the
-        // same way; this test pins the intent independent of that detail.
-        let view = try makeViewWithKnownValue()
-        let range = NSRange(location: 3, length: NSNotFound)
-        let result = view.accessibilityString(for: range)
-        XCTAssertNil(result,
-                     "accessibilityString(for: {3, NSNotFound=\(NSNotFound)}) must be nil (out of bounds), got \(String(describing: result))")
-    }
-
-    func testHugeLengthAtEndOfTextReturnsNil() throws {
-        // location == count is the last legal location (the insertion point),
-        // so it passes any "location <= count" guard and reaches the
-        // overflowing addition. Length > 0 makes it out of bounds -> nil.
-        let view = try makeViewWithKnownValue()
-        let count = view.accessibilityNumberOfCharacters()
-        let range = NSRange(location: count, length: Int.max)
-        let result = view.accessibilityString(for: range)
-        XCTAssertNil(result,
-                     "accessibilityString(for: {\(count), Int.max}) must be nil (out of bounds), got \(String(describing: result))")
-    }
-
     func testHugeLengthFromEveryLegalNonZeroOffsetReturnsNil() throws {
         // Exhaustive over every location in 1...count: each one overflows
         // `location + Int.max`. The first offender (if any) is named in the

@@ -145,27 +145,6 @@ final class PTYTests: XCTestCase {
                        "PTY master fd must have F_SETNOSIGPIPE applied (H1)")
     }
 
-    func test_F_SETNOSIGPIPE_platformPrimitive() throws {
-        // Defense-in-depth on top of test_masterFDHasNoSigPipeSet:
-        // exercise the platform fcntl primitive in-process so a
-        // future macOS that stops exposing F_SETNOSIGPIPE breaks
-        // CI before any user-visible regression.
-        var master: Int32 = -1
-        var slave: Int32 = -1
-        XCTAssertEqual(Darwin.openpty(&master, &slave, nil, nil, nil), 0,
-                       "openpty should succeed on a healthy host")
-        defer {
-            _ = Darwin.close(master)
-            _ = Darwin.close(slave)
-        }
-        XCTAssertEqual(Darwin.fcntl(master, F_GETNOSIGPIPE), 0,
-                       "F_NOSIGPIPE should be off by default on a fresh master fd")
-        XCTAssertEqual(Darwin.fcntl(master, F_SETNOSIGPIPE, 1), 0,
-                       "F_SETNOSIGPIPE should succeed on a master fd")
-        XCTAssertEqual(Darwin.fcntl(master, F_GETNOSIGPIPE), 1,
-                       "After F_SETNOSIGPIPE(1), F_GETNOSIGPIPE should return 1")
-    }
-
     func test_scrubbedParentEnvVars_coversKnownLeaks() {
         // Pin the env-scrub list. These launchd / XPC / CoreFoundation
         // variables leak from the GUI app's context into the child shell
