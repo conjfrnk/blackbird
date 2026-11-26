@@ -1,34 +1,17 @@
 import AppKit
 import os
 
-/// representedObject payload for the tab-move context-menu items. Windows
-/// are held weakly: a window CAN die between menu build and action fire
-/// (a shell-exit `performClose` queued on the main queue lands once menu
-/// tracking's runloop mode ends), and a nil'd reference must be a logged
-/// no-op, not a dangling pointer.
+/// Windows are held weakly: a window can die between menu build and action fire.
 @MainActor
 final class TabMoveRequest: NSObject {
 
-    /// A weakly-held window, boxed so it can live inside an enum case
-    /// (Swift doesn't allow `weak` directly on an associated value) —
-    /// same shape as `TabOrderCoordinator.WeakWindow`.
     final class WeakWindow {
         private(set) weak var value: NSWindow?
         init(_ value: NSWindow) { self.value = value }
     }
 
-    /// Where the tab is going. A closed enum instead of an Optional
-    /// destination window so "detach to a new window" (deliberately no
-    /// destination) and "the destination deallocated since menu build"
-    /// (weak-zeroed box) are different states — with a nil-overloaded
-    /// Optional the two were indistinguishable at fire time and a wiring
-    /// bug would be mislabeled in the log as a benign race
-    /// (type-design review; `ReinsertAnchor` precedent in
-    /// TabOrderCoordinator.swift).
     enum Destination {
-        /// Detach the tab into its own standalone window.
         case newWindow
-        /// Splice the tab into this window's tab group.
         case toWindow(WeakWindow)
     }
 
@@ -41,39 +24,21 @@ final class TabMoveRequest: NSObject {
     }
 }
 
-/// Programmatic move-a-tab-between-windows engine + the NSMenuItem action
-/// target for the pill context menu's move items (RCA
-/// docs/rca-tab-behaviors-2026-07-01.md Bug 6: the menu-based affordance;
-/// pill drag-out/drag-in is a possible later layer on top of this).
-///
-/// A singleton because `NSMenuItem.target` is weak — the items built in
-/// `TabStripView.menu(for:)` need a target that outlives menu tracking.
+/// A singleton because `NSMenuItem.target` is weak: the move items need a target that outlives menu tracking.
 @MainActor
 final class TabMover: NSObject {
 
     static let shared = TabMover()
 
-    /// Compiler-enforced singleton (matches `TabOrderCoordinator`):
-    /// `NSMenuItem.target` is weak, so a menu item wired to a freshly
-    /// constructed `TabMover()` would go dead the moment the constructor's
-    /// scope ends — exactly the failure the singleton exists to prevent.
     private override init() {}
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "tabMove")
 
     #if DEBUG
-    /// Test seam — visibility oracle override. Headless xctest must NEVER
-    /// `orderFront` real windows (it destabilizes the shared host: AppKit's
-    /// visible-window tab-merge animation + key-window churn dereference
-    /// half-released state in later tests — the long-standing rule
-    /// documented in `TabOrderCoordinatorTests.makeGroup`, re-confirmed by
-    /// crash Blackbird-2026-07-02-143902.ips). Tests inject a synthetic
-    /// visibility answer instead; production always reads `isVisible`.
     static var _isVisibleForTesting: ((NSWindow) -> Bool)?
     #endif
 
-    /// The one visibility read every eligibility decision goes through.
     private static func isVisible(_ window: NSWindow) -> Bool {
         #if DEBUG
         if let probe = _isVisibleForTesting { return probe(window) }
@@ -82,14 +47,9 @@ final class TabMover: NSObject {
     }
 
     #if DEBUG
-    /// Test seam — suppress `moveTab`'s final `makeKeyAndOrderFront`.
-    /// Making a window key / ordering it front is the other half of the
-    /// headless-host prohibition above; the group-membership, selection,
-    /// and sweep effects the tests assert are unaffected.
     static var _suppressPresentationForTesting = false
     #endif
 
-    /// Whether `moveTab` should present the moved tab (key + front).
     private static var shouldPresentMovedTab: Bool {
         #if DEBUG
         return !_suppressPresentationForTesting
@@ -100,29 +60,15 @@ final class TabMover: NSObject {
 
     // MARK: - Destinations
 
-    /// Pure eligibility predicate for a move destination. Terminal windows
-    /// only (Settings / About / Sparkle panels can't host tabs), visible
-    /// only (a miniaturized window would swallow the tab into the Dock
-    /// unseen), and not fullscreen (v1 safety: the fullscreen
-    /// entry/reconfigure path is sensitive — see the frame-save
-    /// suppression in c243128 — so fullscreen windows sit this feature
-    /// out rather than risk a mid-Space tab splice).
+    /// Visible only: a miniaturized window would swallow the tab into the Dock unseen.
     static func destinationEligible(isTerminalWindow: Bool,
                                     isVisible: Bool,
                                     styleMask: NSWindow.StyleMask) -> Bool {
         isTerminalWindow && isVisible && !styleMask.contains(.fullScreen)
     }
 
-    /// One representative window per eligible destination, in `candidates`
-    /// order (first occurrence of a group claims its position). Excludes
-    /// `tab` itself and every member of `tab`'s current group — moving a
-    /// tab "to" its own group is a no-op the menu shouldn't offer.
-    ///
-    /// Grouped candidates dedupe by `tabGroup` identity; the representative
-    /// is the group's `selectedWindow` when that window is itself eligible
-    /// (its title is what the user sees front on that window), otherwise
-    /// the first eligible member encountered. Standalone (`tabGroup ==
-    /// nil`) windows each stand for themselves.
+    /// One representative window per eligible destination group, in `candidates` order; excludes
+    /// `tab` and its own group. The representative is the group's `selectedWindow` when eligible.
     static func moveDestinations(for tab: NSWindow,
                                  among candidates: [NSWindow]) -> [NSWindow] {
         let sourceGroup = tab.tabGroup
@@ -140,11 +86,6 @@ final class TabMover: NSObject {
                 let key = ObjectIdentifier(group)
                 guard !seenGroups.contains(key) else { continue }
                 seenGroups.insert(key)
-                // Prefer the group's selected window as the face of the
-                // destination — but only when it is itself eligible (it
-                // could be the fullscreen member of a mixed group in some
-                // future AppKit behavior; don't hand the menu an
-                // ineligible window).
                 let selected = group.selectedWindow
                 if let selected,
                    destinationEligible(
@@ -165,29 +106,19 @@ final class TabMover: NSObject {
 
     // MARK: - Moves
 
-    /// Detach `tab` from its group into its own standalone window.
-    /// Delegates to AppKit's `NSWindow.moveTabToNewWindow(_:)` — the
-    /// `TerminalWindow` override posts the app-wide refresh sweep, so
-    /// source-group strips repaint and the hidden-native-strip hider
-    /// re-asserts (RCA Bug 5 path).
     func moveTabToNewWindow(_ tab: NSWindow) {
         guard let group = tab.tabGroup, group.windows.count > 1 else {
             Self.logger.notice("moveTabToNewWindow: tab has no siblings to detach from; ignoring")
             return
         }
         if !(tab is TerminalWindow) {
-            // The refresh sweep rides the TerminalWindow.moveTabToNewWindow
-            // override; a plain-NSWindow caller detaches fine but leaves
-            // every sibling strip stale — exactly the Bug-5 class this
-            // machinery exists to fix. No such caller exists today; the
-            // canary is for the future one. (silent-failure review)
+            // The refresh sweep rides the `TerminalWindow.moveTabToNewWindow` override; a plain
+            // `NSWindow` detaches but leaves every sibling strip stale.
             Self.logger.notice("moveTabToNewWindow: tab is not a TerminalWindow — the detach refresh sweep will NOT fire")
         }
         tab.moveTabToNewWindow(nil)
     }
 
-    /// Move `tab` into `destination`'s tab group, select it there, and
-    /// make it key — native drag semantics: focus follows the tab.
     func moveTab(_ tab: NSWindow, toWindow destination: NSWindow) {
         guard tab !== destination else {
             Self.logger.notice("moveTab: tab and destination are the same window; ignoring")
@@ -197,14 +128,8 @@ final class TabMover: NSObject {
             Self.logger.notice("moveTab: tab already belongs to the destination's group; ignoring")
             return
         }
-        // Re-validate at fire time, not just menu-build time: the
-        // destination can change state between the two (enter fullscreen,
-        // miniaturize, close-but-stay-retained) — the weak payload refs
-        // only catch deallocation, not state, and a future drag-in layer
-        // would call this engine with no build-time filter at all (TOCTOU;
-        // type-design + silent-failure reviews). Without this, a move into
-        // an ordered-out window makes the tab vanish from the screen with
-        // its shell session unreachable.
+        // Re-validate at fire time: the weak payload refs catch deallocation, not a state change
+        // (fullscreen, miniaturize, closed-but-retained) since menu build.
         guard Self.destinationEligible(
             isTerminalWindow: destination is TerminalWindow,
             isVisible: Self.isVisible(destination),
@@ -213,24 +138,14 @@ final class TabMover: NSObject {
             Self.logger.notice("moveTab: destination is no longer an eligible move target (visible=\(Self.isVisible(destination), privacy: .public), fullscreen=\(destination.styleMask.contains(.fullScreen), privacy: .public)); ignoring")
             return
         }
-        // The SOURCE side of the same v1 fullscreen rule: the pill strip is
-        // reachable in native fullscreen (titlebar accessories reveal with
-        // the menu bar), and splicing a tab OUT of a fullscreen group
-        // across Spaces is the same sensitive path as splicing into one.
-        // The menu also filters this at build time; both layers log.
+        // The pill strip is reachable in native fullscreen (titlebar accessories reveal with the menu bar).
         guard !tab.styleMask.contains(.fullScreen) else {
             Self.logger.notice("moveTab: tab belongs to a fullscreen window — cross-window moves sit out fullscreen (v1); ignoring")
             return
         }
-        // `addTabbedWindow` removes the window from its old group as a side
-        // effect (a window belongs to at most one tab group).
+        // `addTabbedWindow` removes the window from its old group as a side effect.
         destination.addTabbedWindow(tab, ordered: .above)
-        // Post-condition, not assumption: `addTabbedWindow` is a request —
-        // AppKit can decline it (tabbingMode.disallowed, odd window
-        // states). Selecting / sweeping anyway would launder the refusal
-        // into a consistent-looking repaint with zero evidence anything
-        // failed. (silent-failure review; same shape as TerminalWindow.cycle's
-        // coordinator-disagreement canary.)
+        // `addTabbedWindow` is a request AppKit can decline; confirm membership before select and sweep.
         guard let group = tab.tabGroup, group === destination.tabGroup else {
             Self.logger.notice("moveTab: addTabbedWindow did not join the tab to the destination's group; skipping select/sweep")
             return
@@ -239,21 +154,12 @@ final class TabMover: NSObject {
         if Self.shouldPresentMovedTab {
             tab.makeKeyAndOrderFront(nil)
         }
-        // The destination may have been standalone a moment ago — no
-        // tab-group KVO installed at all (the X1/X2 standalone-merge gap).
-        // The app-wide sweep is the one reliable refresh for that case,
-        // same as AppKit's own Merge All Windows path.
+        // A destination that was standalone has no tab-group KVO installed; the app-wide sweep covers it.
         TerminalWindow.postExternalTabActionSweep()
     }
 
     // MARK: - Menu action
 
-    /// The one selector every move menu item fires. Routing on the
-    /// payload's `Destination` enum (rather than pairing two selectors
-    /// with an Optional destination) makes a selector/payload mismatch
-    /// unrepresentable and keeps "detach on purpose" distinguishable from
-    /// "destination died since menu build" — each failure logs as what it
-    /// actually is.
     @objc func moveTabAction(_ sender: NSMenuItem) {
         guard let request = sender.representedObject as? TabMoveRequest else {
             Self.logger.notice("moveTabAction: sender carries no TabMoveRequest — mis-wired menu item; ignoring")

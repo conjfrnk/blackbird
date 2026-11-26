@@ -1,41 +1,23 @@
-//! Sliding/tumbling-window rate limiters guarding the event-dispatch and
-//! OSC reply paths (audit S1-002 / S5-009 / M-7 / synthesis #17). Each shares
-//! the same window algorithm; the caps are sized per concern. Moved out of the
-//! monolith verbatim (REFACTOR.md Wave 1); behavior unchanged.
+//! Rate limiters for the event-dispatch and OSC reply paths.
 
 use std::cell::UnsafeCell;
 
-/// Rate-limiter state for PtyWrite reply events. Mutated only on the
-/// BBTerm-owning thread; the Send/Sync impls below upgrade the
-/// `Arc<…>` to thread-safe under that discipline (same pattern as
-/// `ColorRequestQueue`).
-/// Token bucket for PTY-write replies (DA1, CPR, DECRQM, kitty `CSI ?u`,
-/// XTGETTCAP, colour queries). Was a 32/s tumbling window, which silently
-/// dropped legitimate protocol replies when a tmux attach and an nvim
-/// startup inside it landed in the same second — a dropped DA1/CPR stalls
-/// the TUI until its own timeout. Now: `PTY_WRITE_REPLY_BURST` tokens up
-/// front, refilled at `PTY_WRITE_REPLY_PER_SECOND`, so the sustained rate
-/// (the DoS bound) is unchanged while a startup burst goes through.
+/// Token bucket for PTY-write replies (DA1, CPR, DECRQM, kitty `CSI ?u`, XTGETTCAP, colour
+/// queries). A startup burst must pass: a dropped DA1/CPR stalls the TUI until its own timeout.
 #[derive(Debug)]
 pub(crate) struct PtyWriteRateState {
     last_refill: std::time::Instant,
     tokens: f64,
-    /// Replies allowed since construction / `reset` — observable for
-    /// tests and for `bb_term_clear_all`'s reset pin.
+    /// Replies allowed since construction / `reset`.
     pub(crate) window_count: u32,
 }
 
-/// Send+Sync wrapper around `UnsafeCell<PtyWriteRateState>` so it can
-/// live behind an `Arc` shared with `RoutingListener`. The wrapper is
-/// the same shape `ColorRequestQueue` uses; both rely on the
-/// single-thread-per-BBTerm contract documented in `RoutingListener`.
 pub(crate) struct PtyWriteRateCell {
     pub(crate) state: UnsafeCell<PtyWriteRateState>,
 }
 
-// SAFETY: BBTerm's single-thread-per-handle contract (see
-// `RoutingListener` doc) forbids concurrent access to the listener,
-// and PtyWriteRateCell is reachable only via that listener.
+// SAFETY: reachable only via the listener, and BBTerm's single-thread-per-handle contract
+// forbids concurrent access to it.
 unsafe impl Send for PtyWriteRateCell {}
 unsafe impl Sync for PtyWriteRateCell {}
 
@@ -46,41 +28,23 @@ impl PtyWriteRateCell {
         }
     }
 
-    /// Returns true if the dispatch is allowed; false if the cap has
-    /// been hit and the caller should drop the event silently.
-    ///
     /// # Safety
-    /// Caller must respect the single-thread-per-BBTerm discipline —
-    /// no concurrent calls.
+    /// Caller must respect the single-thread-per-BBTerm discipline — no concurrent calls.
     pub(crate) unsafe fn allow(&self) -> bool {
         (*self.state.get()).allow()
     }
 
-    /// Reset the sliding window so the next `allow()` starts a fresh
-    /// 1-second budget. Used by `bb_term_clear_all` (audit H-3) so a
-    /// pre-clear PtyWrite flood doesn't eat the post-clear session's
-    /// PTY-write budget.
-    ///
     /// # Safety
-    /// Caller must respect the single-thread-per-BBTerm discipline —
-    /// no concurrent calls.
+    /// Caller must respect the single-thread-per-BBTerm discipline — no concurrent calls.
     pub(crate) unsafe fn reset(&self) {
         *self.state.get() = PtyWriteRateState::new();
     }
 }
 
 pub(crate) const PTY_WRITE_REPLY_PER_SECOND: u32 = 32;
-/// Bucket capacity: how many replies may go out back-to-back from idle.
 pub(crate) const PTY_WRITE_REPLY_BURST: u32 = 128;
 
-/// Tumbling-window state for the Title/Bell event caps (audit S1-002).
-/// ("Tumbling", not sliding: `window_start` resets on expiry, so up to
-/// 2×cap can cross a window boundary — same algorithm as the sibling
-/// limiters, named honestly.) The cap/window POLICY is bound at
-/// construction (review follow-up): an `allow(cap, window)` signature
-/// let the two call sites be cross-wired silently. Lives inside
-/// `CallbackCell` behind the same mutual-exclusion discipline as
-/// `slot`.
+/// Tumbling window: `window_start` resets on expiry, so up to 2×cap can cross a window boundary.
 pub(crate) struct EventRateState {
     cap: u32,
     window: std::time::Duration,
@@ -111,9 +75,6 @@ impl EventRateState {
         true
     }
 
-    /// How long until `allow()` would admit again, or `None` if it would
-    /// admit right now. A pure read: unlike `allow()` it neither rolls the
-    /// window nor spends budget, so a caller can ask without side effects.
     pub(crate) fn retry_after(&self) -> Option<std::time::Duration> {
         let elapsed = std::time::Instant::now().duration_since(self.window_start);
         if elapsed >= self.window || self.window_count < self.cap {
@@ -123,36 +84,12 @@ impl EventRateState {
     }
 }
 
-/// Title-event cap (audit S1-002). Every `Event::Title`/`Event::Bell`
-/// used to dispatch uncapped — only PtyWrite had a budget — and the
-/// Swift side enqueues one main-queue hop per event (titles amplify
-/// further through @Published → window.title → KVO → tab-bar refresh
-/// broadcast). A stream of `ESC]0;x BEL` (`yes $'\e]0;x\a'`, a hostile
-/// remote, or catting a binary full of BEL bytes) therefore saturated
-/// the main queue with an unbounded backlog of retained Strings — the
-/// same flood class the F1 snapshot coalescer and M1 PtyWrite cap
-/// already closed on their paths. 32/sec matches the PtyWrite budget:
-/// legitimate shells emit a couple of titles per prompt and animated
-/// build tools stay well under. Suppressed titles are NOT plain-dropped
-/// — title is last-writer-wins state and nothing re-emits in the
-/// default configuration (the bundled shell integration sends no
-/// OSC 0/2), so dropping the newest would pin a stale title
-/// indefinitely. They coalesce to the latest via `suppressed_title`
-/// and deliver on the first input chunk after the window rolls.
+/// Suppressed titles coalesce to the latest via `suppressed_title`, not drop: title is
+/// last-writer-wins state and nothing re-emits it.
 pub(crate) const TITLE_EVENT_PER_SECOND: u32 = 32;
-/// Bell-event cap (audit S1-002, same rationale as the title cap).
-/// 16/sec is far above perception — the Swift bell flash visually
-/// coalesces long before that.
 pub(crate) const BELL_EVENT_PER_SECOND: u32 = 16;
-/// Desktop notifications: a hostile stream must not be able to spam
-/// Notification Center; four per second is far above any real program.
 pub(crate) const NOTIFICATION_EVENT_PER_SECOND: u32 = 4;
-/// OSC 52 clipboard-write cap. Each delivered event costs a main-queue
-/// hop plus an `NSPasteboard` rewrite (~150 us), so `yes $'\e]52;c;YQ==\a'`
-/// (opt-in pref on) queued millions of them and froze main while RSS
-/// climbed ~200 MB/s. Real programs (vim/tmux yank) write about once per
-/// user action. Clipboard is last-writer-wins state, so suppressed writes
-/// coalesce to the latest via `suppressed_osc52` like titles do.
+/// Suppressed clipboard writes coalesce to the latest via `suppressed_osc52`, like titles.
 pub(crate) const OSC52_EVENT_PER_SECOND: u32 = 32;
 pub(crate) const EVENT_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -165,8 +102,6 @@ impl PtyWriteRateState {
         }
     }
 
-    /// Returns true if the dispatch is allowed; false if the bucket is
-    /// empty and the caller should drop the event silently.
     pub(crate) fn allow(&mut self) -> bool {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
@@ -182,61 +117,14 @@ impl PtyWriteRateState {
     }
 }
 
-/// Per-terminal rate limit for OSC 133 prompt marks (an `EventRateState`
-/// built from `PROMPT_MARK_PER_SECOND` / `PROMPT_MARK_WINDOW`).
-///
-/// Mitigates audit synthesis bug #10: an attacker emitting `OSC 133;A`
-/// thousands of times per second floods Swift's `recordPromptStart` ring
-/// (cap 200) and rotates legitimate prompt marks out, so ⌘↑/⌘↓ navigation
-/// lands on attacker-authored "fake prompts" — a phishing primitive.
-///
-/// Policy: at most `PROMPT_MARK_PER_SECOND` dispatches per rolling
-/// 1-second window across ALL FOUR kinds (A/B/C/D — see the gate in
-/// `handle_osc133` for why D is included; RC-03).
-///
-/// The window resets when `Instant::now()` is more than 1 second past
-/// the window start. Excess fires within an active window are dropped;
-/// the first drop per session leaves a one-shot breadcrumb (see
-/// `osc133_rate_limited_logged`).
-///
-/// Sizing (audit S5-009, 2026-06-09): the original 16/sec budget was
-/// sized for hostile floods but dropped LEGITIMATE marks at ordinary
-/// interactive rates — the bundled integration emits D+A (precmd) +
-/// B (PS1) per empty prompt cycle and +C per command, so holding
-/// Return at a shell prompt (macOS key-repeat up to ~33 Hz × 3 marks)
-/// produces ~100 marks/sec and cycle 6+'s A marks vanished from ⌘
-/// navigation while their paired Ds desynced. 240/sec is ~2× the
-/// fastest physically-typeable mark rate (33 Hz × 4 marks + margin)
-/// while still bounding a hostile flood to 240 small main-thread hops
-/// per second on the Swift side — the phishing/DoS mitigation #10
-/// cares about is preserved.
+/// OSC 133 prompt-mark cap, shared by all four kinds (A/B/C/D). Sized ~2× the fastest typeable
+/// rate (key-repeat ~33 Hz × 4 marks); a lower cap drops legitimate marks.
 pub(crate) const PROMPT_MARK_PER_SECOND: u32 = 240;
 pub(crate) const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// OSC 10/11/12 color-query reply rate limit (audit synthesis bug #17).
-/// `ColorRequestQueue::push` caps at 256 entries between two drains: one
-/// ESC-delimited segment outside a DEC 2026 synchronized update (there the
-/// cap is only a backstop), the whole replayed buffer inside one (there it
-/// is the live bound). Either way a hostile shell can send many queries, in
-/// one chunk or across many, and amplify replies through the PTY. This
-/// tumbling-window cap (it resets wholesale when the window rolls, like
-/// `EventRateState`, the prompt-mark limiter's pattern) bounds that. 32/sec
-/// is generous (legitimate apps probe at most a handful per second); excess
-/// replies are dropped, logging only the first drop per window.
 pub(crate) const COLOR_QUERY_REPLY_PER_SECOND: u32 = 32;
 pub(crate) const COLOR_QUERY_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// OSC 7 (CWD reporting) ingest rate limit (audit M-7, 2026-04-29), an
-/// `EventRateState` per terminal. `bb_term_clear_all` resets it separately
-/// from the prompt-mark limiter so each stays individually targetable
-/// (audit H-3).
-/// Legitimate shells emit one OSC 7 per `cd` — typically far fewer than
-/// 1/sec interactively. A hostile remote streaming OSC 7s in a tight
-/// loop forces `TerminalSession.handleCwdChanged` (Swift) to run
-/// `classifyForegroundNamespace()` on every event, which does a
-/// `proc_listpids(PROC_PPID_ONLY)` BFS up to 256 nodes — main-thread
-/// work that beachballs the UI. 32/sec mirrors the existing PtyWrite
-/// cap; well above any realistic interactive shell, well below the
-/// flood-amplification threshold. Excess OSC 7s are dropped silently.
+/// Each delivered OSC 7 costs a main-thread process-tree walk on the Swift side.
 pub(crate) const OSC7_INGEST_PER_SECOND: u32 = 32;
 pub(crate) const OSC7_INGEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);

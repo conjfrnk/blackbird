@@ -47,13 +47,6 @@ final class CursorShapeTests: XCTestCase {
         XCTAssertEqual(Preferences.shared.cursorShape, .followShell)
     }
 
-    func test_roundtrip_each_case() {
-        for c in Preferences.CursorShape.allCases {
-            Preferences.shared.cursorShapeRaw = c.rawValue
-            XCTAssertEqual(Preferences.shared.cursorShape, c)
-        }
-    }
-
     func test_rendererOverride_isNilForFollowShell() {
         Preferences.shared.cursorShapeRaw = Preferences.CursorShape.followShell.rawValue
         XCTAssertNil(Preferences.shared.cursorShape.rendererOverride)

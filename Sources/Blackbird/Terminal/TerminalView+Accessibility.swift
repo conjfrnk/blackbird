@@ -3,46 +3,15 @@ import Foundation
 import os
 import BBCore
 
-/// NSAccessibility overrides for `TerminalView`. Kept in a focused
-/// extension file so the a11y contract stays visible in one place:
-/// role (.textArea, always an element; the find bar rides along as a child
-/// when installed), label ("Terminal"), value (snapshot grid joined with
-/// newlines), the line/character/range accessors VoiceOver uses to navigate
-/// by line / word / character, and the throttled `.valueChanged` post that
-/// tells VoiceOver the grid text moved.
-///
-/// The stored state (`a11yCache` and the DEBUG-only
-/// `a11ySnapshotOverride`) lives on the class body; see
-/// `TerminalView.swift`. Swift requires stored properties on the
-/// declaring type, not on extensions — they're marked `internal`
-/// rather than `private` so this extension can reach them across the
-/// file boundary.
-///
-/// Promoted from `.staticText` to `.textArea` in v0.2 (F-S5-021). The
-/// view is read-only — no `accessibilityIsEditable() == true` override —
-/// so VO won't try to insert text. Selection getter returns the empty
-/// range (rectangular grid → character index isn't a clean mapping for
-/// wrapped lines); the setter is a no-op that logs once.
-///
-/// Audited by terminal-view-2 F1 (cache-key identity), swift-tests-
-/// view F1 (leak reap). Tests in `AccessibilityTests.swift` pin role,
-/// value, cache, line/character accessors, and selection contract.
 extension TerminalView {
 
     public override func isAccessibilityElement() -> Bool {
-        // Always an element, find bar or not: a container-mode view is
-        // skipped by AppKit, which takes the grid text (our value and the
-        // line/character accessors) out of the tree and leaves a VoiceOver
-        // user who opens find able to hear "n of m" but not read the match.
-        // The bar stays reachable through `accessibilityChildren()` below.
+        // Always an element, find bar or not: AppKit skips a container-mode view,
+        // which takes the grid text out of the accessibility tree.
         true
     }
 
     public override func accessibilityRole() -> NSAccessibility.Role? {
-        // .textArea (vs .staticText prior to v0.2): VO can now navigate by
-        // line / word / character via the line-offset accessors below. The
-        // view is not editable (no `accessibilityIsEditable() == true`),
-        // so VO won't attempt insertions. F-S5-021.
         .textArea
     }
 
@@ -53,11 +22,8 @@ extension TerminalView {
     }
 
     public override func accessibilityChildren() -> [Any]? {
-        // Only the find bar needs exposing; without one, keep the default.
         guard let bar = findController.findBar else { return super.accessibilityChildren() }
-        // Order matters for VO navigation: bar on top visually, every
-        // other subview below. Covers drop-highlight / bell flash / scroll
-        // indicator in case any of them ever grow accessibility affordances.
+        // Order drives VoiceOver navigation: the bar comes first.
         var kids: [Any] = [bar]
         for sub in subviews where sub !== bar {
             kids.append(sub)
@@ -66,9 +32,6 @@ extension TerminalView {
     }
 
     public override func accessibilityValue() -> Any? {
-        // Test overrides take precedence so headless tests can inject a
-        // deterministic grid without a running BBTerm. Under production
-        // builds the #if DEBUG branch compiles out entirely.
         #if DEBUG
         let source: A11ySnapshotSource? = a11ySnapshotOverride ?? currentSnapshot
         #else
@@ -82,23 +45,15 @@ extension TerminalView {
         let computed = source.visibleRowsAsText()
             .map { $0.trimmingTrailingWhitespace() }
             .joined(separator: "\n")
-        // One mutation point: stamps value + identity and clears the
-        // value-keyed `lineOffsets` (+ bumps the recompute counter) together.
         a11yCache.store(value: computed, identity: identity)
         return computed
     }
 
-    /// Coalescing window for `.valueChanged` posts. Each post makes VoiceOver
-    /// re-read the grid, so a streaming build log must not post at the
-    /// snapshot publish rate; a quarter second keeps new output audible
-    /// without flooding speech or the main thread.
+    /// Each `.valueChanged` post makes VoiceOver re-read the grid, so posts are coalesced.
     static let valueChangedCoalesceInterval: TimeInterval = 0.25
 
-    /// Tell assistive clients the grid text changed. Called from
-    /// `currentSnapshot.didSet`; AppKit never posts for a custom view, so
-    /// without this VoiceOver is not told about new output or a viewport
-    /// move until the user re-queries the element. AppKit drops the post
-    /// when no assistive client is observing, so no VoiceOver gate is needed.
+    /// AppKit never posts `.valueChanged` for a custom view, and drops the post when
+    /// no assistive client is observing.
     func scheduleAccessibilityValueChanged() {
         guard !a11yValueChangedPending else { return }
         a11yValueChangedPending = true
@@ -109,42 +64,29 @@ extension TerminalView {
         }
     }
 
-    /// `accessibilityValue()` coalesced to a `String`. The
-    /// `(accessibilityValue() as? String) ?? ""` cast was repeated across every
-    /// line-math accessor below; one helper here.
     private func currentA11yValue() -> String {
         (accessibilityValue() as? String) ?? ""
     }
 
-    // MARK: - .textArea accessors (F-S5-021)
+    // MARK: - .textArea accessors
 
-    /// Total character count of `accessibilityValue()` (UTF-16 code unit
-    /// count, since AppKit's a11y API is `NSRange`-based and VO reads
-    /// indices in UTF-16 units). Same shape as NSTextView.
+    /// UTF-16 code units: the accessibility API is `NSRange`-based.
     public override func accessibilityNumberOfCharacters() -> Int {
         let value = currentA11yValue()
         return value.utf16.count
     }
 
-    /// All visible characters are part of the visible range — the snapshot
-    /// already exposes only what's on screen. Scrollback rows aren't
-    /// included in `accessibilityValue()` here.
     public override func accessibilityVisibleCharacterRange() -> NSRange {
         NSRange(location: 0, length: accessibilityNumberOfCharacters())
     }
 
-    /// Substring for `range`. Returns nil for out-of-bounds requests.
-    /// Decodes via `String(decoding: as: UTF16.self)` so astral codepoints
-    /// (emoji, CJK Ext-B) survive intact — the earlier
-    /// `compactMap { Unicode.Scalar($0) }` shape silently dropped UTF-16
-    /// surrogates and corrupted any range crossing an emoji boundary.
+    /// Decodes as UTF-16 so a surrogate pair inside the range survives.
     public override func accessibilityString(for range: NSRange) -> String? {
         let value = currentA11yValue()
         let utf16 = value.utf16
         let count = utf16.count
-        // `length <= count - location`, not `location + length <= count`: the
-        // client picks the range, and `{1, Int.max}` would trap on the add.
-        // The subtraction is safe once `0 <= location <= count`.
+        // `length <= count - location`, not `location + length <= count`: the client
+        // picks the range, and `{1, Int.max}` would trap on the add.
         guard range.location >= 0, range.length >= 0,
               range.location <= count, range.length <= count - range.location else {
             return nil
@@ -157,23 +99,14 @@ extension TerminalView {
         return String(decoding: units, as: UTF16.self)
     }
 
-    /// Range of the `line`-th line (zero-indexed) in `accessibilityValue()`,
-    /// excluding the trailing newline. Returns `{NSNotFound, 0}` when
-    /// `line` is out of range — matches `NSTextView`'s contract for a
-    /// non-existent line.
+    /// Excludes the trailing newline. `{NSNotFound, 0}` for a line out of range, as NSTextView does.
     public override func accessibilityRange(forLine line: Int) -> NSRange {
         let offsets = ensureLineOffsets()
-        // offsets has `numLines + 1` entries; valid line indices are
-        // [0, numLines).
         guard line >= 0, line < offsets.count - 1 else {
             return NSRange(location: NSNotFound, length: 0)
         }
         let start = offsets[line]
         let nextStart = offsets[line + 1]
-        // `nextStart` points to the character AFTER the trailing '\n'
-        // (or to the end of the value, for the last line). Strip the
-        // newline from the reported range — VO line readers don't
-        // include the separator.
         let value = currentA11yValue()
         let utf16 = value.utf16
         let endExcludingNewline: Int
@@ -188,18 +121,13 @@ extension TerminalView {
         return NSRange(location: start, length: endExcludingNewline - start)
     }
 
-    /// Line index for a character position. Binary-searched against the
-    /// cached offsets table — O(log N) per call after the O(N) cache
-    /// build.
     public override func accessibilityLine(for index: Int) -> Int {
         let offsets = ensureLineOffsets()
         guard offsets.count >= 2 else { return 0 }
         guard index >= 0 else { return 0 }
         if index >= offsets[offsets.count - 1] {
-            return offsets.count - 2  // last valid line index
+            return offsets.count - 2
         }
-        // Largest `i` such that `offsets[i] <= index`. offsets is monotone
-        // non-decreasing (each line starts at or after the previous).
         var lo = 0
         var hi = offsets.count - 2
         while lo < hi {
@@ -213,12 +141,8 @@ extension TerminalView {
         return lo
     }
 
-    /// Range of the composed character containing `index`. Used by VO's
-    /// "speak under cursor" pass. `index` is a UTF-16 unit, so an astral
-    /// scalar (emoji, CJK Ext-B) spans two units: a fixed length of 1 split
-    /// the pair and `accessibilityString(for:)` decoded each half to U+FFFD.
-    /// Same contract as NSTextView (AppKit: "Composed character range for
-    /// the provided index"); a low-surrogate index maps back to the pair start.
+    /// The composed character range: `index` is a UTF-16 unit, and a fixed length of 1
+    /// would split a surrogate pair.
     public override func accessibilityRange(for index: Int) -> NSRange {
         let value = currentA11yValue() as NSString
         guard index >= 0, index < value.length else {
@@ -227,55 +151,28 @@ extension TerminalView {
         return value.rangeOfComposedCharacterSequence(at: index)
     }
 
-    /// Screen-space frame for a character range. v0.2 ships the
-    /// conservative answer: the view's whole bounds in screen coords.
-    /// Per-cell rectangles need renderer cell metrics which would tie
-    /// the a11y extension to MetalRenderer internals; deferred to v1.0.
-    /// Returns `.zero` when the view isn't yet attached to a window.
+    /// The whole view's bounds in screen coordinates, not a per-cell rectangle.
     public override func accessibilityFrame(for range: NSRange) -> NSRect {
         guard let window = window else { return .zero }
         let viewRect = convert(bounds, to: nil)
         return window.convertToScreen(viewRect)
     }
 
-    /// Empty range — `Selection`'s grid model doesn't map cleanly to a
-    /// linear character range when wrapped lines or rectangular shapes
-    /// are involved. v0.2 documents the limitation in
-    /// `KNOWN_ISSUES.md`; v1.0 may revisit if a per-cell metrics seam
-    /// gets added.
+    /// Always empty: the grid selection does not map to a linear character range.
     public override func accessibilitySelectedTextRange() -> NSRange {
         NSRange(location: 0, length: 0)
     }
 
-    /// No-op + log once. VO's "VO+Shift+arrow" path expects a setter; if
-    /// we omitted it entirely, AppKit would log a warning every time. A
-    /// no-op + one-shot log records the unsupported attempt without
-    /// flooding the unified log.
+    /// A no-op that must stay overridden: AppKit logs a warning on every VoiceOver
+    /// selection attempt when the setter is missing.
     public override func setAccessibilitySelectedTextRange(_ range: NSRange) {
         TerminalView.logSelectionSetterUnsupportedOnce()
     }
 
     // MARK: - Internals
 
-    /// Lazily build the per-line offset table. Caller responsible for
-    /// invalidation — `accessibilityValue()` clears
-    /// `a11yCache.lineOffsets = nil` on snapshot identity change.
-    ///
-    /// Contract: `offsets[i]` is the UTF-16 code-unit index of the FIRST
-    /// character of line `i`. The last entry is the past-the-end sentinel
-    /// (`= utf16.count`). Number of lines = `offsets.count - 1`. An empty
-    /// value produces `[0]` (zero lines, matching NSTextView's contract
-    /// for a totally-empty document).
-    ///
-    /// Trailing-newline semantics: a value ending in `\n` reports `n+1`
-    /// lines where `n` is the count of `\n`. The line after the final `\n`
-    /// is the empty trailing line, and `accessibilityRange(forLine: n)`
-    /// returns `{utf16.count, 0}`. Pre-fix, this was wrong: the code
-    /// suppressed the sentinel when `offsets.last == utf16.count`, which
-    /// hid the trailing empty line for any value ending in `\n` — the
-    /// dominant production shape (every shell screen with a blank row at
-    /// the bottom). VO line navigation stopped one line short of where
-    /// the cursor actually was.
+    /// `offsets[i]` is the UTF-16 index of line `i`'s first character; the last entry is the past-the-end
+    /// sentinel. An empty value yields `[0]`; a value ending in `\n` has an empty trailing line.
     private func ensureLineOffsets() -> [Int] {
         if let cached = a11yCache.lineOffsets { return cached }
         let value = currentA11yValue()
@@ -288,12 +185,6 @@ extension TerminalView {
                 offsets.append(idx)
             }
         }
-        // Always append the past-the-end sentinel for non-empty values.
-        // Empty values keep `offsets == [0]` so `numLines` evaluates to 0.
-        // For values ending in `\n` the loop's final append is the START
-        // of the empty trailing line; the sentinel here bounds it. Without
-        // this unconditional append, "a\n" produced `[0, 2]` and reported
-        // 1 line when NSTextView's contract requires 2.
         if !utf16.isEmpty {
             offsets.append(utf16.count)
         }
@@ -306,15 +197,7 @@ extension TerminalView {
         category: "accessibility"
     )
 
-    /// One-shot guard so a VO user repeatedly attempting a selection
-    /// drag doesn't fill the unified log with the same notice. Scope is
-    /// per-process (matches the existing `didLogOutOfRange` /
-    /// `didLogBlurRC` patterns elsewhere in the project): with multiple
-    /// tabs open, the FIRST view to receive an unsupported set logs;
-    /// subsequent views in the same process stay silent. Trade-off
-    /// chosen to minimise log spam for production users — the
-    /// alternative (per-instance) would mean every new tab can re-log
-    /// once even when the user hits the same gap repeatedly.
+    /// Per process, not per view.
     private static let selectionSetterLogged =
         OSAllocatedUnfairLock<Bool>(initialState: false)
 
@@ -329,25 +212,15 @@ extension TerminalView {
     }
 
     #if DEBUG
-    /// Test introspection for the a11y cache. Lets `AccessibilityTests`
-    /// assert that `accessibilityValue()` short-circuits when the
-    /// snapshot hasn't changed.
     var accessibilityCacheStatsForTests: (computations: Int, snapshotIdentity: UnsafeRawPointer?) {
         (a11yCache.computations, a11yCache.snapshotIdentity)
     }
 
-    /// Install a fake snapshot that the a11y value path will consume.
-    /// Assigns a fresh identity each call so cache invalidation is
-    /// exercised.
     func installSnapshotForTests(rows: [String]) {
         a11ySnapshotOverride = A11yFakeSnapshot(rows: rows)
-        // New identity ⇒ next accessibilityValue() must recompute.
         a11yCache.invalidate()
     }
 
-    /// Reset the one-shot selection-setter log latch so tests can
-    /// observe the no-op contract from a known state. Keeps the latch's
-    /// production behaviour (one log per process) untouched.
     static func _resetSelectionSetterLogForTests() {
         selectionSetterLogged.withLock { $0 = false }
     }

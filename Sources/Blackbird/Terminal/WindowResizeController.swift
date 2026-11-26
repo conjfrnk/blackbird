@@ -1,16 +1,5 @@
 import AppKit
 
-/// Owns the modifier-right-drag window-resize gesture, lifted off `TerminalView`
-/// (REFACTOR.md Area 3 / §2: window move/resize fused into the mouse file →
-/// its own controller). Holds the in-flight resize context privately so it's
-/// no longer an `internal` view field, and exposes the corner-anchor + min-size
-/// frame math as a PURE static (`resizedFrame`) that's unit-testable without a
-/// real `NSWindow`.
-///
-/// Gesture: a right-drag with the configured resize modifier resizes the window
-/// from the corner nearest the click, anchoring the OPPOSITE corner (drag the
-/// top-right and the bottom-left stays pinned) — the borderless-window idiom
-/// from iTerm2 / VS Code.
 final class WindowResizeController {
     enum Corner { case topLeft, topRight, bottomLeft, bottomRight }
 
@@ -21,13 +10,8 @@ final class WindowResizeController {
     }
     private var context: Context?
 
-    /// True while a resize gesture is in flight.
     var isResizing: Bool { context != nil }
 
-    /// Begin a corner resize. `local` is the click in the view's coordinates and
-    /// `bounds` the view bounds (together they pick the nearest corner);
-    /// `startMouseGlobal` is the screen-space mouse at press, `windowFrame` the
-    /// window's frame to resize from.
     func begin(localPoint local: CGPoint, in bounds: CGRect,
                startMouseGlobal: CGPoint, windowFrame: NSRect) {
         let left = local.x < bounds.width / 2
@@ -42,9 +26,6 @@ final class WindowResizeController {
         context = Context(corner: corner, startMouseGlobal: startMouseGlobal, startFrame: windowFrame)
     }
 
-    /// The new window frame for the current mouse position, clamped to
-    /// `minWidth`/`minHeight` (and, when supplied, to `boundingFrame` —
-    /// see `resizedFrame`). Returns nil when no resize is in flight.
     func frameForCurrentDrag(currentMouseGlobal: CGPoint,
                              minWidth: CGFloat, minHeight: CGFloat,
                              boundingFrame: NSRect? = nil) -> NSRect? {
@@ -60,7 +41,6 @@ final class WindowResizeController {
         )
     }
 
-    /// End the gesture. Returns true if one was in flight (and clears it).
     @discardableResult
     func end() -> Bool {
         let wasResizing = context != nil
@@ -68,25 +48,8 @@ final class WindowResizeController {
         return wasResizing
     }
 
-    /// Pure corner-anchored resize math + screen clamp + min-size clamp.
-    /// Given the dragged `corner`, the press-time mouse + frame, and the
-    /// current mouse, returns the new frame: the dragged corner follows the
-    /// mouse while the opposite corner stays pinned.
-    ///
-    /// `boundingFrame` (the screen's `visibleFrame` in production) clamps
-    /// only the DRAGGED edges — the gesture applies a mouse *delta* to the
-    /// original frame corner, so a grab far from the corner could otherwise
-    /// push the dragged edge well past the monitor border while the mouse
-    /// is still on-screen. Native edge-drag can't do that (the edge tracks
-    /// the screen-confined mouse); this restores that intuition. The
-    /// ANCHORED edges are never touched: a window already overhanging
-    /// another monitor keeps its overhang.
-    ///
-    /// When the drag would shrink below `minWidth` / `minHeight`, the
-    /// dragged edge is pinned instead of letting the opposite corner drift.
-    /// The min clamp runs LAST and wins over the bound — a usable window
-    /// beats strict containment when the anchor itself sits off-screen.
-    /// No `NSWindow` needed — unit-testable.
+    /// `boundingFrame` clamps only the dragged edges; anchored edges keep any overhang.
+    /// The min-size clamp runs last and wins over the bound.
     static func resizedFrame(corner: Corner,
                              startMouseGlobal: CGPoint,
                              startFrame: NSRect,
@@ -116,29 +79,13 @@ final class WindowResizeController {
             frame.size.height -= dy
         }
 
-        // Screen clamp on the dragged edges only (AppKit Y-up: origin is
-        // the bottom-left corner, `maxY` the top edge).
-        //
-        // Each directional clamp additionally requires the bound to leave
-        // at least the minimum size measured from the ANCHORED edge —
-        // otherwise the axis is left unclamped. On multi-monitor setups
-        // the bound follows the mouse's screen, which can lie entirely on
-        // the far side of the window's anchor (mouse crosses the display
-        // seam mid-drag); clamping there would produce a negative
-        // dimension that the min clamp "rescues" into a jarring
-        // snap-to-minimum that oscillates as the mouse re-crosses the
-        // seam. Skipping the axis keeps the drag continuous; the min
-        // clamp below still bounds the result. The residual unclamped
-        // overshoot is confined to anchors within min-size of the border
-        // and bounded by the grab offset. (silent-failure review)
+        // An axis is clamped only if the bound leaves the minimum size from the anchored edge: the
+        // mouse's screen can lie wholly past the anchor, and clamping there snaps to minimum.
         if let bound = boundingFrame {
             let dragsLeft   = corner == .topLeft  || corner == .bottomLeft
             let dragsRight  = corner == .topRight || corner == .bottomRight
             let dragsTop    = corner == .topLeft  || corner == .topRight
             let dragsBottom = corner == .bottomLeft || corner == .bottomRight
-            // Anchored edges at this point: left drags keep maxX, right
-            // drags keep origin.x, top drags keep origin.y, bottom drags
-            // keep maxY (each equals its startFrame value).
             if dragsLeft, frame.minX < bound.minX, frame.maxX - bound.minX >= minWidth {
                 frame.size.width -= bound.minX - frame.origin.x
                 frame.origin.x = bound.minX
@@ -155,9 +102,7 @@ final class WindowResizeController {
             }
         }
 
-        // Clamp to the minimums. When the dragged corner would shrink the window
-        // below the minimum, pin its corresponding edge instead of letting the
-        // opposite corner drift.
+        // Below the minimum, pin the dragged edge instead of letting the opposite corner drift.
         if frame.size.width < minWidth {
             if corner == .topLeft || corner == .bottomLeft {
                 frame.origin.x = startFrame.maxX - minWidth

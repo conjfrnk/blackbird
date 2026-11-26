@@ -2,13 +2,8 @@ import Foundation
 import Darwin
 import os
 
-/// Wraps a child process running behind a pseudo-terminal master fd.
-///
-/// Thread model:
-/// - A dedicated background queue runs a blocking `read(2)` loop.
-/// - Writes go through a serial queue so interleaved writes don't tear.
-/// - `onBytes` is invoked on the read queue — callers that need to hand off
-///   to another queue must dispatch explicitly.
+/// A child process behind a pseudo-terminal master fd. A dedicated queue runs the read loop, writes go
+/// through a serial queue, and `onBytes` is invoked on the read queue.
 public final class PTY {
 
     public struct Size: Equatable {
@@ -20,10 +15,6 @@ public final class PTY {
         }
     }
 
-    /// `LocalizedError` so the "Couldn't start shell" alert (which prints
-    /// `localizedDescription`) names the errno; a bare enum bridges to
-    /// "The operation couldn't be completed. (Blackbird.PTY.Error error 0.)",
-    /// which cannot tell a process/pty limit from a broken shell.
     public enum Error: Swift.Error, LocalizedError {
         case forkFailed(errno: Int32)
 
@@ -36,74 +27,40 @@ public final class PTY {
         }
     }
 
-    /// Lock guarding `_onBytes` / `_onExit` (audit S2-001). The previous
-    /// shape "serialised" setter writes by enqueuing them on `readQueue`
-    /// — but `startReading()` occupies that same serial queue with ONE
-    /// infinite blocking-loop block, so any setter call made after the
-    /// loop started was queued BEHIND it and only executed at EOF
-    /// teardown: the swap silently never applied for the life of the
-    /// session (bytes kept flowing to the old closure, no error, no
-    /// log), even though the doc comments advertised mid-session
-    /// mutation. A plain unfair/NSLock makes assignment immediate and
-    /// the per-chunk load cost is noise against a 128 KiB read.
+    /// Guards `_onBytes` / `_onExit`. A lock, not a hop to `readQueue`: the read loop occupies that serial
+    /// queue with one block until EOF, so a setter enqueued there would not run for the life of the session.
     private let handlerLock = NSLock()
     private var _onBytes: ((Data) -> Void)?
     private var _onExit: ((Int32) -> Void)?
 
-    /// Invoked with raw output bytes from the child. Called on the read
-    /// queue. Mutate via `setOnBytes(_:)`; the lock guarantees the read
-    /// loop observes a fully-published closure and that swaps take
-    /// effect from the next chunk the loop loads — including
-    /// mid-session (audit S2-001).
-    ///
-    /// The read loop loads the closure under `handlerLock` but INVOKES
-    /// it outside the lock, so a handler may re-enter `setOnBytes`
-    /// without deadlocking (PTYTests does). Consequence: one chunk the
-    /// loop already loaded may still reach the previous closure after
-    /// `setOnBytes` returns. Callers needing a hard cutover must
-    /// quiesce the producer first. Never hold `handlerLock` across the
-    /// callback.
+    /// Called on the read queue. The loop loads the closure under `handlerLock` but invokes it outside (never hold the lock
+    /// across the callback), so one already-loaded chunk may still reach the previous closure after `setOnBytes` returns.
     public var onBytes: ((Data) -> Void)? {
         handlerLock.lock()
         defer { handlerLock.unlock() }
         return _onBytes
     }
 
-    /// Install/replace the byte handler. Takes effect from the next read
-    /// chunk — immediately, even while the read loop is running (audit
-    /// S2-001; the old readQueue-enqueued assignment could not land
-    /// mid-session). Audit M2's contract still applies: wire BEFORE
-    /// `startReading()` or the first bytes race the installation.
+    /// Wire before `startReading()`, or the first bytes race the installation.
     public func setOnBytes(_ closure: ((Data) -> Void)?) {
         handlerLock.lock()
         _onBytes = closure
         handlerLock.unlock()
     }
 
-    /// Invoked once after the child process has exited and been reaped.
-    /// Fires whether the exit was natural (shell typed `exit`) or induced by
-    /// `terminate()` (which sends SIGHUP). Called on the main queue exactly
-    /// once. Nil by default; callers opt in via `setOnExit(_:)`.
+    /// Called on the main queue exactly once, after the child has been reaped, for a natural exit and `terminate()` alike.
     public var onExit: ((Int32) -> Void)? {
         handlerLock.lock()
         defer { handlerLock.unlock() }
         return _onExit
     }
 
-    /// Install/replace the exit handler. Same immediate-effect contract
-    /// as `setOnBytes` (audit S2-001 / fix-#17).
     public func setOnExit(_ closure: ((Int32) -> Void)?) {
         handlerLock.lock()
         _onExit = closure
         handlerLock.unlock()
     }
 
-    /// Environment variables the GUI app inherits from launchd / XPC that
-    /// we scrub before exec'ing the user's shell. Exposed as a static so
-    /// a unit test can pin the list — shrinking it silently (a refactor
-    /// that drops the fork-hygiene call altogether, or a "let's simplify
-    /// this env cleanup" PR) would re-leak parent-process plumbing into
-    /// child processes. iTerm2 and Terminal.app scrub the same set.
     public static let scrubbedParentEnvVars: [String] = [
         "XPC_SERVICE_NAME",
         "XPC_FLAGS",
@@ -113,10 +70,7 @@ public final class PTY {
         "__XPC_DYLD_LIBRARY_PATH",
         "LaunchInstanceID",
         "SECURITYSESSIONID",
-        // Apple dyld injection surface. If Blackbird is ever run under
-        // mitmproxy / SimulatorTrampoline / a debugging shim, any of these
-        // leaking into the child shell means the first `sudo` / `curl`
-        // inherits the injected library — a privilege-adjacent footgun.
+        // dyld injection surface: a leak means the first `sudo` / `curl` in the shell inherits the injected library.
         "DYLD_LIBRARY_PATH",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_FRAMEWORK_PATH",
@@ -125,93 +79,43 @@ public final class PTY {
         "DYLD_PRINT_TO_FILE",
         "DYLD_PRINT_APIS",
         "DYLD_PRINT_STATISTICS",
-        // Xcode / Instruments injection that changes libc allocator
-        // behavior in child processes — surprising when it leaks.
         "MallocNanoZone",
-        // Unified-logging silencing used outside Xcode proper. Distinct
-        // from OS_ACTIVITY_DT_MODE above; both need scrubbing.
         "OS_ACTIVITY_MODE",
-        // CoreAnimation debug flags. If the GUI inherited these from a
-        // debug launch, they spam any child GUI / SwiftUI command with
-        // transaction asserts unrelated to the user's session.
         "CA_DEBUG_TRANSACTIONS",
         "CA_ASSERT_MAIN_THREAD_TRANSACTIONS",
     ]
 
-    /// True if `key` is in Blackbird's `BLACKBIRD_*` / `BB_*` namespace.
-    /// Case-insensitive: POSIX env names are conventionally uppercase
-    /// but the kernel doesn't enforce it, and a launcher (e.g.
-    /// `launchctl setenv bb_token …`) or parent script that exports a
-    /// lowercase variant would otherwise slip past a case-sensitive
-    /// sweep and leak into the spawned child shell. Audit S2-004.
-    ///
-    /// Exposed `internal` so unit tests can pin the case-insensitive
-    /// contract without paying for a full `posix_spawn` round-trip
-    /// (which is gated behind `BB_RUN_FLAKY_PTY_TESTS`).
+    /// Case-insensitive: the kernel does not enforce uppercase env names, so a lowercase `bb_token` must not slip past.
     internal static func isBlackbirdNamespacedEnvKey(_ key: String) -> Bool {
         let upper = key.uppercased()
         return upper.hasPrefix("BLACKBIRD_") || upper.hasPrefix("BB_")
     }
 
-    /// Decode a `waitpid(2)` status word into the exit code surfaced via
-    /// `onExit`. Exposed `internal` so unit tests can pin every WIFEXITED
-    /// / WIFSIGNALED branch without spawning a real shell and waiting for
-    /// it to die (the only other way to reach this path from the public
-    /// API). Mutations on the shift offset / signum offset / WIFEXITED
-    /// gate previously escaped because no test could observe `onExit`
-    /// without standing up the whole spawn lifecycle.
-    ///
-    /// Contract:
-    ///   - `reaped == false` ⇒ `-1` (waitpid never confirmed reap)
-    ///   - WIFEXITED (low 7 bits clear) ⇒ `(status >> 8) & 0xff`
-    ///   - WIFSIGNALED (low 7 bits ≠ 0 and ≠ 0x7f) ⇒ `128 + signum`
-    ///   - WIFSTOPPED / unclassifiable ⇒ `-1`
+    /// Not reaped ⇒ -1. WIFEXITED (low 7 bits clear) ⇒ `(status >> 8) & 0xff`. WIFSIGNALED (low 7 bits
+    /// neither 0 nor 0x7f) ⇒ `128 + signum`. WIFSTOPPED or unclassifiable ⇒ -1.
     internal static func decodeExitStatus(_ status: Int32, reaped: Bool) -> Int32 {
         if !reaped { return -1 }
         if (status & 0x7f) == 0 {
-            // WIFEXITED: low 7 bits clear means normal exit.
             return (status >> 8) & 0xff
         }
         if (status & 0x7f) != 0x7f && (status & 0x7f) != 0 {
-            // WIFSIGNALED: low 7 bits are the terminating signal,
-            // and they're neither 0 (exited) nor 0x7f (stopped).
             let signum = status & 0x7f
             return 128 + signum
         }
-        // WIFSTOPPED or otherwise unclassifiable — the child wasn't
-        // actually terminated. Treat as unknown.
         return -1
     }
 
     private let masterFD: Int32
     private let childPID: pid_t
-    /// BSD start time of `childPID` captured at spawn. Used by
-    /// `terminate()` to detect PID reuse before escalating to SIGKILL.
-    /// Format: (tv_sec, tv_usec) since the system epoch — uniquely
-    /// identifies a process even if its pid is later recycled. Nil
-    /// means the start-time read failed at spawn (rare on a healthy
-    /// system); per audit H-1 the SIGKILL escalation now skips
-    /// rather than firing unconditionally in that case, because
-    /// without a baseline we cannot prove the pid still belongs
-    /// to our child if the kernel has recycled it.
-    ///
-    /// Both fields are `UInt64` because that's what `proc_bsdinfo`'s
-    /// `pbi_start_tvsec` / `pbi_start_tvusec` deliver on Darwin.
+    /// `pbi_start_tvsec` / `pbi_start_tvusec` captured at spawn: identifies the process even if
+    /// its pid is later recycled. Nil when the read failed at spawn.
     private let childStartTime: (sec: UInt64, usec: UInt64)?
     private let readQueue = DispatchQueue(label: "blackbird.pty.read", qos: .userInitiated)
     private let writeQueue = DispatchQueue(label: "blackbird.pty.write", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "blackbird.pty.state")
 
-    /// Child-reap lifecycle, guarded by `stateQueue` (audit S1-003).
-    /// POSIX reserves a dead child's PID until its PARENT reaps it —
-    /// and this process is the parent, with the read-loop teardown the
-    /// sole reaper. So as long as the state is `.running`, `childPID`
-    /// still names OUR process (live or zombie) and signalling it is
-    /// safe; once the reaper begins, the escalation rungs in
-    /// `terminate()` must stand down — after `waitpid` returns, macOS
-    /// may recycle the PID for an unrelated process within
-    /// milliseconds, and the +100 ms SIGTERM / +200 ms SIGKILL timers
-    /// previously fired into exactly that window.
+    /// Guarded by `stateQueue`. POSIX reserves a dead child's pid until its parent reaps it and the read-loop teardown is the sole
+    /// reaper, so `childPID` is safe to signal only while `.running`; after `waitpid` the pid may be recycled within milliseconds.
     private enum ReapState {
         case running
         case reaping
@@ -219,23 +123,10 @@ public final class PTY {
     }
     private var reapState: ReapState = .running
     private var _isRunning = true
-    /// Read-coalescing buffer size. Darwin's PTY master hands back only
-    /// ~1 KiB per `read(2)` (TTYHOG-sized; measured on macOS 27 with an 8 MB
-    /// flood: 7812 reads of exactly 1024 bytes), so one read per `onBytes`
-    /// would push ~70k chunks/s through the whole per-chunk pipeline
-    /// (FeedBudget lock, `coreQueue.async`, deferred-feed bookkeeping, a
-    /// `Data` + `[UInt8]` copy) under a flood. The read loop therefore keeps
-    /// reading the non-blocking master until it would block (EAGAIN) or this
-    /// buffer fills, and delivers ONE chunk. 32 KiB — not larger — keeps a
-    /// user-action yield point (a keystroke waits for the chunk being
-    /// parsed) at ~1 ms of parse at the dense-cell throughput floor. One
-    /// allocation per tab, reused across all reads.
+    /// Darwin's PTY master returns only ~1 KiB per `read(2)`, so the loop reads until EAGAIN or this buffer fills and
+    /// delivers one chunk. 32 KiB, not larger: a keystroke waits for the chunk being parsed (~1 ms at the throughput floor).
     private let readBufferSize = 32 * 1024
 
-    /// Shared `os.Logger` for PTY diagnostics (read-loop errno, envOverride
-    /// rejections). `os.Logger` — not `NSLog` — so messages appear in
-    /// `log stream --predicate 'subsystem == "dev.conjfrnk.blackbird"'`
-    /// instead of being redacted to `<private>`.
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "pty")
 
@@ -247,13 +138,6 @@ public final class PTY {
         stateQueue.sync { _isRunning = false }
     }
 
-    /// Read the BSD start time of `pid` via `proc_pidinfo` /
-    /// `PROC_PIDTBSDINFO`. Returns the (sec, usec) pair from the
-    /// process's `pbi_start_tvsec` / `pbi_start_tvusec` fields, which
-    /// uniquely identify a process across PID reuse — kernel
-    /// guarantees the start time is set at fork() and never modified.
-    /// Returns nil if proc_pidinfo fails (process doesn't exist yet,
-    /// permission denied, or kernel-info unavailable). Audit M9.
     private static func bsdProcessStartTime(pid: pid_t) -> (sec: UInt64, usec: UInt64)? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.stride)
@@ -262,24 +146,12 @@ public final class PTY {
         return (sec: info.pbi_start_tvsec, usec: info.pbi_start_tvusec)
     }
 
-    /// Parent-side marshaled spawn inputs: every value the async-signal-safe
-    /// child path needs, pre-converted to raw C strings so the post-fork-pre-
-    /// exec window touches no Swift ARC / Foundation machinery. Built entirely
-    /// in the parent by `prepareSpawnContext`; consumed once by `execChild`.
-    /// `free()` releases every owned allocation and is called only on the
-    /// PARENT path after fork — the child either `execv`s (replacing the image)
-    /// or `_exit`s, so it never returns to free. Value type held in a `spawn`
-    /// local, so the child borrows the array fields in place (no ARC retain),
-    /// exactly as the original inlined locals did. Audit H2.
+    /// Every value the post-fork child needs, pre-converted to raw C strings in the parent. `freeAll()` is
+    /// parent-only: `free` is not async-signal-safe, and the child either `execv`s or `_exit`s.
     private struct SpawnContext {
         let scrubKeys: [UnsafeMutablePointer<CChar>?]
-        /// `setenv` survivors as (key, value) pairs. A single array of trivial
-        /// pointer tuples — NOT two parallel arrays — so key/value index
-        /// alignment and equal length are structural rather than a convention a
-        /// future edit could silently break with an OOB read in the post-fork
-        /// (async-signal-safe) child. The element is two trivial optionals, so
-        /// the buffer stays contiguous-trivial and `withUnsafeBufferPointer`
-        /// remains retain-free.
+        /// One array of (key, value) pairs, not two parallel arrays: index alignment is structural, and the
+        /// trivial element keeps `withUnsafeBufferPointer` retain-free in the post-fork child.
         let env: [(key: UnsafeMutablePointer<CChar>?, value: UnsafeMutablePointer<CChar>?)]
         let argv: [UnsafeMutablePointer<CChar>?]
         let term: UnsafeMutablePointer<CChar>?
@@ -288,9 +160,6 @@ public final class PTY {
         let initialCwd: UnsafeMutablePointer<CChar>?
         let executable: UnsafeMutablePointer<CChar>?
 
-        /// Release every owned allocation. Parent-path only — the child either
-        /// `execv`s (replacing the image) or `_exit`s, so it never reaches here.
-        /// `free` is not async-signal-safe, which is why the child must not run it.
         func freeAll() {
             scrubKeys.forEach { if let p = $0 { Darwin.free(p) } }
             env.forEach { pair in
@@ -306,14 +175,6 @@ public final class PTY {
         }
     }
 
-    /// Filter `envOverrides` to the entries safe to hand `setenv` in the child:
-    /// a non-empty key with no NUL or `=`, and a value with no NUL. Each
-    /// rejected entry is logged and dropped (SEC-015: the key NAME can itself
-    /// be sensitive — `AWS_SECRET_ACCESS_KEY` — so it is hashed in the log).
-    /// The same NUL/`=`/empty checks that historically ran in the child, hoisted
-    /// to the parent where Swift String/Dictionary work is safe. Depends only on
-    /// its argument (the logging aside), so it is unit-testable in isolation.
-    /// Audit H2.
     internal static func validatedEnvOverrides(
         _ envOverrides: [String: String]
     ) -> [(key: String, value: String)] {
@@ -326,10 +187,7 @@ public final class PTY {
                 continue
             }
             if v.contains("\0") {
-                // SEC-015: env-key NAMES can themselves be sensitive
-                // (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`). Hash the
-                // key so unified-log readers see a stable identifier
-                // without the literal name.
+                // Env-key names can themselves be sensitive (`AWS_SECRET_ACCESS_KEY`), so the key is hashed in the log.
                 Self.logger.log(
                     "PTY.spawn rejecting envOverride for key=\(k, privacy: .private(mask: .hash)): value contains NUL"
                 )
@@ -340,17 +198,6 @@ public final class PTY {
         return survivors
     }
 
-    /// Sweep the parent environment for Blackbird-namespaced keys
-    /// (`BLACKBIRD_*` / `BB_*`) that aren't already in the static deny-list,
-    /// so token-bearing future variants (`BLACKBIRD_API_KEY`, `BB_TOKEN`, …)
-    /// are scrubbed by default without per-name maintenance. Reads `environ`
-    /// (process global). Done in the parent — where Swift String iteration is
-    /// safe — so the child path stays strictly POSIX/async-signal-safe; the
-    /// returned keys are `unsetenv`'d alongside the static list. Audit fix-#13.
-    ///
-    /// `environ` is `UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>` on
-    /// Darwin — non-Optional at the outer level (always non-null in a hosted
-    /// process), terminated by a nil entry in the array.
     internal static func blackbirdNamespacedScrubKeys() -> [String] {
         var matchedPrefixedKeys: [String] = []
         let envPtr = environ
@@ -360,9 +207,6 @@ public final class PTY {
             if let eq = s.firstIndex(of: "=") {
                 let key = String(s[..<eq])
                 if Self.isBlackbirdNamespacedEnvKey(key) {
-                    // Avoid duplicating any explicit entry already present in
-                    // scrubbedParentEnvVars (today none of the namespaced names
-                    // overlap, but defend against a future addition).
                     if !Self.scrubbedParentEnvVars.contains(key) {
                         matchedPrefixedKeys.append(key)
                     }
@@ -373,54 +217,23 @@ public final class PTY {
         return matchedPrefixedKeys
     }
 
-    /// Do all the parent-side, ARC/Foundation-using work for a spawn: resolve
-    /// TERM and the bundle version, build the scrub list, validate the
-    /// envOverrides, resolve $HOME, and `strdup` every value the child needs
-    /// into raw C strings. Returns a `SpawnContext` the caller forks against
-    /// and frees on the parent path. Throws `Error.forkFailed(ENOMEM)` if the
-    /// one strdup with no fallback (the executable path) or any argv slot
-    /// failed — the child would otherwise `execv` a NULL/malformed argv and
-    /// `_exit(127)` with no recoverable cause.
-    ///
-    /// Why everything is pre-resolved here: after fork we are in a post-fork-
-    /// pre-exec no-man's-land where any call that takes a runtime lock the
-    /// parent might have held at fork time can deadlock the child — Swift
-    /// `Array`/`Dictionary`/`String.contains` can dip into ARC retain/release
-    /// on shared backing storage, `os.Logger` touches Mach-port subsystems, and
-    /// `getpwuid` opens an XPC connection to opendirectoryd. Doing all that here
-    /// and passing only `UnsafeMutablePointer<CChar>`s through the fork keeps
-    /// the child path strictly POSIX-safe. Audit H2 / M2.
+    /// All ARC / Foundation work happens here, before fork. In the post-fork child any call that takes a runtime lock the parent
+    /// held at fork time can deadlock: Swift collections (ARC), `os.Logger`, `getpwuid` (an XPC connection to opendirectoryd).
     private static func prepareSpawnContext(
         executable: String,
         arguments: [String],
         envOverrides: [String: String],
         initialWorkingDirectory: String?
     ) throws -> SpawnContext {
-        // Resolve TERM before fork. `KittyTerminfo.available` is evaluated
-        // once per process; `availableForSpawn` adds one stat per spawn so a
-        // `~/.terminfo` deleted mid-session is re-provisioned (or falls back)
-        // instead of handing new tabs an unresolvable TERM.
         let termValue = KittyTerminfo.availableForSpawn() ? "xterm-kitty" : "xterm-256color"
-        // Read the bundle version BEFORE fork — after fork we're in a
-        // post-fork-pre-exec no-man's-land where complex Foundation calls
-        // aren't async-signal-safe. setenv / getenv / chdir are fine.
         let versionStr = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
 
-        // 1. Scrub list as C strings: the static deny-list plus any
-        //    Blackbird-namespaced (`BLACKBIRD_*` / `BB_*`) parent envs.
         let scrubKeys: [UnsafeMutablePointer<CChar>?] =
             (Self.scrubbedParentEnvVars + Self.blackbirdNamespacedScrubKeys()).map { strdup($0) }
 
-        // 2. Validate envOverrides (Swift String/Dictionary work is safe in
-        //    the parent) and pack the survivors into (key, value) C-string
-        //    pairs, preserving the existing log-on-reject discipline. One array
-        //    of pairs (not two parallel arrays) keeps index alignment structural.
         let env: [(key: UnsafeMutablePointer<CChar>?, value: UnsafeMutablePointer<CChar>?)] =
             Self.validatedEnvOverrides(envOverrides).map { (strdup($0.key), strdup($0.value)) }
 
-        // 3. Resolve $HOME via getpwuid in the parent. getpwuid is not async-
-        //    signal-safe on Darwin (it opens an XPC connection to
-        //    opendirectoryd and may take internal locks). Audit M2.
         let home: UnsafeMutablePointer<CChar>? = {
             if let pw = getpwuid(getuid()), let pwDir = pw.pointee.pw_dir {
                 return strdup(pwDir)
@@ -428,19 +241,14 @@ public final class PTY {
             return nil
         }()
 
-        // 4. Initial-cwd C string (if requested).
         let initialCwd: UnsafeMutablePointer<CChar>? = {
             guard let cwd = initialWorkingDirectory, !cwd.isEmpty else { return nil }
             return strdup(cwd)
         }()
 
-        // 5. Argv as a NULL-terminated C string array. The execv argument is
-        //    `char *const argv[]`; we materialise it here so the child only
-        //    does pointer-array indexing.
         let argv: [UnsafeMutablePointer<CChar>?] =
             ([executable] + arguments).map { strdup($0) } + [nil]
 
-        // 6. Executable path as a C string for execv's first arg.
         let executableC = strdup(executable)
 
         let ctx = SpawnContext(
@@ -454,16 +262,8 @@ public final class PTY {
             executable: executableC
         )
 
-        // Reviewer follow-up to H2 (silent-failure-hunter L-2): under genuine
-        // strdup OOM the child's `execv(executable, …)` would receive NULL and
-        // the surrounding `_exit(127)` swallows the cause. Now that strdup runs
-        // in the parent (where logging is safe), make the OOM visible and abort
-        // early. Other strdups (env entries, term, version, home, initialCwd)
-        // tolerate NULL — the child path's `if let` guards skip them or fall
-        // back to static literals — so we abort
-        // only on the strdups with no fallback: the executable (required by
-        // execv) and any argv slot (a NULL there would crash the child with a
-        // malformed argv). Free everything and surface ENOMEM.
+        // Only the executable and argv strdups have no fallback: a NULL there makes the child `execv` a malformed
+        // argv and `_exit(127)` with no cause. The child tolerates NULL for every other strdup.
         if ctx.executable == nil
             || ctx.argv.dropLast().contains(where: { $0 == nil })
         {
@@ -473,9 +273,6 @@ public final class PTY {
             ctx.freeAll()
             throw Error.forkFailed(errno: ENOMEM)
         }
-        // The tolerated-NULL strdups degrade silently in the child (it
-        // can't log post-fork) — leave the breadcrumb here so a session
-        // whose TERM quietly downgraded to xterm-256color is diagnosable.
         if ctx.term == nil || ctx.version == nil {
             Self.logger.error(
                 "PTY.spawn: strdup returned NULL for TERM/version under memory pressure — child falls back to static defaults"
@@ -484,25 +281,8 @@ public final class PTY {
         return ctx
     }
 
-    /// The post-fork-pre-exec child path: strictly POSIX async-signal-safe.
-    /// `-> Never` because every path either `execv`s (replacing the image) or
-    /// `_exit`s. Audit H2.
-    ///
-    /// The all-raw-pointer signature is load-bearing, not cosmetic: it
-    /// structurally bars a future editor from introducing Swift
-    /// Array/Dictionary/String/os.Logger/getpwuid work inside the post-fork
-    /// window — there is nothing here to ARC-retain. Anything beyond the
-    /// practical Darwin-safe set — POSIX async-signal-safe primitives (signal,
-    /// sigaction, sigprocmask, sigemptyset, _exit, exec*, close, dup2, chdir,
-    /// fcntl, sysconf, write, read) plus the libc routines that have no
-    /// internal locks on Darwin (setenv / getenv / unsetenv per the Apple libc
-    /// source) — risks deadlocking the child on a malloc/dispatch/Mach-port
-    /// lock the parent's other threads were holding at fork time. POSIX
-    /// classifies setenv/getenv/unsetenv as unsafe in general; on Darwin they
-    /// are practically safe because they don't take cross-thread locks, and
-    /// iTerm2 / Terminal.app rely on the same behaviour. All Swift work was
-    /// completed in `prepareSpawnContext`; the child only indexes into
-    /// pre-built C-string buffers.
+    /// Post-fork, pre-exec: async-signal-safe calls only, plus `setenv` / `getenv` / `unsetenv`, which take no cross-thread
+    /// locks on Darwin. The all-raw-pointer signature is load-bearing: it leaves nothing here to ARC-retain.
     private static func execChild(
         scrubKeys: UnsafeBufferPointer<UnsafeMutablePointer<CChar>?>,
         env: UnsafeBufferPointer<(key: UnsafeMutablePointer<CChar>?, value: UnsafeMutablePointer<CChar>?)>,
@@ -513,24 +293,14 @@ public final class PTY {
         initialCwd: UnsafeMutablePointer<CChar>?,
         executable: UnsafeMutablePointer<CChar>?
     ) -> Never {
-        // Scrub launchd / XPC / CoreFoundation plumbing variables that leak
-        // from the GUI app into the child shell. iTerm2 and Terminal.app strip
-        // the same set. unsetenv is async-signal-safe on Darwin. The buffer is
-        // already borrowed (no ARC traffic, no allocator activity); the body is
-        // pure POSIX calls.
         var i = 0
         while i < scrubKeys.count {
             if let k = scrubKeys[i] { unsetenv(k) }
             i += 1
         }
 
-        // Reset signal disposition. The GUI app can install handlers (Sparkle,
-        // GrandCentralDispatch, CoreFoundation) and mask signals the child
-        // needs delivered at default. A shell that inherits a blocked SIGINT
-        // can't be Ctrl+C'd, SIGPIPE blocked makes pipelines hang, SIGCHLD
-        // blocked stalls job control. Reset everything to SIG_DFL and drop the
-        // signal mask. Unrolled (was `for sig in [SIGINT, ...]`) so we don't
-        // allocate a Swift Array literal in the child.
+        // The GUI app may have installed handlers and masked signals: a shell that inherits a blocked SIGINT
+        // cannot be Ctrl+C'd. Unrolled so no Swift Array literal is allocated in the child.
         var emptyMask = sigset_t()
         sigemptyset(&emptyMask)
         _ = sigprocmask(SIG_SETMASK, &emptyMask, nil)
@@ -543,37 +313,16 @@ public final class PTY {
         signal(SIGWINCH, SIG_DFL)
         signal(SIGTSTP, SIG_DFL)
 
-        // Turn on IUTF8 on top of the TTYDEF defaults forkpty gave us. Without
-        // it the canonical-mode line discipline erases one BYTE per Backspace,
-        // so a program doing a cooked-mode read (`cat`, Python `input()`
-        // without readline, Go/Rust stdin line readers) is left with a stray
-        // lead byte after the user backspaces over é / CJK / emoji and gets
-        // invalid UTF-8, while the echo still looks right. Set here, before
-        // exec, so it is in place before the shell starts and can save/restore
-        // it (a parent-side tcsetattr after forkpty races a fast-starting
-        // shell). tcgetattr/tcsetattr are async-signal-safe. Best effort: on
-        // failure the child just keeps the defaults.
+        // Without IUTF8 the canonical-mode line discipline erases one byte per Backspace, leaving invalid UTF-8 after
+        // é / CJK / emoji. Set before exec: a parent-side tcsetattr after forkpty races a fast-starting shell.
         var tio = termios()
         if tcgetattr(STDIN_FILENO, &tio) == 0 {
             tio.c_iflag |= tcflag_t(IUTF8)
             _ = tcsetattr(STDIN_FILENO, TCSANOW, &tio)
         }
 
-        // Close every inherited fd above stderr. forkpty has already rebound
-        // stdin/stdout/stderr to the slave pty; anything else the parent app
-        // had open (Metal device libraries, font files, XPC mach ports backed
-        // by fds, log streams) is leaked into the shell otherwise. Darwin lacks
-        // `closefrom(3)` so loop to the soft open-file limit. Typically 256 fds
-        // on macOS; each close of an unopened slot returns EBADF in <1µs, so the
-        // whole sweep is well under a millisecond — paid once per spawn.
-        //
-        // Clamp the bound. `sysconf(_SC_OPEN_MAX)` returns the soft
-        // `RLIMIT_NOFILE`, which a user with `ulimit -Sn unlimited` inflates to
-        // effectively LONG_MAX. Unclamped, the `Int32()` cast later traps on
-        // overflow and SIGILLs the child after fork, leaving the master fd
-        // stranded in the parent. 65536 is plenty: we only need to cover every
-        // fd the GUI app has opened, and apps that legitimately hold >65k fds
-        // aren't spawning shells.
+        // Close every inherited fd above stderr; Darwin lacks `closefrom(3)`. Clamp the bound: `sysconf(_SC_OPEN_MAX)` is the
+        // soft RLIMIT_NOFILE, and under `ulimit -Sn unlimited` the `Int32()` cast would trap and SIGILL the child.
         let rawMax = sysconf(Int32(_SC_OPEN_MAX))
         let openMax: Int = rawMax > 65_536 || rawMax <= 0 ? 65_536 : Int(rawMax)
         if openMax > 3 {
@@ -584,9 +333,6 @@ public final class PTY {
             }
         }
 
-        // Apply pre-validated envOverrides via raw C pointers. Validation
-        // (NUL / `=` / empty checks) and the os.Logger calls happened in the
-        // parent; the survivors are the (key, value) pairs in `env`.
         var j = 0
         while j < env.count {
             if let k = env[j].key, let v = env[j].value {
@@ -595,21 +341,14 @@ public final class PTY {
             j += 1
         }
 
-        // Standard env. String literals here are baked into the binary's text
-        // segment; the `setenv` arg is `const char *` so passing a Swift
-        // StaticString-backed pointer is fine — setenv copies the value.
-        // `term`'s strdup can be NULL under OOM (it's outside the parent's
-        // abort-on-NULL set) and Darwin setenv dereferences the value —
-        // fall back to a static literal like `version` below does. The
-        // fallback is deliberately NOT the parent's termValue (which may
-        // be xterm-kitty): degraded-but-safe is the point when the real
-        // value was lost to OOM.
+        // `term` can be NULL under OOM and Darwin `setenv` dereferences the value. The fallback
+        // is deliberately not the parent's value, which may be xterm-kitty.
         if let t = term {
             setenv("TERM", t, 1)
         } else {
             setenv("TERM", "xterm-256color", 1)
         }
-        setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
+        setenv("COLORTERM", "truecolor", 1)
         setenv("TERM_PROGRAM", "Blackbird", 1)
         if let v = version {
             setenv("TERM_PROGRAM_VERSION", v, 1)
@@ -617,27 +356,11 @@ public final class PTY {
             setenv("TERM_PROGRAM_VERSION", "0.0.0", 1)
         }
 
-        // Pick the child's starting directory:
-        //  1. Explicit `initialWorkingDirectory` (from ⌘T / ⌘N inherit) if it
-        //     still resolves to a real directory.
-        //  2. The user's home via getpwuid — pre-resolved in parent (audit M2),
-        //     passed in as `home`.
-        //  3. $HOME fallback if passwd lookup somehow failed.
-        //  4. /tmp final defense.
-        // Apps launched from Finder inherit cwd=`/` from launchd, which would
-        // otherwise start the shell in /.
-        //
-        // Total-failure abort (audit M8): if every candidate above fails to
-        // chdir, exit 127 BEFORE execv runs.
+        // Apps launched from Finder inherit cwd `/` from launchd. Order: the requested cwd, the passwd
+        // home, $HOME, /tmp; exit 127 before execv if every one fails.
         var chdired = false
         if let cwd = initialCwd {
-            // Audit L4: previously this was `stat() == 0 && S_IFDIR && chdir()
-            // == 0`. The pre-stat was both (a) redundant — chdir already
-            // returns ENOTDIR / ENOENT and we'd fall through anyway — and (b) a
-            // small TOCTOU window: a symlink swap between the stat and the chdir
-            // would let chdir land somewhere stat had not approved. Drop the
-            // pre-check; chdir's own return value is the only signal that
-            // matters here.
+            // No pre-`stat`: a symlink swap between the stat and the chdir is a TOCTOU window.
             if chdir(cwd) == 0 { chdired = true }
         }
         if !chdired, let h = home, chdir(h) == 0 {
@@ -655,21 +378,13 @@ public final class PTY {
             _exit(127)
         }
 
-        // exec — argv was built by the parent. The borrowed buffer gives us a
-        // `char *const argv[]`-shaped pointer without any allocator activity in
-        // the child. baseAddress is non-nil for a non-empty buffer; argv always
-        // contains at least `[executable, nil]`.
+        // `argv` always holds at least `[executable, nil]`, so `baseAddress` is non-nil.
         let argvPtr = UnsafeMutableRawPointer(mutating: argv.baseAddress!)
             .assumingMemoryBound(to: UnsafeMutablePointer<CChar>?.self)
         _ = execv(executable, argvPtr)
-        // If exec returns, it failed.
         _exit(127)
     }
 
-    /// Spawn a child process attached to a new PTY. `initialWorkingDirectory`
-    /// (when provided and existent) is chdir'd before exec — used to inherit
-    /// the previous tab's cwd for ⌘T / ⌘N. Falls back to the user's home
-    /// directory if the value is nil, empty, or not a valid directory.
     public static func spawn(
         executable: String,
         arguments: [String],
@@ -683,11 +398,6 @@ public final class PTY {
             ws_xpixel: 0, ws_ypixel: 0
         )
 
-        // Parent-side marshaling: resolve every input the child needs into raw
-        // C strings up front. The post-fork-pre-exec window forbids Swift
-        // Array/Dictionary/String/os.Logger/getpwuid (they can take a runtime
-        // lock another parent thread held at fork time), so all of that runs
-        // here and only `UnsafeMutablePointer<CChar>`s cross the fork. Audit H2.
         let ctx = try prepareSpawnContext(
             executable: executable,
             arguments: arguments,
@@ -696,19 +406,8 @@ public final class PTY {
         )
         defer { ctx.freeAll() }
 
-        // Pass nil for termios so forkpty uses the kernel's TTYDEF_* defaults
-        // from <sys/ttydefaults.h>. That gives us correct c_cc values:
-        // VINTR=3, VQUIT=28, VSUSP=26, VEOF=4, VERASE=0x7F, VKILL=21, plus
-        // flags = (BRKINT|ICRNL|IMAXBEL|IXON|IXANY) | (OPOST|ONLCR) |
-        // (ECHO|ICANON|ISIG|IEXTEN|ECHOE|ECHOKE|ECHOCTL) | (CS8|CREAD|HUPCL).
-        //
-        // Building these ourselves from cfmakeraw() + |= flag fixups produced
-        // a broken termios: Darwin.termios() zero-inits c_cc, cfmakeraw only
-        // touches VMIN/VTIME, and we never set VINTR. VINTR=0 meant Ctrl+C
-        // wasn't recognized as the interrupt character at all — the line
-        // discipline neither SIGINT'd the foreground pgroup nor echoed `^C`,
-        // forcing a workaround of kill(-pgrp, SIGINT) that raced ahead of the
-        // echo path and drew the new shell prompt before `^C\n` landed.
+        // A nil termios makes forkpty use the kernel's TTYDEF_* defaults, with correct c_cc values (VINTR=3, VEOF=4, …).
+        // One built from `cfmakeraw()` leaves c_cc zeroed, and VINTR=0 means Ctrl+C is not the interrupt character.
         let pid = withUnsafeMutablePointer(to: &master) { masterPtr in
             withUnsafeMutablePointer(to: &winsize) { wPtr in
                 forkpty(masterPtr, nil, nil, wPtr)
@@ -716,12 +415,7 @@ public final class PTY {
         }
 
         if pid < 0 {
-            // On macOS forkpty closes both fds when fork itself fails, but the
-            // BSD contract isn't uniform — some derivatives leave the master
-            // open. Belt-and-braces: close if we hold a valid fd, so a
-            // Blackbird that keeps retrying shell spawns under resource
-            // pressure (hit RLIMIT_NPROC once) can't run the descriptor table
-            // dry from leaked PTY masters. errno is preserved across close.
+            // Not every forkpty closes the master when fork itself fails; close it, preserving errno.
             if master >= 0 {
                 let savedErrno = errno
                 _ = Darwin.close(master)
@@ -731,11 +425,6 @@ public final class PTY {
         }
 
         if pid == 0 {
-            // Child: strictly POSIX async-signal-safe. Borrow the marshaled
-            // arrays in place (no ARC retain — `ctx` is a struct local, exactly
-            // like the original inlined locals) and hand raw pointers to
-            // `execChild`, whose all-raw-pointer signature bars Swift work in
-            // the post-fork window.
             ctx.scrubKeys.withUnsafeBufferPointer { scrubBuf in
                 ctx.env.withUnsafeBufferPointer { envBuf in
                     ctx.argv.withUnsafeBufferPointer { argvBuf in
@@ -760,33 +449,16 @@ public final class PTY {
     private init(masterFD: Int32, childPID: pid_t) {
         self.masterFD = masterFD
         self.childPID = childPID
-        // Suppress SIGPIPE on writes to this fd. Without F_SETNOSIGPIPE
-        // a write to a master whose slave has already closed (the
-        // typical condition during shell-exit teardown) delivers
-        // SIGPIPE to the writing thread, whose default disposition
-        // terminates the entire process — a single keystroke or IME
-        // commit racing the shell exit can take Blackbird down. With
-        // the flag set the same condition produces EPIPE on the
-        // syscall, which flushPendingLocked logs and treats as fatal for
-        // that one write rather than the whole process. Audit H1.
+        // Without F_SETNOSIGPIPE, a write to a master whose slave has closed delivers SIGPIPE, whose default
+        // disposition terminates the whole process. With it the write returns EPIPE.
         if Darwin.fcntl(masterFD, F_SETNOSIGPIPE, 1) < 0 {
             let savedErrno = errno
             Self.logger.error(
                 "PTY.init: F_SETNOSIGPIPE failed errno=\(savedErrno, privacy: .public) fd=\(masterFD, privacy: .public) — process is at risk of SIGPIPE-termination on master writes after slave close"
             )
         }
-        // O_NONBLOCK on the master (audit S1-001). With a BLOCKING fd, a
-        // raw-mode child that stops reading stdin (suspended, hung) lets
-        // the kernel tty input queue (~1 KB) fill, and the next write
-        // parks INSIDE Darwin.write holding the serial writeQueue
-        // indefinitely — writeImmediate's `.sync` callers (the main
-        // thread's Ctrl+letter fast path, coreQueue's focusChanged) then
-        // park behind it: app-wide beachball, unrecoverable via ⌘W
-        // because teardown also needs the main thread. Non-blocking
-        // writes return EAGAIN instead; the remainder lands in
-        // `pendingWrite` and drains when the master becomes writable. The
-        // read loop compensates by parking in poll(POLLIN) on EAGAIN rather
-        // than spinning.
+        // With a blocking fd, a child that stops reading stdin fills the ~1 KB tty input queue and the next write parks in
+        // `Darwin.write` holding `writeQueue`; `writeImmediate`'s `.sync` callers (the main thread) then hang behind it.
         let fdFlags = Darwin.fcntl(masterFD, F_GETFL, 0)
         if fdFlags < 0 || Darwin.fcntl(masterFD, F_SETFL, fdFlags | O_NONBLOCK) < 0 {
             let savedErrno = errno
@@ -794,17 +466,8 @@ public final class PTY {
                 "PTY.init: O_NONBLOCK failed errno=\(savedErrno, privacy: .public) fd=\(masterFD, privacy: .public) — writes degrade to blocking; a non-reading child can wedge the write queue (audit S1-001 mitigation inactive)"
             )
         }
-        // Capture the child's BSD start time at spawn so the SIGKILL
-        // escalation in `terminate()` can detect PID reuse: if the
-        // 200ms grace window outlives our child AND macOS recycles
-        // the PID for an unrelated process, `kill(pid, 0)` returns
-        // success on the recycled PID even though it isn't ours.
-        // Comparing start times rules out that race. Audit M9.
         self.childStartTime = Self.bsdProcessStartTime(pid: childPID)
-        // Audit M2: do NOT call startReading() here. The consumer
-        // (TerminalSession.wire / direct test caller) must wire onBytes
-        // first via `setOnBytes(_:)`, then invoke `startReading()` so
-        // the first bytes the shell emits aren't dropped on the floor.
+        // `startReading()` is not called here: the consumer must `setOnBytes(_:)` first or the shell's first bytes are dropped.
     }
 
     deinit {
@@ -813,9 +476,6 @@ public final class PTY {
 
     // MARK: - Reading
 
-    /// Idempotent — repeated calls past the first dispatch a no-op. The
-    /// first call dispatches the read loop on `readQueue`; subsequent
-    /// calls bail under `stateQueue.sync`. Audit M2.
     private var readLoopStarted = false
 
     public func startReading() {
@@ -828,35 +488,12 @@ public final class PTY {
         readQueue.async { [weak self] in
             guard let self else { return }
             #if DEBUG
-            // Catch the M2 misuse case: startReading() before setOnBytes()
-            // means bytes are read from the kernel and silently dropped
-            // on the floor. The contract is "wire onBytes first" —
-            // production code does this in TerminalSession.wire(); a
-            // future caller who forgets gets a loud abort in DEBUG so
-            // the silent-dropped path doesn't ship.
-            //
-            // Checked HERE (inside readQueue.async) rather than at
-            // startReading()'s synchronous entry: setOnBytes is itself
-            // an `readQueue.async` write, so a synchronous check at
-            // entry would race the dispatch and trip even when the
-            // contract is upheld (the smoke-test failure pattern that
-            // was red on CI for many commits). Serial-queue ordering
-            // guarantees the setOnBytes assignment has landed by the
-            // time this block runs, so this is the correct moment to
-            // assert. Release builds skip the assert.
             assert(self.onBytes != nil,
                    "PTY.startReading() called before setOnBytes(_:); bytes will be silently dropped. Wire the closure first.")
             #endif
             var buffer = [UInt8](repeating: 0, count: self.readBufferSize)
             let cap = self.readBufferSize
-            // Park until the master is readable. The master is O_NONBLOCK
-            // (audit S1-001 — so WRITES can't wedge the write queue), so
-            // reads get their blocking behaviour back by parking in poll;
-            // a bare retry on EAGAIN would spin at 100% CPU on an idle
-            // shell. Teardown still works like the blocking-read era:
-            // SIGHUP -> child exits -> slave closes -> POLLIN/POLLHUP wakes
-            // us -> read returns 0/EIO -> loop exits. Returns false when
-            // poll itself failed and the session was torn down.
+            // The master is O_NONBLOCK, so reads park in poll; a bare retry on EAGAIN would spin on an idle shell.
             func waitReadable() -> Bool {
                 var pfd = pollfd(fd: self.masterFD, events: Int16(POLLIN), revents: 0)
                 let rc = poll(&pfd, 1, -1)
@@ -870,22 +507,14 @@ public final class PTY {
                 }
                 return true
             }
-            // Set when the coalescing read already observed EAGAIN, so the
-            // next iteration parks in poll directly instead of issuing a
-            // second read that would just return EAGAIN again.
             var wouldBlock = false
             while self.shouldKeepRunning() {
                 if wouldBlock {
                     wouldBlock = false
                     if !waitReadable() { break }
                 }
-                // Fill the buffer: read until EAGAIN, EOF, a fatal errno or
-                // the buffer is full, then deliver ONE chunk. A terminal
-                // condition (EOF / fatal errno) is recorded and acted on only
-                // AFTER the accumulated bytes are delivered, so tail output
-                // is never dropped. Between reads we skip shouldKeepRunning():
-                // the buffer cap bounds the extra work, and the masterFD is
-                // only ever closed by this queue.
+                // Read until EAGAIN, EOF, a fatal errno or a full buffer, then deliver one chunk. EOF and fatal
+                // errnos are acted on only after the accumulated bytes are delivered, so tail output is never dropped.
                 var off = 0
                 var eof = false
                 var fatalErrno: Int32 = 0
@@ -898,14 +527,9 @@ public final class PTY {
                         continue
                     }
                     if n == 0 {
-                        // Genuine EOF — slave closed, child has exited.
                         eof = true
                         break
                     }
-                    // n < 0: inspect errno. EINTR is always safe to retry.
-                    // EAGAIN/EWOULDBLOCK means drained for now. Any other
-                    // errno — EIO (slave gone), EBADF (fd closed under us),
-                    // ENXIO, etc. — means the session is unrecoverable.
                     let savedErrno = errno
                     if savedErrno == EINTR { continue }
                     if savedErrno == EAGAIN || savedErrno == EWOULDBLOCK {
@@ -930,81 +554,34 @@ public final class PTY {
                     break
                 }
             }
-            // Read loop has exited (genuine EOF, a fatal errno, or an
-            // external markStopped via terminate()). The read queue is the
-            // sole owner of the fd-close + child reap; this is the loop's
-            // single exit path, so the one-shot teardown runs here.
+            // The loop's single exit path: the read queue is the sole owner of the fd close and the child reap.
             self.teardownAndReap()
         }
     }
 
-    /// One-shot teardown + child reaper. Called ONLY from the read loop's
-    /// single exit path in `startReading()`, so the "read queue is the sole
-    /// owner of the fd-close + reap" invariant (audit S1-003) holds exactly
-    /// as it did inline: drain the write queue, close the master fd under the
-    /// state lock, then reap the child (WNOHANG poll → 200 ms grace → SIGKILL
-    /// escalation → blocking waitpid), decode the exit status, and dispatch
-    /// `onExit` on main. The `reapState` transitions (.reaping before the
-    /// first waitpid, .reaped before decode) are what make the `terminate()`
-    /// escalation rungs stand down once the PID is free for kernel reuse.
+    /// Called only from the read loop's exit path. `reapState` moves to `.reaping` before the first `waitpid` and to
+    /// `.reaped` before decode; that is what makes the `terminate()` escalation rungs stand down.
     private func teardownAndReap() {
-        // Drain any pending writes before close so they don't land on a
-        // closed-and-reused fd belonging to some unrelated part of the
-        // process. The write-queue block checks shouldKeepRunning() at
-        // entry — by the time the read loop reaches this teardown _isRunning
-        // is already false (set by the loop's own markStopped() on a break,
-        // or by terminate() on a condition-false exit), so every NOT-yet-
-        // started write will short-circuit and this sync just waits for an
-        // in-flight Darwin.write (if any) to return.
-        //
-        // An armed drain source is cancelled in the same block, and the
-        // group wait below holds the close until libdispatch has run its
-        // cancel handler (i.e. unregistered the fd): a write source must
-        // not outlive the descriptor it watches, or a recycled fd number
-        // could collide with it.
+        // Wait out an in-flight write, cancel the drain source, and hold the close until its cancel handler
+        // has run: a write source must not outlive the descriptor it watches.
         self.writeQueue.sync { self.cancelDrainSourceLocked() }
         self.drainSourceLive.wait()
-        // The read queue is the sole owner of masterFD's close. Doing it
-        // here avoids a double-close / fd-reuse race against terminate()
-        // calling close() on another thread. The stateQueue sync serialises
-        // with writeImmediate's Darwin.write so an urgent control byte
-        // (Ctrl+C, Ctrl+D) in flight from the main thread can't land on a
-        // freshly-closed — and potentially reused — fd.
+        // The read queue is the sole owner of masterFD's close. `stateQueue` serialises it so an urgent
+        // control byte in flight cannot land on a freshly closed, possibly reused fd.
         self.stateQueue.sync {
             _ = close(self.masterFD)
         }
-        // Reap the child. Usually the slave close that made read()
-        // return 0 also means the child has exited; waitpid is just
-        // collecting the zombie. But a shell that `trap 'exit' HUP`
-        // ignored SIGHUP can linger — read() still returned 0 (slave
-        // fd closed by our ioctl/signal side), yet the process is
-        // alive and a blocking waitpid would wedge the read queue
-        // indefinitely. Poll with WNOHANG first; if the child is
-        // still alive, escalate to SIGKILL and wait the hard way.
-        // 200 ms of grace is plenty for a well-behaved shell to clean
-        // up while still giving the window a prompt teardown.
+        // A shell that ignores SIGHUP can outlive the slave close, and a blocking waitpid would wedge
+        // the read queue: poll with WNOHANG, allow 200 ms, then SIGKILL and wait.
         var status: Int32 = 0
-        let gracePeriod: useconds_t = 200_000  // 200 ms
-        // `reaped` guards against ever treating an un-reaped child as
-        // having an exit status. Also serves as a structural barrier
-        // to double-reap if this teardown block is ever re-entered
-        // (it shouldn't be — the read loop runs once per PTY — but
-        // the flag keeps the invariant explicit rather than implicit).
+        let gracePeriod: useconds_t = 200_000
         var reaped = false
-        // Announce reap intent BEFORE the first waitpid (audit
-        // S1-003): from the instant waitpid succeeds, the PID is
-        // free for kernel reuse, so the terminate() escalation
-        // rungs must observe `.reaping` and stand down before any
-        // recycling can occur. stateQueue orders this write against
-        // the rungs' reads.
+        // Announce before the first waitpid: from the instant it succeeds, the pid is free for kernel reuse.
         self.stateQueue.sync { self.reapState = .reaping }
         let waited = waitpid(self.childPID, &status, WNOHANG)
         if waited == self.childPID {
             reaped = true
         } else if waited < 0 && errno == ECHILD {
-            // Already reaped elsewhere (shouldn't happen — no one else
-            // waits on childPID — but treat as "unknown" rather than
-            // looping on a non-existent child).
             reaped = false
         } else {
             usleep(gracePeriod)
@@ -1014,15 +591,6 @@ public final class PTY {
             } else if retry < 0 && errno == ECHILD {
                 reaped = false
             } else {
-                // Still here — SIGHUP was ignored. Force the exit.
-                //
-                // Audit follow-up (2026-04-29): sibling of L-4
-                // SIGHUP rc/errno capture (commits d12d96e +
-                // 8a78a94). A failure here means SIGKILL didn't
-                // reach the child — useful to know. ESRCH (child
-                // already exited between the previous `waitpid`
-                // and this `kill`) is normal teardown; everything
-                // else is a real failure worth logging.
                 let killRC = kill(self.childPID, SIGKILL)
                 if killRC != 0 {
                     let savedErrno = errno
@@ -1033,14 +601,6 @@ public final class PTY {
                 reaped = (forced == self.childPID)
             }
         }
-        // Decode the child's termination status per POSIX. Callers
-        // historically treated -1 as "unknown / session torn down";
-        // preserve that for timeout / un-reaped paths. Otherwise:
-        //   - WIFEXITED: raw exit code 0..255
-        //   - WIFSIGNALED: 128 + signum (standard shell convention so
-        //     e.g. a SIGSEGV (11) surfaces as 139, SIGKILL (9) as 137,
-        //     letting a future crash-reporter distinguish "shell
-        //     exited cleanly" from "shell died of signal").
         self.stateQueue.sync { self.reapState = .reaped }
         let exitCode = Self.decodeExitStatus(status, reaped: reaped)
         DispatchQueue.main.async { [weak self] in
@@ -1057,25 +617,8 @@ public final class PTY {
         }
     }
 
-    /// Write bytes synchronously on the caller's thread with low-latency
-    /// delivery. Use for urgent control bytes (SIGINT, SIGTSTP) where
-    /// async dispatch latency is perceptible. Safe for single-byte
-    /// writes — the kernel write is atomic at that size.
-    ///
-    /// Ordering: enters writeQueue under `.sync` so a pending paste can't
-    /// interleave our bytes into its bracketed-paste frame. Then checks
-    /// shouldKeepRunning (via stateQueue) to bail safely if teardown
-    /// has already marked us stopped. Lock order is `writeQueue →
-    /// stateQueue` — same as `write()` — so no circular wait with
-    /// teardown's `markStopped; writeQueue.sync {}; close(fd)` sequence.
-    ///
-    /// Boundedness (audit S1-001): the master is O_NONBLOCK and every
-    /// writeQueue task returns promptly (EAGAIN buffers the remainder
-    /// instead of parking in the kernel), so this `.sync` can no longer
-    /// wedge the caller — previously a raw-mode child that stopped
-    /// reading let a paste block writeQueue inside Darwin.write and the
-    /// main thread's Ctrl+letter fast path beachballed the app behind
-    /// it, with ⌘W recovery impossible (teardown needs main too).
+    /// Synchronous, for urgent control bytes. Enters `writeQueue` with `.sync` so a pending paste cannot interleave
+    /// these bytes into its bracketed-paste frame. Lock order is `writeQueue → stateQueue`, the same as `write()`.
     public func writeImmediate(_ data: Data) {
         writeQueue.sync {
             guard self.shouldKeepRunning() else { return }
@@ -1087,9 +630,7 @@ public final class PTY {
         }
     }
 
-    /// True when the line discipline would turn `byte` into a signal right
-    /// now (ISIG on and the byte is VINTR / VQUIT / VSUSP) rather than queue
-    /// it as data. Caller MUST hold writeQueue.
+    /// True when ISIG is on and `byte` is VINTR / VQUIT / VSUSP. Like every `…Locked` method, the caller must hold writeQueue.
     private func isSignalCharacterLocked(_ byte: UInt8) -> Bool {
         var attrs = termios()
         guard tcgetattr(masterFD, &attrs) == 0,
@@ -1100,17 +641,8 @@ public final class PTY {
         }
     }
 
-    /// Deliver an interrupt character the kernel refused (it is still queued
-    /// behind a backlog). macOS's pty master refuses EVERY write, ^C
-    /// included, once the tty input queue holds ~1 KiB behind a complete
-    /// line (a multi-line paste into `sleep` / `make`, bracketed paste being
-    /// off while a command runs), so the byte would otherwise wait in
-    /// `pendingWrite` until the program finally reads and the user could not
-    /// interrupt it. A real terminal's line discipline flushes typed-ahead
-    /// input when it sees the signal character, so do the same: drop the
-    /// backlog, empty the kernel input queue to make room, then write the
-    /// byte again so the kernel still does the echo and the signal itself.
-    /// Caller MUST hold writeQueue.
+    /// macOS's pty master refuses every write, ^C included, once the tty input queue holds ~1 KiB behind a complete line. Like a real
+    /// line discipline: drop the backlog, flush the kernel input queue, then write the byte again so the kernel does the echo and the signal.
     private func interruptPastBacklogLocked(_ data: Data) {
         discardPendingLocked()
         var flushRead = FREAD
@@ -1123,75 +655,31 @@ public final class PTY {
         sendLocked(data)
     }
 
-    // MARK: Pending-write buffering (audit S1-001)
+    // MARK: Pending-write buffering
 
-    /// Bytes the kernel wouldn't take yet (tty input queue full — child
-    /// not reading). Accessed ONLY on `writeQueue`. FIFO with respect to
-    /// new writes: `sendLocked` always appends before flushing, so byte
-    /// order is preserved even when a drain retry interleaves with new
-    /// keystrokes.
+    /// Bytes the kernel would not take yet. All the pending-write state below is accessed only on `writeQueue`.
     private var pendingWrite = Data()
-    /// Offset of the first undelivered byte in `pendingWrite`. Partial
-    /// kernel writes advance this instead of `removeFirst`-ing (a
-    /// memmove of the whole remainder per ~1 KiB tty-queue-full write —
-    /// quadratic over a multi-MiB paste). The delivered prefix is
-    /// reclaimed when the buffer drains or the head passes half of it.
-    /// Accessed only on `writeQueue`.
+    /// Offset of the first undelivered byte. Partial writes advance this instead of `removeFirst`,
+    /// which is a memmove per ~1 KiB write and quadratic over a multi-MiB paste.
     private var pendingHead = 0
-    /// Undelivered byte count (`pendingWrite` minus the delivered prefix).
     private var pendingCount: Int { pendingWrite.count - pendingHead }
-    /// One-shot write source armed while bytes are pending against a full
-    /// kernel queue; non-nil also means "a drain is already scheduled".
-    /// Accessed only on `writeQueue`.
     private var drainSource: DispatchSourceWrite?
-    /// Entered when a drain source is created, left by its cancel handler,
-    /// so teardown can wait until the fd is unregistered before closing it.
+    /// Entered when a drain source is created, left by its cancel handler, so teardown can wait until the fd is unregistered.
     private let drainSourceLive = DispatchGroup()
-    /// One-shot-per-episode latch for the overflow log: set on the first
-    /// dropped write, cleared when the backlog fully drains. Accessed only
-    /// on `writeQueue`.
     private var pendingOverflowLogged = false
-    /// Cap on the buffered-but-undelivered BACKLOG, i.e. on every
-    /// undelivered byte except the one oversized write described below. A
-    /// stopped child means the user pasted into a wedged program; the cap
-    /// bounds memory if a script floods writes at a never-reading child.
-    ///
-    /// It gates whether a write is admitted, never how much of one write
-    /// is kept: a write is accepted whole or dropped whole. Truncating a
-    /// single write would cut a paste mid-frame and lose the
-    /// bracketed-paste end marker (and could split a UTF-8 scalar). A
-    /// write larger than the room left (a big paste) is therefore
-    /// admitted whole as the single "exempt" write and does NOT count
-    /// against the cap, so keystrokes, Ctrl-C, focus reports and query
-    /// replies typed while it drains queue FIFO behind it instead of
-    /// being dropped until the paste empties. Worst case memory is cap +
-    /// one exempt write + one write, and the exempt write's bytes are
-    /// already resident in the caller. A second oversized write while one
-    /// is still draining is dropped whole. Dropping NEW writes (not old
-    /// bytes) keeps the stream prefix coherent for when the child resumes.
+    /// A write is admitted whole or dropped whole: truncating would cut a paste mid-frame and lose the bracketed-paste end marker.
+    /// One write larger than the room left is admitted as the "exempt" write, outside the cap, so input typed while it drains queues behind it.
     private static let pendingBacklogCap = 4 * 1024 * 1024
-    /// Length of the in-flight exempt write (see `pendingBacklogCap`);
-    /// 0 when none. Accessed only on `writeQueue`.
     private var exemptWriteLength = 0
-    /// Bytes appended behind the exempt write. They sit at the tail of the
-    /// FIFO, so the exempt write's undelivered share is whatever remains
-    /// ahead of them. Accessed only on `writeQueue`.
     private var bytesBehindExemptWrite = 0
-    /// Undelivered bytes of the exempt write: `pendingCount` minus the
-    /// bytes behind it, clamped to its length (older backlog ahead of it
-    /// is still counted by the cap). Accessed only on `writeQueue`.
+    /// Undelivered bytes of the exempt write; older backlog ahead of it still counts against the cap.
     private var exemptBacklog: Int {
         guard exemptWriteLength > 0 else { return 0 }
         return max(0, min(exemptWriteLength, pendingCount - bytesBehindExemptWrite))
     }
 
-    /// Queue/deliver bytes. Caller MUST hold writeQueue. Appends to the
-    /// pending buffer (all-or-nothing, see `pendingBacklogCap`) then
-    /// flushes as much as the kernel will take; any remainder stays
-    /// buffered with a drain scheduled for when the pty is writable.
     private func sendLocked(_ data: Data) {
         if exemptBacklog == 0 {
-            // The exempt write (if any) is fully delivered; forget it.
             exemptWriteLength = 0
             bytesBehindExemptWrite = 0
         }
@@ -1201,8 +689,6 @@ public final class PTY {
             pendingWrite.append(data)
             if exemptWriteLength > 0 { bytesBehindExemptWrite += data.count }
         } else if room > 0 && exemptWriteLength == 0 {
-            // Oversized (a big paste) but the backlog has room: keep it
-            // whole and exempt from the cap.
             pendingWrite.append(data)
             exemptWriteLength = data.count
             bytesBehindExemptWrite = 0
@@ -1215,8 +701,6 @@ public final class PTY {
         flushPendingLocked()
     }
 
-    /// Push pending bytes into the kernel until it pushes back. Caller
-    /// MUST hold writeQueue.
     private func flushPendingLocked() {
         let fd = self.masterFD
         while pendingCount > 0 {
@@ -1239,20 +723,10 @@ public final class PTY {
             }
             if errno == EINTR { continue }
             if errno == EAGAIN || errno == EWOULDBLOCK {
-                // Kernel tty queue full (child not reading). Keep the
-                // remainder and resume when the pty is writable again — the
-                // write queue task RETURNS here, which is the entire point
-                // of audit S1-001: no caller ever parks behind a full tty.
+                // Kernel tty queue full: return rather than park, and resume when the pty is writable again.
                 scheduleDrainLocked()
                 return
             }
-            // SFH-001: log in Release too. A PTY write that fails with
-            // EPIPE / EIO / ENOSPC silently vanishes a user keystroke or
-            // IME commit — the user sees no shell response and no
-            // diagnostic trail. `log stream --predicate 'subsystem ==
-            // "dev.conjfrnk.blackbird"'` surfaces the errno in
-            // production. Hard errors drop the buffer: the fd is gone or
-            // the line is dead, and retrying would loop forever.
             let savedErrno = errno
             Self.logger.error(
                 "PTY.write FAILED with \(self.pendingCount, privacy: .public) bytes undelivered errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
@@ -1262,7 +736,6 @@ public final class PTY {
         }
     }
 
-    /// Drop all undelivered bytes. Caller MUST hold writeQueue.
     private func discardPendingLocked() {
         pendingWrite.removeAll()
         pendingHead = 0
@@ -1270,20 +743,8 @@ public final class PTY {
         bytesBehindExemptWrite = 0
     }
 
-    /// Arm a one-shot write source that resumes the drain as soon as the pty
-    /// accepts bytes again. Caller MUST hold writeQueue.
-    ///
-    /// Event-driven rather than a retry timer: the kernel tty input queue
-    /// takes only ~1 KiB at a time, so a timer moved ~1 KiB per ~1.7 ms
-    /// tick (~0.6 MiB/s, seconds for a few-MiB paste into `cat` or a raw
-    /// reader) however fast the child read. The source is level-triggered,
-    /// so room that appears before it registers still fires it, and a child
-    /// that stopped reading costs no wakeups at all.
-    ///
-    /// Teardown safety: the handler re-checks `shouldKeepRunning()` before
-    /// touching the fd, and the read-loop teardown cancels the source and
-    /// waits for its cancel handler before `close(fd)` (see
-    /// `teardownAndReap`).
+    /// A level-triggered write source, not a retry timer: the tty input queue takes only ~1 KiB at a time,
+    /// so a timer caps the drain at ~0.6 MiB/s however fast the child reads.
     private func scheduleDrainLocked() {
         guard drainSource == nil else { return }
         let source = DispatchSource.makeWriteSource(fileDescriptor: masterFD, queue: writeQueue)
@@ -1291,8 +752,7 @@ public final class PTY {
         live.enter()
         source.setEventHandler { [weak self] in
             guard let self else { return }
-            // One-shot: a writable pty fires continuously, so disarm before
-            // flushing; an EAGAIN inside the flush arms a fresh source.
+            // A writable pty fires continuously, so disarm before flushing; an EAGAIN inside the flush arms a fresh source.
             self.cancelDrainSourceLocked()
             guard self.shouldKeepRunning() else {
                 self.discardPendingLocked()
@@ -1305,57 +765,27 @@ public final class PTY {
         source.resume()
     }
 
-    /// Disarm the drain source, if any. Caller MUST hold writeQueue.
     private func cancelDrainSourceLocked() {
         drainSource?.cancel()
         drainSource = nil
     }
 
-    /// True when the tty has a foreground process group distinct from our
-    /// child (the shell). This means `command-running` — useful for the
-    /// "Confirm close while running" prompt. When the shell is at its
-    /// prompt, the fg pgroup equals the shell pgroup and this returns
-    /// false.
     public func hasForegroundChild() -> Bool {
-        // F-S5-001: serialise the `masterFD` read against the read-loop's
-        // close. Without this, a `tcgetpgrp` call that races a close can
-        // hit a kernel-recycled fd belonging to another subsystem
-        // (network socket, log fd, another PTY master) and return a
-        // bogus pgroup. When the PTY is already stopped there's nothing
-        // to report — skip the syscall entirely.
+        // `stateQueue` serialises every `masterFD` use against the read loop's close: a syscall racing
+        // the close could hit a kernel-recycled fd belonging to another subsystem.
         return stateQueue.sync {
             guard _isRunning else { return false }
             let fg = tcgetpgrp(masterFD)
             guard fg > 0 else { return false }
             let shellPgid = getpgid(childPID)
             if shellPgid <= 0 {
-                // ECHILD typically — means the shell process is gone. No
-                // foreground child to report; return false so callers don't
-                // block on a dead session. Audit pty F5.
                 return false
             }
-            // Normal case: the shell's pgid equals its pid, and
-            // `fg != shellPgid` means some other process group is the
-            // foreground (a command running under the shell). If the shell
-            // has deliberately `setpgid`'d to a different pgroup — rare, but
-            // legal — this comparison is the right one: we're asking "is
-            // the FOREGROUND tty-reader different from the SHELL pgroup?",
-            // which is what close-confirm and cwd-inheritance actually need.
             return fg != shellPgid
         }
     }
 
-    /// Current working directory of the tty's foreground process. Reads via
-    /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)` on the foreground pgroup leader
-    /// — that gives the "active" cwd: if the shell is at a prompt it's the
-    /// shell's cwd, if a subshell/command is running it's that child's cwd.
-    /// This matches what Terminal.app / iTerm2 inherit when you hit ⌘T.
-    /// Returns nil on any syscall failure.
     public func foregroundWorkingDirectory() -> String? {
-        // F-S5-001: same fd-close race as `hasForegroundChild`. Capture
-        // the target PID under the state lock, then do the out-of-lock
-        // `proc_pidinfo` syscall so we don't hold the lock across kernel
-        // work.
         let targetPID: pid_t? = stateQueue.sync {
             guard _isRunning else { return nil }
             let fg = tcgetpgrp(masterFD)
@@ -1365,14 +795,9 @@ public final class PTY {
         return Self.workingDirectory(ofPID: pid)
     }
 
-    /// Current working directory of the shell itself (our direct child),
-    /// ignoring whatever job holds the foreground. `foregroundWorkingDirectory`
-    /// can't answer when the fg pgroup leader is setuid-root (`sudo`, `top`:
-    /// `proc_pidinfo` gives EPERM) or already reaped (`ls | less`: the
-    /// leader pid is gone, ESRCH); the shell is our own unprivileged child,
-    /// so its cwd stays readable and is where the user is working.
+    /// `foregroundWorkingDirectory` cannot answer when the fg pgroup leader is setuid-root (`sudo`, `top`:
+    /// `proc_pidinfo` gives EPERM) or already reaped (`ls | less`: ESRCH); the shell's cwd stays readable.
     public func shellWorkingDirectory() -> String? {
-        // Same `_isRunning` gate as the siblings: nothing to report once stopped.
         let shellPID: pid_t? = stateQueue.sync { () -> pid_t? in
             guard _isRunning else { return nil }
             return childPID
@@ -1381,8 +806,6 @@ public final class PTY {
         return Self.workingDirectory(ofPID: pid)
     }
 
-    /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)` cwd read shared by
-    /// `foregroundWorkingDirectory` and `shellWorkingDirectory`.
     private static func workingDirectory(ofPID pid: pid_t) -> String? {
         var info = proc_vnodepathinfo()
         let infoSize = Int32(MemoryLayout<proc_vnodepathinfo>.stride)
@@ -1393,22 +816,7 @@ public final class PTY {
             &info,
             infoSize
         )
-        // Audit L-8: require a complete fill, matching sibling
-        // `bsdProcessStartTime`'s `n == size` invariant. Darwin's
-        // proc_pidinfo today returns the full struct or fails outright,
-        // but the kernel contract permits a short return that leaves
-        // the tail zero-filled — which would silently turn a partial
-        // pvi_cdir into a blank or truncated path. Treat any short
-        // return as failure rather than trusting a partially populated
-        // struct. Sibling-symmetric with bsdProcessStartTime.
-        //
-        // Distinguish the two failure modes: bytes <= 0 is a legit
-        // syscall failure (process exited, EPERM under sandbox, etc.)
-        // and is expected; a short positive return is a kernel-contract
-        // violation that today never fires but, if Darwin's behavior
-        // ever changes (kernel update, new sandbox profile), would
-        // otherwise silently break cwd inheritance with zero diagnostic
-        // signal. Log the short-read case so a future debugger sees it.
+        // The kernel contract permits a short return that leaves the tail zero-filled; treat it as failure.
         guard bytes > 0 else { return nil }
         guard bytes == infoSize else {
             Self.logger.error("workingDirectory(ofPID:): proc_pidinfo short read pid=\(pid, privacy: .public) got=\(bytes, privacy: .public) want=\(infoSize, privacy: .public) — kernel contract violation, returning nil")
@@ -1423,34 +831,16 @@ public final class PTY {
     }
 
     #if DEBUG
-    /// Test-only: returns the F_GETNOSIGPIPE state of the master fd.
-    /// Pins the H1 fix that PTY.init applies F_SETNOSIGPIPE so a
-    /// future refactor that drops the fcntl call breaks CI before
-    /// it ships.
     func _testGetNoSigPipeFlag() -> Int32 {
         return Darwin.fcntl(masterFD, F_GETNOSIGPIPE)
     }
     #endif
 
-    /// Classify the PTY's process tree (the security entry point for OSC 7
-    /// cwd trust): the foreground pgroup leader's subtree and the shell's.
-    /// Resolves both roots under the `masterFD` lock, then delegates the BFS
-    /// walk to `ForegroundProcessProbe`.
-    /// The OSC 7 ingest gate in `TerminalSession` trusts the shell-reported
-    /// cwd ONLY when the result is `.local`; both `.remote` and `.unknown`
-    /// cause the payload to be dropped. On any error the result is `.unknown`
-    /// (fail-closed) — opposite of `hasForegroundChild` /
-    /// `foregroundWorkingDirectory`, which fail-open because they're advisory
-    /// UI features, not security gates. KNOWN_ISSUES.md "OSC 7 trust over SSH".
+    /// The OSC 7 ingest gate trusts the shell-reported cwd only when the result is `.local`. Fails closed (`.unknown`)
+    /// on any error, unlike the advisory `hasForegroundChild` / `foregroundWorkingDirectory`, which fail open.
     public func classifyForegroundNamespace() -> ForegroundNamespace {
-        // F-S5-001: serialise the masterFD read against the read-loop's
-        // close, same as `hasForegroundChild` / `foregroundWorkingDirectory`.
-        // Two roots: the foreground pgroup leader AND the shell. With job
-        // control a background job (`docker logs -f … &`) is a sibling of the
-        // foreground command, not under it, so a walk from the foreground
-        // leader alone never sees it while `vim` / `make` holds the terminal;
-        // the shell's subtree does. When the shell is the foreground leader
-        // (idle prompt) the two coincide and are walked once.
+        // Two roots: with job control a background job (`docker logs -f … &`) is a sibling of the foreground
+        // command, not under it, so only the shell's subtree sees it while `vim` / `make` holds the terminal.
         let roots: [pid_t]? = stateQueue.sync {
             guard _isRunning else { return nil }
             let fg = tcgetpgrp(masterFD)
@@ -1463,29 +853,13 @@ public final class PTY {
         return ForegroundProcessProbe.classify(rootPIDs: roots)
     }
 
-    /// Send a signal directly to the foreground process group of the terminal.
-    /// For SIGINT (Ctrl+C) this is more reliable than writing 0x03 to the
-    /// master fd, because the shell may have turned off ISIG or changed VINTR
-    /// in its termios settings. `tcgetpgrp` returns the foreground pgroup of
-    /// the slave side; `kill(-pgrp, sig)` targets the whole group.
+    /// More reliable than writing 0x03 to the master fd: the shell may have turned off ISIG or changed VINTR.
     public func sendSignalToForeground(_ sig: Int32) {
-        // F-S5-001: serialise against the read-loop close. `kill(-pgrp)`
-        // stays outside the lock so we don't hold it across a signal-
-        // delivery syscall.
         let pgrp: pid_t = stateQueue.sync {
             guard _isRunning else { return 0 }
             return tcgetpgrp(masterFD)
         }
         if pgrp > 0 {
-            // Audit L-4: capture rc. ESRCH (the realistic case — a race
-            // between tcgetpgrp returning the pgroup and that pgroup's
-            // leader exiting) silently dropped the user's Ctrl+C before
-            // this log fired. Production now surfaces the errno via
-            // `log stream --predicate 'subsystem == "dev.conjfrnk.blackbird"'`.
-            // ESRCH is the *expected* race when the foreground pgroup
-            // leader has already exited — log at .info to avoid spam on
-            // every shell-exit / Ctrl+C race. EINVAL/EPERM are real
-            // failures and stay at .error.
             let rc = kill(-pgrp, sig)
             if rc < 0 {
                 let savedErrno = errno
@@ -1501,13 +875,6 @@ public final class PTY {
     // MARK: - Resize
 
     public func resize(to size: Size) {
-        // Reject zero / nonsense dims before touching the ioctl — a
-        // degenerate winsize (cols=0 or rows=0) leaves the child's
-        // termios in an unusable state and silently breaks anything
-        // that queries terminal width. TerminalSession already clamps
-        // for the BBTerm side, but PTY is a public class that a future
-        // caller could exercise directly; defence in depth. Audit
-        // pty F4.
         guard size.cols > 0, size.rows > 0 else {
             Self.logger.log(
                 "PTY.resize refused degenerate dims cols=\(size.cols, privacy: .public) rows=\(size.rows, privacy: .public)"
@@ -1518,10 +885,6 @@ public final class PTY {
             ws_row: size.rows, ws_col: size.cols,
             ws_xpixel: 0, ws_ypixel: 0
         )
-        // F-S5-001: serialise against the read-loop close. `ioctl` on a
-        // freshly-recycled fd belonging to another subsystem is exactly
-        // the TOCTOU the review flagged. When the PTY has stopped there
-        // is no-one to send SIGWINCH to, so the ioctl is a no-op; skip.
         let result: Int32 = stateQueue.sync {
             guard _isRunning else { return 0 }
             return withUnsafeMutablePointer(to: &winsize) { ptr in
@@ -1539,22 +902,10 @@ public final class PTY {
     // MARK: - Teardown
 
     #if DEBUG
-    /// Test-only counter incremented exactly once each time `terminate()`
-    /// observes `wasRunning == true` and proceeds past the L6 gate. A
-    /// regression that re-introduced the non-atomic check-then-set would
-    /// let two concurrent callers each increment this — pinning it at
-    /// exactly 1 after N concurrent terminate()s is the L6 invariant.
     private(set) var _testTerminateBodyRanCount: Int = 0
     #endif
 
-    /// Audit S1-003: shared guard for the terminate() escalation rungs.
-    /// Returns true only when `childPID` still provably names our child:
-    /// the reap-state must be `.running` (POSIX reserves the pid until
-    /// the parent — us — reaps; once the read-loop reaper starts, the
-    /// pid may be recycled within milliseconds and the rungs must stand
-    /// down), and, when a spawn-time baseline exists, the BSD start
-    /// time must still match (defense-in-depth for the window between
-    /// this check and the signal).
+    /// True only while `reapState` is `.running` and, when a spawn-time baseline exists, the BSD start time still matches.
     private func escalationTargetIsStillOurChild(
         pid: pid_t, originalStartTime: (sec: UInt64, usec: UInt64)?, rung: StaticString
     ) -> Bool {
@@ -1579,12 +930,7 @@ public final class PTY {
     }
 
     public func terminate() {
-        // Audit L6: atomic check-and-clear of `_isRunning`. The prior
-        // `shouldKeepRunning() ... markStopped()` shape was two
-        // independent stateQueue.sync round-trips; concurrent
-        // `terminate()` callers could both read `true` and double-fire
-        // SIGHUP / start two SIGKILL escalations. Combine into one
-        // critical section that returns the prior value.
+        // Atomic check-and-clear: concurrent callers must not both fire SIGHUP and start two escalations.
         let wasRunning: Bool = stateQueue.sync {
             let prev = _isRunning
             _isRunning = false
@@ -1592,70 +938,22 @@ public final class PTY {
         }
         guard wasRunning else { return }
         #if DEBUG
-        // Increment under stateQueue so concurrent terminates can't race
-        // each other writing to the counter. The L6 fix means at most one
-        // caller observes `wasRunning == true`, so the counter ends at 1
-        // regardless of how many concurrent terminates fire.
         stateQueue.sync { _testTerminateBodyRanCount += 1 }
         #endif
-        // Send SIGHUP to the child to make the blocked read(2) in the read
-        // queue return. The read queue is the sole owner of masterFD's close
-        // and the child's reap — see startReading(). This avoids racing close()
-        // against the read loop's read(), which could otherwise produce a
-        // double-close or an fd-reuse bug under rapid session churn (Plan 4).
-        //
-        // Capture rc to complete the L-4 "all signals observable"
-        // invariant. Today this is structurally safe (`childPID` cannot
-        // be recycled mid-`terminate()`), but a failure here means
-        // SIGHUP didn't reach the child — useful to know. ESRCH (child
-        // already exited) is normal teardown; everything else is a
-        // real failure.
+        // SIGHUP makes the read loop see EOF. The read queue stays the sole owner of masterFD's close
+        // and the child's reap: closing here would race its read().
         let hupRC = kill(childPID, SIGHUP)
         if hupRC < 0 {
             let savedErrno = errno
             let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
             Self.logger.log(level: level, "terminate: kill(\(self.childPID, privacy: .public), SIGHUP) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
         }
-        // Audit pty F3. A shell running `trap '' HUP` (or any other
-        // HUP-ignoring init flow) won't close the slave fd in response
-        // to the signal above, so the read loop stays blocked forever
-        // and the child-process + master-fd never get cleaned up.
-        // Schedule an asynchronous escalation to SIGKILL after a short
-        // grace period — SIGKILL cannot be trapped, so the kernel
-        // forces the child's exit, which closes the slave fd and the
-        // read loop picks up EOF and runs its normal teardown path
-        // (close + waitpid) from there.
-        //
-        // Use `asyncAfter` on a global concurrent queue so the
-        // escalation work doesn't block the caller's thread (the
-        // caller is usually main via `TerminalSession.terminate` /
-        // deinit) and doesn't hold any of PTY's serial queues —
-        // holding `stateQueue` for 200ms would stall the read loop's
-        // close handshake, and holding `writeQueue` would stall any
-        // in-flight `writeImmediate` that raced past the `markStopped`
-        // early-return. The escalation block reads only the captured
-        // `pid` (a value type) and calls `kill` directly; no shared
-        // state is accessed.
+        // A shell that ignores SIGHUP never closes the slave, so escalate. On a global queue: holding `stateQueue` or
+        // `writeQueue` for the grace period would stall the read loop's close handshake or an in-flight write.
         let pid = childPID
         let originalStartTime = childStartTime
-        // Audit L5. Insert SIGTERM between SIGHUP and SIGKILL so a
-        // process that traps SIGTERM for cleanup but not SIGHUP gets
-        // a chance to flush before the kernel-forced kill. 100ms is
-        // half the total grace window — well-behaved shells respond to
-        // SIGHUP immediately and never reach this branch.
-        //
-        // Audit S1-003: this rung previously guarded only with
-        // `kill(pid, 0) == 0` — true for ANY process now owning the
-        // pid — on the premise that SIGTERM is "a polite request to
-        // exit". That premise was wrong: SIGTERM's DEFAULT disposition
-        // terminates the receiver, so a recycled pid meant killing an
-        // innocent same-user process. Two guards now apply, identical
-        // to the SIGKILL rung: (1) the reap-state gate — POSIX reserves
-        // the pid until WE reap it, and `reapState != .running` means
-        // the reaper has begun and recycling is possible, so stand
-        // down (the read-loop teardown owns any further forcing);
-        // (2) the BSD start-time identity check as defense-in-depth
-        // for the microseconds between the gate read and the kill.
+        // SIGTERM first, for a process that traps TERM but not HUP. Its default disposition terminates the receiver and
+        // `kill(pid, 0)` succeeds for any process now owning the pid, so it takes the same identity guards as SIGKILL.
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(100)
         ) { [weak self] in
@@ -1673,60 +971,14 @@ public final class PTY {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(200)
         ) { [weak self] in
-            // Audit S1-003 reap-state gate — see the SIGTERM rung. In
-            // particular this makes the no-baseline "unverified
-            // SIGKILL" below safe: an un-reaped pid still names OUR
-            // child by POSIX (the parent hasn't collected the zombie),
-            // so even without a start-time baseline the target cannot
-            // be a recycled stranger.
+            // The reap-state gate also makes the no-baseline SIGKILL below safe: an un-reaped pid still names our child.
             guard let self, self.escalationTargetIsStillOurChild(
                 pid: pid, originalStartTime: nil, rung: "SIGKILL-gate"
             ) else { return }
-            // Poll for the child. `kill(pid, 0)` returns 0 iff the
-            // process exists and we can signal it. A non-zero return
-            // means ESRCH (already exited) or EPERM (impossible here
-            // since we're the parent); either way, don't escalate.
             guard kill(pid, 0) == 0 else { return }
-            // PID-reuse guard (audit M9 + PS-02): macOS may have
-            // recycled the pid for an unrelated process if our
-            // original child exited inside the 200ms grace window AND
-            // another process spawned and got the same pid. Compare
-            // the current process's BSD start time against the value
-            // we captured at spawn — if they differ, OR if we cannot
-            // read the start time at all, the kernel has handed this
-            // pid to a different process (or is in the middle of
-            // doing so, with proc_pidinfo racing the spawn) and we
-            // MUST NOT SIGKILL it. The earlier shape (`if let original
-            // = …, let current = …, current != original`) used
-            // compound `if let` binding: if `current` was nil the
-            // entire condition was false and execution fell through
-            // to the unguarded `kill(pid, SIGKILL)` against the
-            // recycled stranger. The guards below treat "can't
-            // verify" as "skip", which is the safe direction.
             guard let original = originalStartTime else {
-                // Audit M1. `bsdProcessStartTime` failed at spawn —
-                // proc_pidinfo can race a partially-set-up process,
-                // hit EPERM under sandbox changes, or just glitch.
-                // Without a baseline we can't compare current start-
-                // time to prove the pid still belongs to our child.
-                //
-                // The pre-M1 stance was "skip SIGKILL to avoid
-                // killing a recycled-pid stranger." That posture
-                // has the worse failure mode: a HUP-ignoring child
-                // (e.g. `trap '' HUP`) becomes immortal — the read
-                // loop never sees EOF, waitpid is never called,
-                // master fd leaks, and the user can't close the
-                // tab. PID reuse on macOS within a 200ms window is
-                // already vanishingly rare (the kernel cycles
-                // through pid space and biases away from immediate
-                // reuse); skipping SIGKILL trades that microscopic
-                // risk for a definite leak.
-                //
-                // Send SIGKILL anyway, matching the posture of the
-                // read-loop's own local SIGKILL escalation (line
-                // ~687) which fires without a start-time check.
-                // Log loudly so any rare PID-reuse incident can be
-                // correlated with this code path.
+                // No baseline from spawn: send SIGKILL anyway. Skipping it would make a HUP-ignoring child
+                // immortal (no EOF, no waitpid, a leaked master fd and a tab that cannot close).
                 let killRC = kill(pid, SIGKILL)
                 if killRC != 0 {
                     let savedErrno = errno
@@ -1751,13 +1003,6 @@ public final class PTY {
                 )
                 return
             }
-            // Audit follow-up (2026-04-29): sibling of L-4 SIGHUP
-            // rc/errno capture (commits d12d96e + 8a78a94). Capture
-            // rc/errno here too: ESRCH at this point means the child
-            // exited between the `current == original` check above
-            // and this `kill` — vanishingly rare, but still informational.
-            // Anything else is a real failure (e.g. EPERM if we
-            // somehow lost privilege to signal our own child).
             let killRC = kill(pid, SIGKILL)
             if killRC != 0 {
                 let savedErrno = errno

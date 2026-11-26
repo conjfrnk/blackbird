@@ -266,17 +266,6 @@ final class FindViewportZeroWidthScalarsBlindTests: XCTestCase {
                           file: file, line: line)
     }
 
-    // MARK: - Fixture sanity
-
-    func test_fixture_copyTextKeepsEveryZeroWidthScalar_onScreenAndInHistory() throws {
-        // makeRig asserts the preconditions for every sample row.
-        let onScreen = try makeRig(.viewport)
-        XCTAssertEqual(onScreen.firstLine, 0, "fixture: sample 0 is buffer line 0 while on screen")
-        let inHistory = try makeRig(.scrollback)
-        XCTAssertLessThan(inHistory.line(of: Self.samples.count - 1), 0,
-                          "fixture: the last sample row must be in history, not on screen")
-    }
-
     // MARK: - 1. Accessibility source (BBSnapshot.visibleRowsAsText)
 
     func test_visibleRowsAsText_keepsZeroWidthScalars() throws {

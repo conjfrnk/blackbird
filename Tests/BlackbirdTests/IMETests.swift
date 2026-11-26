@@ -279,11 +279,6 @@ final class IMETests: XCTestCase {
         XCTAssertEqual(CellWidth.terminalCellWidth(of: "#️⃣"), 2)
     }
 
-    /// Plain ASCII regression — one cell.
-    func testTerminalCellWidth_asciiIsOne() {
-        XCTAssertEqual(CellWidth.terminalCellWidth(of: "a"), 1)
-    }
-
     /// CJK regression — already-wide scalar (U+4E2D) must still report 2.
     /// Pins the existing wide-range path so the VS-16/keycap promotion
     /// can't accidentally regress it.

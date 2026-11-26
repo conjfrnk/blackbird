@@ -1,22 +1,6 @@
 import Foundation
 
-/// Audit S2-004: idle-based replacement for the test-host 60 s exit
-/// fuse. The TESTS (TestHostTermination, in the injected bundle — same
-/// process) post `activityNotification` on every test start/finish;
-/// this monitor exits the host only when no heartbeat has arrived for
-/// `idleLimit`. A single test legitimately running longer than the
-/// limit would still be shot — 300 s is far past the suite's slowest
-/// test (the project gates test cost deliberately) while keeping
-/// zombie-host cleanup prompt enough for CI.
-///
-/// Exit code stays 0 on the idle path, preserving the original
-/// safety-net semantics: a genuinely red run is caught by
-/// TestHostTermination's issueCount → exit(1) propagation and by CI's
-/// "both suites printed passed" grep, not by this last-resort fuse.
-///
-/// Lives in its own file (not `App.swift`) so the app entry point stays a
-/// lifecycle table of contents; `AppDelegate.startTestHostIfUnderTest()`
-/// is the only caller.
+/// Exits the test host with code 0 once no `activityNotification` has arrived for `idleLimit`.
 final class TestHostActivityMonitor {
     static let shared = TestHostActivityMonitor()
     static let activityNotification = Notification.Name(
@@ -25,8 +9,7 @@ final class TestHostActivityMonitor {
     private static let idleLimit: TimeInterval = 300
     private static let checkInterval: TimeInterval = 30
 
-    /// Main-queue confined (observer is delivered on .main; the timer
-    /// fires on the main runloop).
+    /// Main-queue confined.
     private var lastActivity = Date()
     private var observer: NSObjectProtocol?
     private var timer: Timer?
@@ -50,8 +33,7 @@ final class TestHostActivityMonitor {
                 exit(0)
             }
         }
-        // .common so the check still fires while XCTest runs the
-        // runloop in non-default modes (modal panels, tracking).
+        // .common so the check still fires while XCTest runs the runloop in non-default modes.
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }

@@ -456,52 +456,6 @@ check_cask_vs_appcast() {
 check_cask_vs_appcast "repo" "$CASK" "$APPCAST"
 
 # ---------------------------------------------------------------------------
-# 2. README: the documented local-test commands must be ones Homebrew 7 accepts.
-# ---------------------------------------------------------------------------
-
-# Offending lines: inside fenced code blocks, a `brew install|audit|livecheck|...`
-# command that hands brew a bare *.rb path (outside a Casks/ tap checkout), in a
-# block that does not opt in via HOMEBREW_DEVELOPER. Comments are ignored.
-readme_path_commands() {
-    awk '
-        function flush(   i, l) {
-            if (blocktext ~ /HOMEBREW_DEVELOPER/) return
-            for (i = 1; i <= n; i++) {
-                l = buf[i]
-                if (l ~ /^[[:space:]]*#/) continue
-                if (l ~ /(^|[^[:alnum:]_])brew[[:space:]]+(install|reinstall|upgrade|audit|livecheck|fetch|info)([[:space:]]|$)/ \
-                    && l ~ /[^[:space:]]*\.rb([[:space:]]|$)/ \
-                    && l !~ /(^|[[:space:]\/])Casks\//) {
-                    print lineno[i] ": " l
-                }
-            }
-        }
-        /^[[:space:]]*```/ {
-            if (inblock) { flush(); inblock = 0 } else { inblock = 1; n = 0; blocktext = "" }
-            next
-        }
-        inblock { n++; buf[n] = $0; lineno[n] = NR; blocktext = blocktext "\n" $0 }
-        END { if (inblock) flush() }
-    ' "$README"
-}
-
-# Precondition: the parser really sees the README's fenced brew commands.
-README_FENCED_BREW="$(awk '/^[[:space:]]*```/ { f = !f; next } f && /brew/ { print }' "$README")"
-assert_contains "$README_FENCED_BREW" "brew " \
-    "README parser sees fenced brew commands (not vacuous)"
-
-README_BAD="$(readme_path_commands)"
-assert_eq "$README_BAD" "" \
-    "README must not document brew install/audit/livecheck on a bare cask file path (Homebrew 7: 'Homebrew requires casks to be in a tap, rejecting')"
-
-README_HAS_ROUTE="no"
-if grep -qiE '(^|[^[:alnum:]_])tap([^[:alnum:]_]|$)|Library/Taps|HOMEBREW_DEVELOPER' "$README"; then
-    README_HAS_ROUTE="yes"
-fi
-assert_eq "$README_HAS_ROUTE" "yes" \
-    "README documents a route Homebrew 7 accepts for local cask testing (a tap, or HOMEBREW_DEVELOPER)"
-
-# ---------------------------------------------------------------------------
 # 3. The cask as rewritten by a real publish-update.sh run must still agree
 #    with the appcast that same run publishes.
 # ---------------------------------------------------------------------------

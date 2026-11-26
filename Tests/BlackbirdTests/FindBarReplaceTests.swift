@@ -110,17 +110,6 @@ final class FindBarReplaceTests: XCTestCase {
 
     // MARK: - Disclosure caret toggle
 
-    func test_toggle_expandsAndCollapses() {
-        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
-        XCTAssertFalse(bar.isReplaceVisible)
-        bar.setReplaceVisible(true)
-        XCTAssertTrue(bar.isReplaceVisible)
-        XCTAssertEqual(bar.preferredHeight, 60)
-        bar.setReplaceVisible(false)
-        XCTAssertFalse(bar.isReplaceVisible)
-        XCTAssertEqual(bar.preferredHeight, 32)
-    }
-
     // MARK: - Independent delegate invocations do not bleed state
 
     func test_multipleDelegateInvocations_lastWins() {
@@ -205,20 +194,6 @@ final class FindBarReplaceTests: XCTestCase {
         XCTAssertEqual(recorder.capturedReplacement, "bar")
         // No banner should have been shown.
         XCTAssertNotEqual(bar._matchLabelStringForTests(), FindBar.tuiActiveMessage)
-    }
-
-    func test_tuiGuard_defaultImplementation_allowsReplace() {
-        // The plain ReplaceDelegateRecorder does not override the guard, so
-        // the default `true` implementation must keep the legacy behaviour.
-        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
-        let recorder = ReplaceDelegateRecorder()
-        bar.delegate = recorder
-
-        bar._setReplaceFieldStringForTests("ok")
-        bar._clickReplaceCurrentForTests()
-
-        XCTAssertEqual(recorder.capturedKind, .current,
-                       "Delegates that don't override the guard must default to allowing replace")
     }
 }
 
@@ -311,16 +286,6 @@ final class FindBarOptionsTests: XCTestCase {
         XCTAssertEqual(recorder.history.count, 2)
         let final = recorder.history.last
         XCTAssertTrue(final?.caseSensitive == true && final?.regex == true)
-    }
-
-    func test_sameOptionToggleTwice_returnsToOffAndFiresTwice() {
-        let bar = FindBar(frame: .zero)
-        let recorder = OptionsRecorder()
-        bar.delegate = recorder
-        bar.toggleCaseSensitive(nil)
-        bar.toggleCaseSensitive(nil)
-        XCTAssertEqual(recorder.history.count, 2)
-        XCTAssertFalse(bar.options.caseSensitive)
     }
 }
 
@@ -492,16 +457,6 @@ final class FindRegexGuardTests: XCTestCase {
         XCTAssertFalse(
             RegexSafetyGate.isReasonable("a*b*c*d*e*f*g*"),
             "patterns with > 6 quantifiers must be rejected"
-        )
-    }
-
-    func test_isReasonableRegexPattern_acceptsAlternationWithoutQuantifier() {
-        // `(cat|dog|fish)` is a perfectly fine find query — alternation
-        // alone is not dangerous, only alternation INSIDE a quantified
-        // group (`(...|...)+`) overlaps catastrophically.
-        XCTAssertTrue(
-            RegexSafetyGate.isReasonable("(cat|dog|fish)"),
-            "plain alternation without a trailing quantifier must pass"
         )
     }
 

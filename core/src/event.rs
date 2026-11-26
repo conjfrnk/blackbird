@@ -1,91 +1,38 @@
-//! Public event-callback types forwarded across the C ABI.
-//!
-//! Leaf types with no in-crate dependencies; re-exported from the crate root
-//! so `blackbird_core::BBEvent` and the cbindgen header are unchanged.
-
 use std::os::raw::c_void;
 
-/// Kind of terminal event forwarded to the C caller.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BBEventKind {
     Title = 1,
     Bell = 2,
-    /// Reserved for future use. Not currently emitted by RoutingListener —
-    /// alacritty 0.26 doesn't surface cursor-shape changes as events. Swift
-    /// readers should consume cursor state from snapshots.
+    /// Reserved; not emitted. Read cursor state from snapshots.
     CursorShape = 3,
     Osc52Clipboard = 4,
-    /// Bytes that should be written BACK to the PTY (terminal → shell).
-    /// alacritty_terminal generates these in response to DSR queries (ESC[6n),
-    /// DA1/DA2, DECRPM, and similar terminal-identification sequences. If the
-    /// host ignores these, apps like nvim that probe terminal capabilities
-    /// will time out waiting for a response.
+    /// Bytes to write BACK to the PTY: replies to DSR (ESC[6n), DA1/DA2, DECRPM and similar.
     PtyWrite = 5,
-    /// New in 2026-04-17 gaps plan. Payload: UTF-8 bytes of the local
-    /// filesystem path decoded from an OSC 7 `file://` URL. Only emitted
-    /// when scheme is `file` and authority is empty, `localhost`, or this
-    /// machine's own hostname (`gethostname(3)`, as of `bb_term_new` or
-    /// now, ignoring an mDNS `.local` suffix) — fish and the Apple / VTE /
-    /// kitty / WezTerm / Ghostty snippets all embed it.
-    ///
-    /// OSC 7 is not parsed by `alacritty_terminal` 0.26 / `vte` 0.15 —
-    /// the sequence falls through vte's `osc_dispatch` unhandled branch.
-    /// We run a parallel `vte::Parser` in `bb_term_input` against an
-    /// `Osc7Scanner` that fires only on this one sequence. See the
-    /// scanner impl and the fragmentation test for details.
+    /// Payload: UTF-8 local filesystem path decoded from an OSC 7 `file://` URL for this machine.
     CwdChanged = 6,
-    /// OSC 133 prompt/command mark emitted by a shell-integration snippet
-    /// (bash/zsh/fish). `i32_arg` carries the kind: 1=A (prompt start),
-    /// 2=B (command start), 3=C (command output start), 4=D (command end).
-    /// `payload` is the ASCII decimal exit code for kind D, empty otherwise.
+    /// OSC 133 mark. `i32_arg`: 1 = A (prompt start), 2 = B (command start), 3 = C (output
+    /// start), 4 = D (command end). `payload`: ASCII decimal exit code for D, empty otherwise.
     PromptMark = 7,
-    /// Program-originated desktop notification: OSC 9 (iTerm2 form),
-    /// OSC 777 `;notify;title;body`, or kitty OSC 99. Payload is UTF-8
-    /// `title U+001F body`, both halves already scrubbed of control /
-    /// bidi scalars and length-capped in the core. Rate-capped to
-    /// `NOTIFICATION_EVENT_PER_SECOND`.
+    /// OSC 9, OSC 777 `;notify;title;body`, or kitty OSC 99. Payload: UTF-8 `title U+001F body`.
     Notification = 8,
     Fatal = 99,
 }
 
-/// Event forwarded to the C callback.
-///
-/// `payload` is valid **only for the duration of the callback**; callers must
-/// copy the bytes if they need them after the callback returns.
+/// `payload` is valid **only for the duration of the callback**; copy the bytes to keep them.
 #[repr(C)]
 pub struct BBEvent {
     pub kind: BBEventKind,
-    /// Borrowed pointer into Rust-owned memory; null when `len == 0`.
-    /// `CallbackCell::fire` normalizes this invariant at dispatch
-    /// (audit S6-001): producers may hand `fire` an empty slice's
-    /// `as_ptr()` (non-null) or even a fresh `String`'s
-    /// `NonNull::dangling()` — the callback always observes
-    /// `payload == NULL ⇔ len == 0`, so a C consumer branching on
-    /// non-null per this contract never sees a dangling pointer.
+    /// Borrowed pointer into Rust-owned memory; `payload == NULL ⇔ len == 0`.
     pub payload: *const u8,
     pub len: usize,
-    /// Event-specific integer argument (audit S6-002):
-    /// - `PromptMark`: the mark kind, 1 = A (prompt start), 2 = B
-    ///   (command start), 3 = C (command output), 4 = D (command end) —
-    ///   see `BBPromptMarkKind`.
-    /// - `CursorShape` (reserved; not currently emitted): 0 = block,
-    ///   1 = bar, 2 = underline.
-    /// - 0 for every other event kind.
+    /// `PromptMark`: the mark kind (see `BBPromptMarkKind`). 0 for every other event kind.
     pub i32_arg: i32,
-    /// `PromptMark` kind A: the cursor's grid row (0 = top of the live grid)
-    /// at the instant the mark was parsed. Same value `BBSnap::cursor_row`
-    /// would have held there. A mark inside a DEC 2026 synchronized update is
-    /// delivered when the update is replayed, with the position the grid has
-    /// then. 0 for every other mark kind and event kind.
+    /// `PromptMark` kind A: the cursor's grid row (0 = top of the live grid) when parsed; else 0.
     pub cursor_row: u16,
-    /// `PromptMark` kind A: the primary screen's monotonic lines-scrolled
-    /// counter at the instant the mark was parsed (`BBSnap::lines_scrolled`
-    /// then). With `cursor_row` it pins the prompt's absolute line, which a
-    /// snapshot taken after the event cannot: the core may have parsed further
-    /// by then. 0 for every other mark kind and event kind.
+    /// `PromptMark` kind A: the primary screen's lines-scrolled counter when parsed; else 0.
     pub lines_scrolled: u64,
 }
 
-/// C callback signature for terminal events.
 pub type BBEventCb = unsafe extern "C" fn(BBEvent, *mut c_void);

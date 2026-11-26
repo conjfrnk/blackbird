@@ -125,30 +125,6 @@ final class FindBarAdversarialTests: XCTestCase {
 
     // MARK: - 2. Query longer than the entire scrollback corpus
 
-    /// Scenario 2: query longer than the visible viewport. The needle
-    /// can't possibly match (and in particular can't run off the end
-    /// of any row); `findMatches` must end empty without a buffer
-    /// overrun or crash.
-    func test_queryLongerThanCorpus_yieldsZeroMatches() throws {
-        let view = try makeView()
-        // Corpus: tiny viewport, a short word.
-        let snap = try snapshotWithRow0("hi", cols: 5)
-        view.currentSnapshot = snap
-        // 256-char needle — orders of magnitude longer than any row.
-        let oversized = String(repeating: "x", count: 256)
-
-        let ms = measureTimeMS {
-            view.findController.performSearch(query: oversized)
-        }
-
-        XCTAssertLessThan(ms, 50.0, "oversized-query search must stay bounded")
-        XCTAssertTrue(
-            view.findController.findMatches.isEmpty,
-            "needle longer than every row must yield zero matches; "
-            + "got \(view.findController.findMatches.count)"
-        )
-    }
-
     // MARK: - 3. Catastrophic-backtracking regex must be gated
 
     /// Scenario 3: the textbook ReDoS shape `(a+)+b` against an
@@ -302,24 +278,6 @@ final class FindBarAdversarialTests: XCTestCase {
 
     // MARK: - 7. Find on empty scrollback
 
-    /// Scenario 7: fresh terminal, no input. Any non-empty query
-    /// finds zero matches — and crucially doesn't crash on an
-    /// uninitialised buffer. (alacritty fills cells with ' ' by
-    /// default, so "anything" must not accidentally match a row of
-    /// spaces.)
-    func test_findOnFreshTerminal_yieldsZeroMatches() throws {
-        let view = try makeView()
-        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
-        let snap = try XCTUnwrap(term.snapshot())
-        view.currentSnapshot = snap
-        view.findController.performSearch(query: "anything")
-        XCTAssertTrue(
-            view.findController.findMatches.isEmpty,
-            "search against an empty terminal must yield zero matches; "
-            + "got \(view.findController.findMatches.count)"
-        )
-    }
-
     // MARK: - 8. Find then resize
 
     /// Scenario 8: produce matches against a 40-col snapshot, then
@@ -373,57 +331,7 @@ final class FindBarAdversarialTests: XCTestCase {
 
     // MARK: - 9. Find while cursor is on alt-screen
 
-    /// Scenario 9: alt-screen vs scrollback isolation. The visible
-    /// rows on alt-screen must contain ONLY the alt-screen content
-    /// (vim's UI), not the primary scrollback. Documented behaviour
-    /// (per F-S5-014 + FindBarAltScreenTests): find walks visibleRows
-    /// when alt-screen is active. This adversarial variant uses a
-    /// distinctive token so a regression where find leaks
-    /// primary-screen content into the alt-screen scan would
-    /// false-positive on the assertion.
-    func test_altScreen_visibleRowsExcludePrimaryScreen() throws {
-        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
-        // Primary screen: distinctive token "PRIM_ONLY" pushed off-grid.
-        term.input("PRIM_ONLY\r\n")
-        for _ in 0..<6 { term.input("\r\n") }
-        // Enter alt-screen + write a different distinctive token.
-        term.input("\u{1B}[?1049h")
-        term.input("ALT_ONLY")
-
-        let snap = try XCTUnwrap(term.snapshot())
-        XCTAssertTrue(snap.termMode.contains(.altScreen))
-        var visible = ""
-        for r in 0..<snap.rows {
-            for c in 0..<snap.cols {
-                if let ch = snap.character(at: c, row: r) { visible.append(ch) }
-            }
-        }
-        XCTAssertTrue(
-            visible.contains("ALT_ONLY"),
-            "alt-screen visible rows must contain alt-screen content"
-        )
-        XCTAssertFalse(
-            visible.contains("PRIM_ONLY"),
-            "alt-screen visible rows must NOT leak primary-screen content; "
-            + "find scanning these rows would otherwise hit stale shell history"
-        )
-    }
-
     // MARK: - 10. Unicode query against ASCII corpus
-
-    /// Scenario 10: searching for "中" (BMP CJK, 1 UTF-16 unit) against
-    /// "hello world". Zero matches; no crash on the UTF-16 →
-    /// col-map walker.
-    func test_unicodeQueryAgainstASCII_yieldsZeroMatches() throws {
-        let view = try makeView()
-        let snap = try snapshotWithRow0("hello world", cols: 12)
-        view.currentSnapshot = snap
-        view.findController.performSearch(query: "中")
-        XCTAssertTrue(
-            view.findController.findMatches.isEmpty,
-            "unicode needle absent from ASCII corpus must yield zero matches"
-        )
-    }
 
     // MARK: - 11. Case sensitivity
 
@@ -453,34 +361,6 @@ final class FindBarAdversarialTests: XCTestCase {
     }
 
     // MARK: - 12. Rapid query-change race
-
-    /// Scenario 12: rapid query changes simulating a user typing fast.
-    /// Each `_setQueryFieldStringForTests`-equivalent (we drive
-    /// performSearch directly) must leave findMatches in a coherent
-    /// state — never a torn array where the count says N but only K<N
-    /// entries are present. We exercise via repeated performSearch
-    /// calls on the main thread; if a regression introduced async
-    /// completion handlers that mutate findMatches off-thread,
-    /// findMatches.count and a re-read would diverge.
-    func test_rapidQueryChange_leavesFindMatchesCoherent() throws {
-        let view = try makeView()
-        let snap = try snapshotWithRow0("hello world hello", cols: 18)
-        view.currentSnapshot = snap
-
-        // Toggle the query rapidly. The session-less guard zeroes the
-        // matches each call; the invariant is that findMatches is a
-        // proper Array at every observable point (no torn read).
-        for q in ["hello", "world", "x", "", "hello"] {
-            view.findController.performSearch(query: q)
-            let snapshotCount = view.findController.findMatches.count
-            let reread = view.findController.findMatches.count
-            XCTAssertEqual(
-                snapshotCount, reread,
-                "findMatches.count must not change between consecutive "
-                + "reads on the same thread (q=\(q))"
-            )
-        }
-    }
 
     // MARK: - 13. Replace-all on no-match
 

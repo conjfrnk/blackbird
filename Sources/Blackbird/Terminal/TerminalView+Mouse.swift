@@ -2,40 +2,6 @@ import AppKit
 import Foundation
 import BBCore
 
-/// Mouse event handling for `TerminalView`:
-///
-///   - **Selection gestures** — click / drag / shift-click, rectangular
-///     (option-drag) mode, word-expand on double-click, line-expand on
-///     triple-click, edge-autoscroll while dragging past the viewport.
-///   - **Mouse reporting** — DEC modes 1000 / 1002 / 1003 (click /
-///     motion / any-event) with SGR 1006 and X10 fallback encodings;
-///     the TUI receives `CSI < button ; col ; row M/m`. Release-button
-///     handling, wheel reporting (buttons 64/65), middle-mouse, and
-///     the option-modifier escape hatch that lets users bypass
-///     reporting when a TUI captures the wheel.
-///   - **Modifier-drag window move / resize** — with the configured
-///     `Preferences.windowDragModifier` / `windowResizeModifier` held
-///     (default `.command`), left-drag moves the window and right-drag
-///     resizes from the nearest corner. Matches Amethyst-style tiling
-///     workflows and Blackbird's own keybinding table.
-///
-/// Stored state (`isDragging`, `selection`) lives on the
-/// class body — `TerminalView.swift` — because Swift requires stored
-/// properties on the declaring type. The selection-autoscroll timer +
-/// direction were hoisted out of the view into the owned
-/// `selectionAutoscroller` (`SelectionAutoscroller`).
-///
-/// Hover-tooltip + URL-highlight clears (`cancelHoverTooltip`,
-/// `clearHoveredLink`, `clearCmdHoverURLMatch`) live in
-/// `TerminalView+Hover.swift` and are called from `scrollWheel`'s
-/// grid-just-moved cleanup below; their visibility is `internal` for
-/// exactly that cross-file invocation.
-///
-/// `sendMouseEvent` and `expandSelectionUnderAnchor` live in this
-/// file — mouse reporting and selection expansion are mouse-layer
-/// responsibilities. `sendMouseEvent` stays `internal` because the
-/// DEC 1003 any-event path in `TerminalView+Hover.swift`'s
-/// `mouseMoved` fires one motion report per cell transition.
 extension TerminalView {
 
     // MARK: - Mouse reporting
@@ -53,41 +19,20 @@ extension TerminalView {
         currentSnapshot?.termMode.contains(.utf8Mouse) ?? false
     }
 
-    /// One mousedown this view actually received.
-    ///
-    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not this
-    /// view's. AppKit keeps counting across window- and app-activation
-    /// boundaries, and it counts clicks this view never received: nothing in
-    /// the app overrides `acceptsFirstMouse`, so the click that reactivates
-    /// Blackbird is consumed to activate and never reaches `mouseDown`.
-    /// Classifying the gesture off the raw count therefore turned a single
-    /// delivered click into a word selection, and — the case that bites
-    /// harder — turned a genuine double-click after a return-click into a
-    /// whole-LINE selection, because the two delivered events carried counts
-    /// 2 and 3. Same root cause as the tab strip's `ClickSequenceMark`
-    /// (Window/TitlebarTabBar.swift).
+    /// `NSEvent.clickCount` counts the system's click sequence, including the activation click
+    /// AppKit never delivers to this view, so clicks are renumbered against the mousedowns received here.
     struct ClickSequenceMark: Equatable {
-        /// The raw `NSEvent.clickCount` of that mousedown.
         let systemClickCount: Int
-        /// The count this view assigned it after renumbering.
         let effectiveClickCount: Int
         let timestamp: TimeInterval
     }
 
-    /// The ordinal of this mousedown within the run of mousedowns THIS VIEW
-    /// received, rather than within the window server's sequence.
-    ///
-    /// Deliberately keyed on count and time only — NOT on the clicked cell.
-    /// The window server already enforces double-click slop distance; adding
-    /// a cell-equality test would demote a legitimate double-click whose two
-    /// halves straddled a cell boundary to character mode, breaking everyday
-    /// word-select.
+    /// Keyed on count and time only, not the clicked cell: the window server already enforces
+    /// slop, and a double-click straddling a cell boundary must stay a double-click.
     static func effectiveClickCount(previous: ClickSequenceMark?,
                                     clickCount: Int,
                                     timestamp: TimeInterval,
                                     doubleClickInterval: TimeInterval) -> Int {
-        // 1 is already the start of a gesture; 0 and negatives are
-        // synthesized values no caller should see rewritten.
         guard clickCount > 1 else { return clickCount }
         guard let previous, previous.systemClickCount == clickCount - 1 else { return 1 }
         let elapsed = timestamp - previous.timestamp
@@ -97,10 +42,7 @@ extension TerminalView {
 
     public override func mouseDown(with event: NSEvent) {
         wakeRenderLoop()
-        // Renumber BEFORE any early return below, so a first click consumed
-        // by ⌘-URL-open, window-drag or mouse reporting still counts as a
-        // click this view saw — otherwise the following genuine double-click
-        // would be demoted.
+        // Renumber before any early return: a click consumed by URL-open, window-drag or reporting still counts.
         let clicks = Self.effectiveClickCount(previous: lastMouseDownMark,
                                               clickCount: event.clickCount,
                                               timestamp: event.timestamp,
@@ -109,53 +51,19 @@ extension TerminalView {
                                              effectiveClickCount: clicks,
                                              timestamp: event.timestamp)
 
-        // Every mousedown starts a fresh gesture: drop any stale consumed-click
-        // state from a release we never saw (drag out of the window, a modal
-        // that stole the mouseUp).
         pendingLinkClick = nil
         didReportMouseDown = false
-        // A fresh gesture reports its first drag even if it lands on the cell
-        // the previous drag ended in.
         lastReportedDragCell = nil
 
-        // ⌘-click on a URL → open it. Runs before mouse-reporting, window-drag
-        // and selection so a TUI can't swallow the gesture.
-        //
-        // This is deliberately NOT gated on `mouseReportingEnabled()`. ⌘ has no
-        // representation in the xterm mouse protocol (modifier bits are
-        // shift=4, meta=8, ctrl=16 — no super bit) and `MouseReportEncoder`
-        // has nothing to encode for it, so a TUI receives a ⌘-click as an
-        // ordinary click and can never have acted on the ⌘. Gating on mouse
-        // reporting therefore bought nothing and cost everything: Claude Code
-        // holds DEC 1000/1002/1003/1006 for its entire REPL session, so every
-        // ⌘-click on a link fell through to the window-drag branch below and
-        // moved the window while the hover underline promised a link (issue
-        // #30). The old comment justified the gate with vim's <C-click> — Ctrl,
-        // which macOS routes to `rightMouseDown` anyway, not ⌘.
-        //
-        // The URL is opened from `mouseUp` (see `pendingLinkClick`), so a
-        // ⌘-drag that merely *starts* on a link still moves the window.
-        // URL-open stays bound to ⌘ — the universal link-open convention —
-        // regardless of the configurable window-drag modifier handled below.
+        // Not gated on mouse reporting: ⌘ has no bit in the xterm mouse protocol (shift=4, meta=8, ctrl=16),
+        // so a TUI cannot act on it. The URL opens on mouseUp, so a ⌘-drag starting on a link still moves the window.
         if event.modifierFlags.contains(.command) {
-            // Suppress URL resolution when the click landed in the
-            // titlebar inset region (above the text grid). The
-            // `bufferPointFromEvent` Y-clamp snaps titlebar clicks to
-            // displayRow 0; if row 0 happens to carry an OSC 8 link
-            // cell at the click column, the gesture would silently
-            // open that URL instead of starting a window-drag. The
-            // intent of ⌘-drag-from-titlebar is unambiguous (it's the
-            // chrome region, not text). Audit M12.
+            // Skip the titlebar inset: `bufferPointFromEvent` clamps those clicks to row 0, which may carry a link.
             let local = convert(event.locationInWindow, from: nil)
             let textAreaTop = bounds.height - titlebarOnlyTopInset
             let inTextArea = local.y < textAreaTop
             if inTextArea {
                 let p = bufferPointFromEvent(event)
-                // Buffer-relative line → screen row. OSC 8 attribution is
-                // keyed on screen-space cells since the snapshot only carries
-                // the visible viewport. When the user is scrolled back into
-                // history the regex path still honours buffer coordinates
-                // (URLDetector output uses buffer lines).
                 let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
                 if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
                     pendingLinkClick = PendingLinkClick(
@@ -167,10 +75,6 @@ extension TerminalView {
                 }
             }
         }
-        // Configured window-drag modifier (default ⌘) → move the window like a
-        // titlebar drag. Any view can initiate a window drag by calling
-        // `performDrag(with:)`; the call blocks until the mouse is released,
-        // so this returns cleanly without triggering the selection path below.
         let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
         if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
             window?.performDrag(with: event)
@@ -178,34 +82,22 @@ extension TerminalView {
         }
         let optionHeld = event.modifierFlags.contains(.option)
         if mouseReportingEnabled() && !optionHeld, session != nil {
-            // Record what was actually EMITTED, not what we intended: the X10
-            // fallback encoder refuses coordinates past column/row 223, so a
-            // press in a wide window under DEC 1000 without SGR 1006 sends
-            // nothing — and a release that DID encode would then reach the TUI
-            // with no matching press, which is the very asymmetry this flag
-            // exists to prevent.
+            // Record what was emitted, not what was intended: the X10 encoder refuses coordinates
+            // past 223, and a release must never reach the TUI without its press.
             didReportMouseDown = sendMouseEvent(event, button: 0, press: true)
             return
         }
-        // Not URL-open / window-drag / mouse-reporting → a selection gesture.
         selectionController.beginSelection(with: event, clickCount: clicks)
     }
 
     public override func mouseUp(with event: NSEvent) {
-        // A ⌘-mousedown that resolved to a URL: open it now, provided the
-        // pointer stayed put (a real drag already dropped the pending click in
-        // `mouseDragged` and handed the gesture to the window-drag path).
-        // Consuming the release here — rather than opening on mousedown — is
-        // what keeps ⌘-drag-to-move-window usable over link-dense output.
         if let pending = pendingLinkClick {
             pendingLinkClick = nil
             if !pending.cancelled, pending.isStillAClick(at: event.locationInWindow) {
                 urlOpener.open(pending.url)
             }
-            // A cancelled gesture may have handed itself to the selection path.
             _ = selectionController.endDrag()
-            // Either way the press was never reported, so the release must not
-            // be either — see `didReportMouseDown`.
+            // The press was never reported, so the release must not be either.
             return
         }
         if selectionController.endDrag() {
@@ -215,24 +107,15 @@ extension TerminalView {
             }
             return
         }
-        // Mirror what mousedown DID. Re-deriving `mouseReportingEnabled()`
-        // here would emit an orphan release when the press was consumed
-        // locally (⌘-URL-open, window-drag) or when the TUI flipped mouse mode
-        // between the two events.
+        // Mirror what mousedown did. Re-deriving `mouseReportingEnabled()` emits an orphan release when
+        // the press was consumed locally or the TUI flipped mouse mode between the two events.
         guard didReportMouseDown else { return }
         didReportMouseDown = false
         sendMouseEvent(event, button: 0, press: false)
     }
 
-    /// macOS 26+ can end a left-button gesture without a `mouseUp` (the
-    /// system claimed it — a Sidecar / trackpad gesture, a window-manager
-    /// takeover). Treat it as a release with no click semantics: drop a
-    /// pending ⌘-link open, finish any selection drag (stop the autoscroll
-    /// timer), and mirror the release to a mouse-reporting TUI so it isn't
-    /// left with a button held. `mouseCancelled(with:)` exists from the
-    /// macOS 26 SDK; the override compiles against the 26+ SDK only and is
-    /// simply never called on older systems.
-    #if compiler(>=6.2)  // macOS 26 SDK (Xcode 26+); absent from Xcode 16.4's SDK.
+    /// macOS 26+ can end a left-button gesture without a `mouseUp`; treat it as a release with no click semantics.
+    #if compiler(>=6.2)  // macOS 26 SDK
     @available(macOS 26.0, *)
     public override func mouseCancelled(with event: NSEvent) {
         pendingLinkClick = nil
@@ -246,31 +129,12 @@ extension TerminalView {
     }
     #endif
 
-    /// The single view-local → buffer mapping: nil-snap guard (M-17),
-    /// titlebar-Y pre-clamp (F13), and the grid math. `bufferPointFromEvent`
-    /// converts an `NSEvent`'s window location and delegates here; the
-    /// selection autoscroll timer — which has no `NSEvent` to pass — calls this
-    /// directly with the raw mouse location (hence `internal`, reached from
-    /// `SelectionController`). Audit terminal-view-2 F2.
     func bufferPointFromLocalPoint(_ local: CGPoint) -> BufferPoint {
-        // M-17 / pass-2: surface the pre-first-publish click race
-        // before silently mapping into a synthetic 80×24 zero-history
-        // grid. Pulling the nil-snap path out into a logged early-
-        // return makes the regression discoverable in Release;
-        // `logEarlyClickOnce` (on `TerminalView` proper) holds a one-shot
-        // lock so repeated early clicks still produce at most one log line
-        // per process.
         guard let snap = currentSnapshot else {
             TerminalView.logEarlyClickOnce()
             return BufferPoint(line: 0, col: 0)
         }
-        // `.fullSizeContentView` means `bounds.height` includes the titlebar
-        // region the text grid doesn't occupy. `bufferPoint` below derives the
-        // display-row Y via `viewportHeight - local.y`; a click in the titlebar
-        // region (AppKit Y-up → high y) would push that subtraction negative
-        // and snap to row 0. Pre-clamp y to the text-area range so
-        // titlebar-region clicks land on the first-real-row edge instead of
-        // silently re-attributing to row 0. Audit findbar-selection F13.
+        // With `.fullSizeContentView`, `bounds.height` includes the titlebar region: pre-clamp y to the text area.
         let textAreaHeight = bounds.height - titlebarOnlyTopInset
         let clampedY = min(max(0, local.y), max(0, textAreaHeight))
         let clampedLocal = CGPoint(x: local.x, y: clampedY)
@@ -288,22 +152,13 @@ extension TerminalView {
     }
 
     public override func rightMouseDown(with event: NSEvent) {
-        // Every mousedown starts a fresh gesture (see `mouseDown`).
         didReportRightMouseDown = false
         lastReportedDragCell = nil
-        // Also drop a resize context latched by a modifier-right-drag whose
-        // `rightMouseUp` never arrived (app deactivated mid-drag; there is no
-        // rightMouseCancelled). Left in place it sits ahead of the report
-        // branch in `rightMouseDragged` and swallows this gesture's drag.
+        // Drop a resize context whose `rightMouseUp` never arrived (there is no rightMouseCancelled);
+        // left in place it swallows this gesture's drag in `rightMouseDragged`.
         if windowResizeController.end() {
             endSynchronousResizePresentation()
         }
-        // Configured resize modifier (default ⌘) + right-drag → resize the
-        // window from the corner nearest the click. Matches the borderless-
-        // window idiom from apps like iTerm2 and VS Code: modifier-drag moves,
-        // modifier-right-drag resizes. Anchor the OPPOSITE corner so dragging
-        // from (say) the top-right pulls the top-right while bottom-left stays
-        // pinned.
         let windowResizeMask = Preferences.shared.windowResizeModifier.modifierMask
         if !windowResizeMask.isEmpty, event.modifierFlags.contains(windowResizeMask), let win = window {
             windowResizeControllerStartFrame = win.frame
@@ -313,14 +168,10 @@ extension TerminalView {
                 startMouseGlobal: NSEvent.mouseLocation,
                 windowFrame: win.frame
             )
-            // This gesture drives `setFrame` itself, so AppKit never enters
-            // live-resize; opt into transaction-synchronous presents by hand.
+            // This gesture drives `setFrame` itself, so AppKit never enters live-resize.
             beginSynchronousResizePresentation()
             return
         }
-        // ⌥+right-click escapes a TUI's mouse capture just like ⌥+left-click
-        // and ⌥+scroll do elsewhere. Without this, vim / tmux / htop eat
-        // every right-click and the Copy/Paste context menu is unreachable.
         let optionHeld = event.modifierFlags.contains(.option)
         guard mouseReportingEnabled() && !optionHeld, session != nil else {
             super.rightMouseDown(with: event)
@@ -330,34 +181,19 @@ extension TerminalView {
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
-        // The release can go to another app (⌘-Tab mid-drag, a sheet, a
-        // system gesture) and there is no rightMouseCancelled. If the right
-        // button is no longer down, the gesture is over: end it here so the
-        // resize context and transaction-synchronous presentation don't
-        // outlive it (mirrors MainWindowController's pressedMouseButtons
-        // cross-check for isResizingInteractively).
+        // There is no rightMouseCancelled: end the gesture once the right button is no longer down.
         if windowResizeController.isResizing, NSEvent.pressedMouseButtons & 0b10 == 0 {
             _ = windowResizeController.end()
             endSynchronousResizePresentation()
             return
         }
         if windowResizeController.isResizing, let win = window {
-            // Clamp to contentMinSize (set by MainWindowController). The
-            // controller pins the dragged edge on underflow; we just supply the
-            // window-derived minimums.
             let minContent = win.contentMinSize
             let chrome = win.frame.height - (win.contentView?.bounds.height ?? win.frame.height)
             let minWidth  = max(minContent.width, 200)
             let minHeight = max(minContent.height + chrome, 120)
             let mouse = NSEvent.mouseLocation
-            // Bound the dragged edges to the visibleFrame of the screen the
-            // MOUSE is on (falling back to the window's screen): the gesture
-            // applies a delta to the frame corner, so a grab far from the
-            // corner could push the dragged edge past the monitor border /
-            // menu bar / Dock — something native edge-drag can't do. Keying
-            // the bound off the mouse's screen keeps multi-monitor drags
-            // native too: carry the mouse onto the next display and the
-            // window grows there.
+            // The screen the mouse is on, so the window can grow onto the next display.
             let bound = (NSScreen.screens.first { NSPointInRect(mouse, $0.frame) }
                          ?? win.screen)?.visibleFrame
             if let frame = windowResizeController.frameForCurrentDrag(
@@ -370,12 +206,8 @@ extension TerminalView {
             }
             return
         }
-        // AppKit delivers a right-button (and Ctrl+left) drag as
-        // `rightMouseDragged` and never as `mouseMoved`, so this is the only
-        // place a DEC 1002 / 1003 TUI can get motion for it: without it the
-        // TUI saw the press and the release with nothing between, and the
-        // 1003 hover stream froze for the length of the drag. Only for a press
-        // that was actually reported (the left-button rule, `mouseDragged`).
+        // AppKit delivers a right-button (and Ctrl+left) drag as `rightMouseDragged`, never as
+        // `mouseMoved`, so this is the only motion source for a DEC 1002 / 1003 TUI.
         if didReportRightMouseDown {
             reportDragMotionIfNeeded(for: event, button: 2)
             return
@@ -389,26 +221,13 @@ extension TerminalView {
             && window?.frame != windowResizeControllerStartFrame
         if windowResizeController.end() {
             endSynchronousResizePresentation()
-            // This gesture drives `setFrame` directly, so AppKit never marks
-            // the window `inLiveResize` and never posts
-            // `windowDidEndLiveResize`. Drive the settle explicitly or the
-            // frame save, the full tab-strip refresh and the sibling fan-out
-            // — all of which the per-sample path skips — would never run.
-            //
-            // Only when the frame actually moved, though: ⌘-right-CLICK with no
-            // drag also opens (and immediately ends) a resize context, and
-            // settling there would persist a frame nobody changed — through the
-            // `knownUserDriven` bypass, which exists to defeat the
-            // screen-reconfiguration suppression.
+            // AppKit never posts `windowDidEndLiveResize` for this gesture, so settle explicitly. Only when
+            // the frame moved: a ⌘-right-click without a drag also opens and ends a resize context.
             if resizeMovedTheFrame {
                 (window?.windowController as? MainWindowController)?.settleAfterResizeGesture()
             }
             return
         }
-        // Mirror what rightMouseDown DID, like `mouseUp`. Re-deriving the
-        // predicate here orphaned the press when the TUI turned mouse mode off
-        // or ⌥ went down mid-gesture, and emitted a release for a press that
-        // was never reported.
         guard didReportRightMouseDown else {
             super.rightMouseUp(with: event)
             return
@@ -418,23 +237,10 @@ extension TerminalView {
     }
 
     // MARK: - Middle-mouse button reporting
-    //
-    // xterm mouse protocol: button 1 = middle. Many TUIs (nvim, less,
-    // tmux) expect middle-click to paste or to trigger a custom binding;
-    // without these hooks the event never reaches the shell. Mirrors the
-    // left/right handlers: ⌥ escapes reporting so the user can still
-    // paste locally over a TUI. Audit terminal-view-2 F9.
-    //
-    // AppKit delivers every non-left/right button (the mouse Back/Forward
-    // thumb buttons are `buttonNumber` 3 and 4) as `otherMouse*`; only
-    // `buttonNumber` 2 is the middle button. The protocol has no name for
-    // the others (and X10/normal encoding can't carry codes past 223), so
-    // they fall through to `super` instead of reaching a TUI as a
-    // middle-click (vim pastes a register, tmux pastes its buffer).
+    // xterm button 1 is middle. AppKit delivers every non-left/right button as `otherMouse*`;
+    // only `buttonNumber` 2 is the middle button, and the others fall through to `super`.
 
     public override func otherMouseDown(with event: NSEvent) {
-        // Every middle mousedown starts a fresh gesture (see `mouseDown`).
-        // Other buttons leave a held middle button's state alone.
         if event.buttonNumber == 2 {
             didReportMiddleMouseDown = false
             lastReportedDragCell = nil
@@ -448,9 +254,6 @@ extension TerminalView {
     }
 
     public override func otherMouseDragged(with event: NSEvent) {
-        // Same policy as the left and right drags: motion only for a press
-        // that was actually reported, one report per newly entered cell, and
-        // only under 1002 / 1003 (all in `reportDragMotionIfNeeded`).
         if event.buttonNumber == 2, didReportMiddleMouseDown {
             reportDragMotionIfNeeded(for: event, button: 1)
             return
@@ -459,7 +262,6 @@ extension TerminalView {
     }
 
     public override func otherMouseUp(with event: NSEvent) {
-        // Mirror what otherMouseDown DID (see `rightMouseUp`).
         guard event.buttonNumber == 2, didReportMiddleMouseDown else {
             super.otherMouseUp(with: event)
             return
@@ -468,25 +270,12 @@ extension TerminalView {
         sendMouseEvent(event, button: 1, press: false)
     }
 
-    /// True when the TUI enabled DEC mode 1003 (any-event tracking —
-    /// cursor motion without a button). Implied by the SGR mouse mode
-    /// bit being set alongside motion; narrower predicate than
-    /// `mouseReportingEnabled` so we only fire no-button motion
-    /// reports when explicitly asked. Audit terminal-view-2 F14.
     func anyEventMouseEnabled() -> Bool {
         guard let mode = currentSnapshot?.termMode else { return false }
         return mode.contains(.mouseMotion)
     }
 
-    /// DEC mode 1003 (any-event tracking) motion report. When a TUI asked for
-    /// motion reports without requiring a button, emit one even in the no-button
-    /// case — xterm uses button 35 (32 + the "release" bit 3, which the protocol
-    /// reads as "no button currently pressed"). Fires ONLY when the hover cell
-    /// actually changed (`lastReportedMotionCell`) so we don't flood the PTY at
-    /// pointer-update cadence; Option bypasses reporting. Driven by
-    /// `TerminalView+Hover`'s `mouseMoved` (the AppKit entry point), but the
-    /// emission is a mouse-reporting concern so it lives here. Audit
-    /// terminal-view-2 F14.
+    /// DEC 1003 no-button motion is xterm button 35 (32 + 3, "no button pressed").
     func reportPointerMotionIfNeeded(for event: NSEvent, screenRow: Int, col: Int) {
         guard session != nil, mouseReportingEnabled(), anyEventMouseEnabled(),
               !event.modifierFlags.contains(.option),
@@ -497,55 +286,17 @@ extension TerminalView {
         sendMouseEvent(event, button: 35, press: true)
     }
 
-    // The window-resize gesture state + frame math live in
-    // `WindowResizeController` (`windowResizeController` on the view); the
-    // rightMouse* overrides above just drive `begin` / `frameForCurrentDrag`
-    // / `end`.
-
     public override func scrollWheel(with event: NSEvent) {
         wakeRenderLoop()
-        // Scrolling moves the grid beneath the pointer — the cell the
-        // user was dwelling on now has different content, so any pending
-        // tooltip would pop up with a stale URL. Cancel both the pending
-        // reveal and the accent underline; the next mouseMoved delivery
-        // will repaint them against the fresh cell if appropriate.
-        // Cancel the pending tooltip + the accent underline + the ⌘-hover
-        // range. NOT the pointer position: the pointer hasn't moved, and AppKit
-        // delivers no `mouseMoved` for a scroll, so dropping it would leave the
-        // hover subsystem dark until the user jiggled the mouse. The next
-        // snapshot publish re-resolves what is under the (unchanged) pointer.
+        // Not the pointer position: AppKit delivers no `mouseMoved` for a scroll.
         hoverCoordinator.clearHoverDerivedState()
         guard let session else { super.scrollWheel(with: event); return }
-        // ⌥-scroll bypasses mouse reporting so the user can always reach
-        // scrollback locally, even inside a TUI that captured the wheel.
-        // Matches the ⌥-click escape on mouseDown.
         let optionHeld = event.modifierFlags.contains(.option)
         let mode = currentSnapshot?.termMode ?? []
         if mouseReportingEnabled() && !optionHeld {
-            // Mouse mode: forward as SGR/X10 scroll events.
-            // xterm wheel-up (button 64) = "show older content" (less
-            // scrolls back). wheel-down (button 65) = "show newer
-            // content" (less advances).
-            //
-            // macOS has already applied the Natural-scrolling preference
-            // by the time the event arrives, so `scrollingDeltaY > 0`
-            // always means the viewport moves toward the TOP of the
-            // document (older content) — the very sign the normal branch
-            // below feeds to `session.scroll(delta:)` to enter history.
-            // Hence deltaY > 0 → button 64, deltaY < 0 → button 65, for
-            // both Natural settings. (Audit M7 flipped this on the premise
-            // that positive means "content moves up"; it does not.)
-            //
-            // One report per CELL HEIGHT of travel (precise devices) or
-            // per notch (classic wheel), via the accumulator — not one per
-            // NSEvent. A trackpad flick with momentum used to fire dozens
-            // of reports, each a 3-line step in less/vim/tmux.
-            //
-            // Shift turns a classic-wheel notch into a HORIZONTAL one
-            // (`scrollingDeltaX`, deltaY 0, sign preserved), so reading only
-            // deltaY dropped every <S-ScrollWheelUp/Down> a real mouse sends.
-            // Take the notch from X when Y is empty under Shift; the Shift bit
-            // itself is added by `sendMouseEvent`.
+            // macOS has already applied Natural scrolling: `scrollingDeltaY > 0` always means older
+            // content, so deltaY > 0 is xterm wheel-up (button 64) and deltaY < 0 is button 65.
+            // Shift turns a classic-wheel notch into a horizontal one (`scrollingDeltaX`, deltaY 0).
             var wheelDelta = event.scrollingDeltaY
             if wheelDelta == 0, event.modifierFlags.contains(.shift) {
                 wheelDelta = event.scrollingDeltaX
@@ -561,14 +312,7 @@ extension TerminalView {
                 _ = sendMouseEvent(event, button: button, press: true)
             }
         } else if mode.contains(.altScreen), mode.contains(.alternateScroll), !optionHeld {
-            // DEC 1007 alternate scroll: the alt screen has no history for
-            // `scroll_display` to move through, so through v0.8.0 the wheel
-            // did NOTHING in `less`, `man`, `git log`, vim with mouse off,
-            // and every ssh pager. Every peer terminal translates the wheel
-            // into cursor-key presses here (xterm's alternateScroll);
-            // alacritty sets 1007 by default and a TUI opts out with
-            // `CSI ? 1007 l`. Same direction convention as the report
-            // branch: deltaY > 0 → older content → ↑.
+            // DEC 1007 alternate scroll: the alt screen has no history, so the wheel becomes cursor keys.
             let n = wheelAccumulator.lines(
                 deltaY: event.scrollingDeltaY,
                 precise: event.hasPreciseScrollingDeltas,
@@ -589,27 +333,7 @@ extension TerminalView {
                 if !bytes.isEmpty { sendToSession(bytes) }
             }
         } else {
-            // Normal mode: scroll the display through scrollback history.
-            // Two input types to reconcile:
-            //
-            //   Trackpad / Magic Mouse (hasPreciseScrollingDeltas == true):
-            //     scrollingDeltaY is in points. Scaling by cellHeight gives
-            //     pixel-accurate scrolling (move the pointer one row's worth
-            //     of points → scroll one row). Multiply by 2 so a casual
-            //     two-finger flick covers ~2 screenfuls, matching Terminal.app
-            //     feel.
-            //
-            //   Classic wheel (hasPreciseScrollingDeltas == false):
-            //     scrollingDeltaY is ~1 per physical click. 3 lines per click
-            //     is the common terminal-emulator default (alacritty, kitty).
-            //
-            // Through v0.8.1 each event was rounded on its own (away from
-            // zero), so a slow two-finger drag delivering 2–4 pt per event on
-            // a 16 pt cell moved a full line per event — 2–4× the finger —
-            // and a flick's momentum tail crept at a constant line per event
-            // then stopped dead. The accumulator carries the fractional
-            // remainder across events (same as the mouse-report and DEC 1007
-            // paths); `pointsPerLine = cellHeight / 2` keeps the ×2 feel.
+            // Precise deltas are in points; `pointsPerLine = cellHeight / 2` doubles trackpad travel.
             let lines = wheelAccumulator.lines(
                 deltaY: event.scrollingDeltaY,
                 precise: event.hasPreciseScrollingDeltas,
@@ -624,10 +348,6 @@ extension TerminalView {
 
     public override func mouseDragged(with event: NSEvent) {
         wakeRenderLoop()
-        // A ⌘-mousedown on a link that turns into a real drag is a window
-        // drag, not a click: drop the pending open and hand the gesture to
-        // `performDrag`. Below the slop it stays pending so a shaky click
-        // still opens the link on mouseUp.
         if var pending = pendingLinkClick {
             if !pending.cancelled {
                 guard !pending.isStillAClick(at: event.locationInWindow) else { return }
@@ -635,49 +355,23 @@ extension TerminalView {
                 pendingLinkClick = pending
                 let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
                 if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
-                    // Pass the ORIGINAL mousedown: `-[NSWindow performDrag:]`
-                    // documents "pass the original mouseDown event", and the
-                    // gesture's anchor is that press, not this sample.
+                    // `-[NSWindow performDrag:]` requires the original mouseDown event.
                     window?.performDrag(with: pending.downEvent)
                     return
                 }
-                // The drag modifier isn't held (⌘ released mid-gesture, or the
-                // user configured window-drag onto ⌥⌘), so this gesture is not
-                // a window move. Hand it to the selection path with the
-                // ORIGINAL mousedown as the anchor — the same thing the
-                // identical drag one column to the left would have done.
-                // Without this the whole gesture died silently: no link, no
-                // drag, no selection, no report.
                 selectionController.beginSelection(with: pending.downEvent,
                                                    clickCount: pending.clickCount)
             }
-            // Consumed for the rest of the gesture. The press was never
-            // reported, so a drag report here would reach the TUI as motion
-            // belonging to a button-press it never saw (and no release would
-            // ever follow). A selection, if one was started above, still
-            // tracks normally.
+            // The press was never reported, so no drag report may follow it.
             _ = selectionController.handleDrag(with: event)
             return
         }
         if selectionController.handleDrag(with: event) { return }
-        // No selection in progress — forward to PTY if the app asked for
-        // motion/drag reporting.
-        // `didReportMouseDown`: motion-with-button-held only makes sense to a
-        // TUI that saw the press. It may not have — the X10 fallback encoder
-        // refuses coordinates past column 223 — and reporting the drag anyway
-        // hands it motion for a button it never saw go down.
         guard didReportMouseDown else { return }
         reportDragMotionIfNeeded(for: event, button: 0)
     }
 
-    /// Button-held motion report (xterm `Cb = button + 32`) for DEC 1002 / 1003,
-    /// shared by the left, right and middle drag handlers; the caller has already
-    /// established that the press was reported. Deduped on the cell, like the
-    /// DEC 1003 no-button motion path (`reportPointerMotionIfNeeded`): AppKit
-    /// delivers a dragged event per pointer sample (up to the display's refresh
-    /// rate), and a TUI that repaints per report — Claude Code repaints its
-    /// whole UI — turns that into a self-inflicted flood. ⌥ escapes reporting
-    /// here exactly as it does for press/release.
+    /// Button-held motion (xterm `Cb = button + 32`) for DEC 1002 / 1003. The caller has established the press was reported.
     private func reportDragMotionIfNeeded(for event: NSEvent, button: Int) {
         guard !event.modifierFlags.contains(.option),
               let mode = currentSnapshot?.termMode,
@@ -687,21 +381,13 @@ extension TerminalView {
         let p = bufferPointFromEvent(event)
         let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
         let cell = BBXYPoint(col: p.col, row: screenRow)
-        // Past-the-edge drags must keep reporting even though the cell stops
-        // changing: `bufferPointFromEvent` clamps to the edge cell, and a TUI
-        // in copy/visual mode relies on the continuing stream to autoscroll
-        // (Blackbird's own selection has `SelectionAutoscroller` for exactly
-        // this; the TUI path has only these reports). Dedupe only while the
-        // pointer is genuinely inside the grid.
+        // Past the grid edge keep reporting although the clamped cell stops changing:
+        // a TUI in copy/visual mode relies on the continuing stream to autoscroll.
         let local = convert(event.locationInWindow, from: nil)
         let insideGrid = bounds.contains(local)
             && local.y < bounds.height - titlebarOnlyTopInset
         if insideGrid {
-            // Separate from `lastReportedMotionCell`: a TUI tracks button-32
-            // drag motion and button-35 hover motion independently (Claude Code
-            // updates its hover cell only from the latter), so sharing one
-            // dedupe cell let a drag suppress the next hover report for the
-            // cell it ended on.
+            // Separate from `lastReportedMotionCell`: a TUI tracks drag motion and hover motion independently.
             guard lastReportedDragCell != cell else { return }
         }
         lastReportedDragCell = cell
@@ -709,71 +395,30 @@ extension TerminalView {
     }
 
     func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
-        // `bufferPointFromLocalPoint` owns the whole mapping — the nil-snap
-        // guard (M-17), the titlebar-Y pre-clamp (F13), and the grid math.
-        // This entry point only converts the event's window location into
-        // view-local coordinates first.
         bufferPointFromLocalPoint(convert(event.locationInWindow, from: nil))
     }
 
     // MARK: - Mouse reporting helpers
 
-    /// Emit a single xterm mouse report. Internal rather than private
-    /// because the DEC 1003 any-event path in
-    /// `TerminalView+Hover.swift`'s `mouseMoved` reuses it for the
-    /// no-button motion case.
-    /// Upper bound on wheel reports / arrow presses emitted for ONE
-    /// NSEvent. A pathological delta (bridged garbage, a runaway device)
-    /// must not turn into a megabyte of `CSI B` on the PTY.
     static let maxWheelUnitsPerEvent = 64
 
     @discardableResult
     func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool) -> Bool {
         let loc = convert(event.locationInWindow, from: nil)
-        // Paranoia. `event.locationInWindow` is a CGFloat; a misbehaving
-        // input device or a bridged NaN / Infinity can slip through, and
-        // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
-        // than after — the scrollWheel path already uses this pattern.
+        // `Int(Double)` traps on NaN, infinity and out-of-range magnitudes: guard and clamp before the casts.
         guard loc.x.isFinite, loc.y.isFinite else { return false }
-        // Audit fix-#19 (2026-05-11): clamp magnitude to `CGFloat.sanePx`
-        // BEFORE the Int() cast. `Int(Double)` traps when the magnitude
-        // exceeds Int.max (~9.2e18 on 64-bit) — `loc.y` is finite but bounded
-        // only by Double.greatestFiniteMagnitude (~1.79e308), so a bridged
-        // CGPoint with a finite-but-absurd value (fault injection,
-        // accessibility tool synthesising motion, exotic tablet driver)
-        // would trap inside the `min(maxCol, Int(colX))` expression below.
-        // `loc` is already guaranteed finite by the guard above, so
-        // `sanitizedPixel`'s non-finite→0 branch is dead here — the live
-        // path is `min(max(0, loc.*), sanePx)`, the same clamp
-        // Selection.bufferPoint applies. (see `CGFloat.sanitizedPixel`)
         let safeY = loc.y.sanitizedPixel
         let safeX = loc.x.sanitizedPixel
         let rowY = (bounds.height - titlebarOnlyTopInset - safeY) / metrics.cellHeight
-        // Subtract the L inset so a click at view-x=horizontalContentInsetPoints
-        // maps to col 0 (matches the renderer's cell origin). Negative results
-        // collapse via the max(0, …) clamp below — clicks inside the inset
-        // strip report col 0, never a phantom -1.
         let colX = (safeX - TerminalView.horizontalContentInsetPoints) / metrics.cellWidth
-        // Clamp to the live grid, like xterm and `Selection.bufferPoint`: the
-        // bottom/right inset strips, the sub-cell remainder and a drag past the
-        // window edge all map past the last cell, and a TUI must never be told
-        // about a column/row that isn't on its screen. Rows here are
-        // viewport-relative, so `displayOffset` doesn't enter. With no snapshot
-        // yet, fall back to a sane range so oversized coordinates (user
-        // scrolled the window off the right edge of a 200k-col display)
-        // don't overflow Int32 when MouseReportEncoder.encode stringifies them.
-        // Division of a finite by a positive cellWidth/Height is finite,
-        // so no second isFinite check is needed.
+        // Clamp to the live grid: a TUI must never be told about a cell that is not on its screen.
         let snap = currentSnapshot
         let maxCol: Int = snap.map { max(0, $0.cols - 1) } ?? 10_000
         let maxRow: Int = snap.map { max(0, $0.rows - 1) } ?? 10_000
         let col = max(0, min(maxCol, Int(colX)))
         let row = max(0, min(maxRow, Int(rowY)))
-        // xterm folds Shift (4) and Ctrl (16) into the button code of every
-        // report; without them a TUI can't tell <S-LeftMouse>, <C-RightMouse>
-        // (macOS delivers Ctrl+click as rightMouseDown, `.control` still set)
-        // or <C-ScrollWheel> from the plain gesture. Meta (8) never appears:
-        // ⌥ is the reporting bypass at every call site, and ⌘ has no bit.
+        // xterm folds Shift (4) and Ctrl (16) into the button code of every report. Meta (8) never
+        // appears: ⌥ is the reporting bypass at every call site, and ⌘ has no bit.
         var modifiers = 0
         if event.modifierFlags.contains(.shift) { modifiers |= 4 }
         if event.modifierFlags.contains(.control) { modifiers |= 16 }
@@ -786,14 +431,6 @@ extension TerminalView {
             modifiers: modifiers,
             utf8: utf8MouseEnabled()
         ) else { return false }
-        // Route through the shared `sendToSession` seam rather than
-        // `session.send` directly so the DEBUG `ptyRecorderForTests` recorder
-        // captures mouse reports too. Before this, the whole mouse-reporting
-        // layer was structurally untestable (audit swift-tests-view: "Untested:
-        // mouseReportingEnabled() gating; Option-held escape …"), which is how
-        // issue #30's gate survived. `sendToSession` no-ops when there is no
-        // session, so callers keep their own `session != nil` guard purely as
-        // the "is there anything to report to" precondition.
         sendToSession(bytes)
         return true
     }

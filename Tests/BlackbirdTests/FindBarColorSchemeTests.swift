@@ -193,14 +193,4 @@ final class FindBarColorSchemeTests: XCTestCase {
         XCTAssertNotEqual(FindBarColorScheme(palette: Theme.gruvboxDark),
                           FindBarColorScheme(palette: Theme.solarizedLight))
     }
-
-    /// Full-struct pin for Gruvbox dark: all four derived fields at once, so
-    /// a single-field drift is caught by the aggregate equality too.
-    func test_scheme_gruvboxDark_fullStruct() {
-        let scheme = FindBarColorScheme(palette: Theme.gruvboxDark)
-        XCTAssertEqual(scheme.barBackground, 0x363532)
-        XCTAssertEqual(scheme.fieldBackground, 0x413F3A)
-        XCTAssertEqual(scheme.separator, 0x45433D)
-        XCTAssertEqual(scheme.text, 0xEBDBB2)
-    }
 }

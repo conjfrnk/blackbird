@@ -195,7 +195,7 @@ inside `NSApplication.sendEvent` — and *is* fixed (`ContextMenuKeyInterceptor`
 
 A program that sends queries between `CSI ? 2026 h` and `CSI ? 2026 l` can read the replies in a different order than it asked. A colour query (OSC 4/10/11/12) followed by DA1 or CPR gets the DA1 / CPR reply first, and XTVERSION / DECRQSS / XTGETTCAP replies overtake the reply to any earlier query in the block. Outside a synchronized update the core keeps query order (it drains colour replies after every ESC-delimited segment, and an unterminated OSC is ended by the ESC that follows it), so the colour-query-then-DA1 sentinel works there. Inside one a sentinel client sees the DA1 reply first and concludes colour queries are unsupported, and the late colour reply is then typed into the shell as `ESC ] 11 ; rgb:...` text.
 
-Why: the vendored `vte::Processor` buffers every byte of a synchronized update and replays the whole buffer in one `parser.advance` call when the ESU arrives (or the 150 ms timeout or the 2 MiB buffer limit forces it). The alacritty-driven replies (DA1, CPR, DSR, DECRQM, kitty `CSI ? u`) fire inline during that call, while colour replies must wait for it to return (they need the palette, which is unreadable under alacritty's `&mut Term` borrow) and are drained after all of them. The side parser answers XTVERSION / DECRQSS / XTGETTCAP the moment their bytes arrive, because it must see raw bytes at arrival so OSC 7 / OSC 133 are neither delayed nor double-fired by the replay. Fixing it means replaying the buffer segment by segment inside the vendored crate and holding the side parser's replies until the same moment. Deferred: BSU / ESU exists to bracket repaint output, not queries, so a query inside one is unusual. `core/tests/vt_reply_order_residual_blind.rs` accepts this entry in place of the order; remove it when the order is fixed.
+Why: the vendored `vte::Processor` buffers every byte of a synchronized update and replays the whole buffer in one `parser.advance` call when the ESU arrives (or the 150 ms timeout or the 2 MiB buffer limit forces it). The alacritty-driven replies (DA1, CPR, DSR, DECRQM, kitty `CSI ? u`) fire inline during that call, while colour replies must wait for it to return (they need the palette, which is unreadable under alacritty's `&mut Term` borrow) and are drained after all of them. The side parser answers XTVERSION / DECRQSS / XTGETTCAP the moment their bytes arrive, because it must see raw bytes at arrival so OSC 7 / OSC 133 are neither delayed nor double-fired by the replay. Fixing it means replaying the buffer segment by segment inside the vendored crate and holding the side parser's replies until the same moment. Deferred: BSU / ESU exists to bracket repaint output, not queries, so a query inside one is unusual.
 
 ## Kitty flag 4 / 16 — US-layout only
 
@@ -258,9 +258,7 @@ inside tmux) still reproduces there: ⌘-click / Copy Link use `…aaaaDone` whi
 the underline covers only row 0. The host/port/leader guards still apply, so
 this is a wrong-page, not a host-change, risk. Narrowing the fallback would
 break every genuinely wrapped URL inside tmux, which is the common case; the
-real fix needs the multiplexer to mark its wraps. Pinned by
-`URLDetectorHardNewlineWrapJoinBlindTests`
-(`test_altScreen_*`).
+real fix needs the multiplexer to mark its wraps.
 
 **The anchor/href divergence gate can over-block a wrapped bare URL.**
 When Claude Code auto-linkifies a bare URL whose text is the href, and

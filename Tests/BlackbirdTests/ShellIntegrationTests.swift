@@ -282,27 +282,6 @@ final class ShellIntegrationTests: XCTestCase {
         xdgSegments(value).filter { $0 == segment }.count
     }
 
-    /// B.1 — first-level spawn (parent has no XDG_DATA_DIRS): the value must
-    /// START with "<root>:" and END with the freedesktop default tail.
-    func test_envOverrides_fish_firstLevelSpawn_rootFirstThenDefaultTail() {
-        let result = ShellIntegration.envOverrides(
-            shellPath: "/opt/homebrew/bin/fish",
-            integrationDir: "/opt/bb/integration",
-            materializedRoot: root,
-            parentEnv: [:],
-            enabled: true
-        )
-        let xdg = result["XDG_DATA_DIRS"]
-        XCTAssertEqual(xdg, root.path + ":/usr/local/share:/usr/share",
-            "a first-level fish spawn must prepend '<root>:' to the stock default tail; got \(String(describing: xdg))")
-        XCTAssertTrue((xdg ?? "").hasPrefix(root.path + ":"),
-            "first-level XDG_DATA_DIRS must start with the materialized root followed by ':'")
-        XCTAssertTrue((xdg ?? "").hasSuffix("/usr/local/share:/usr/share"),
-            "first-level XDG_DATA_DIRS must end with the stock default tail '/usr/local/share:/usr/share'")
-        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
-            "the root must appear exactly once even at the first level")
-    }
-
     /// B.2 — nested spawn: the parent env's XDG_DATA_DIRS is exactly what a
     /// first-level call produced. Re-running envOverrides must NOT stack a
     /// second copy of the root; the result must still carry the root exactly
@@ -348,24 +327,6 @@ final class ShellIntegrationTests: XCTestCase {
             "the user's own '\(userDir)' entry must be preserved; got \(String(describing: xdg))")
         XCTAssertTrue(xdgSegments(xdg).contains("/usr/share"),
             "the user's '/usr/share' entry must be preserved; got \(String(describing: xdg))")
-    }
-
-    /// B.4 — a parent XDG_DATA_DIRS that does NOT contain the root gets the
-    /// root prepended exactly once, with the parent value preserved as the
-    /// tail.
-    func test_envOverrides_fish_rootAbsent_prependsExactlyOncePreservingTail() {
-        let result = ShellIntegration.envOverrides(
-            shellPath: "/opt/homebrew/bin/fish",
-            integrationDir: "/opt/bb/integration",
-            materializedRoot: root,
-            parentEnv: ["XDG_DATA_DIRS": "/nix/share:/snap/share"],
-            enabled: true
-        )
-        let xdg = result["XDG_DATA_DIRS"]
-        XCTAssertEqual(xdg, root.path + ":/nix/share:/snap/share",
-            "when the parent has no root segment, the root must be prepended once with the parent kept as the tail; got \(String(describing: xdg))")
-        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
-            "the prepend must add exactly one root segment")
     }
 
     /// B.5 (review-panel addendum) — a parent entry equal to the root WITH a

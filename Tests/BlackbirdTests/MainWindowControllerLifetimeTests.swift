@@ -26,6 +26,9 @@ import AppKit
 ///     Per memory: 2+ live shell sessions destabilise the xctest host.
 final class MainWindowControllerLifetimeTests: XCTestCase {
 
+    /// Upper bound on a settle wait; the delay it waits out is far shorter.
+    private static let settleTimeout: TimeInterval = 20.0
+
     /// Cross-test ratchet enforcing at most ONE live `MainWindowController`
     /// at any time in this file. Decremented in `tearDown`. Any test that
     /// allocates a real controller MUST increment this in `setUp`-equivalent
@@ -444,16 +447,17 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         w2.makeKeyAndOrderFront(nil)
 
         // Let the deferred hide/observe hooks and AppKit's tab-bar install
-        // settle before probing — matches the docs/probes harness this
-        // test is derived from.
+        // settle before probing. The macos-26 CI runner can hold main for
+        // more than 2 s while it merges the tab group, so the waits are
+        // bounded by `settleTimeout`, not by the settle delay.
         let settle1 = expectation(description: "settle after merge")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settle1.fulfill() }
-        wait(for: [settle1], timeout: 2.0)
+        wait(for: [settle1], timeout: Self.settleTimeout)
         c1.refreshTabBar()
         c2.refreshTabBar()
         let settle2 = expectation(description: "settle after refresh")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle2.fulfill() }
-        wait(for: [settle2], timeout: 2.0)
+        wait(for: [settle2], timeout: Self.settleTimeout)
 
         guard let group = w1.tabGroup, group.windows.count == 2 else {
             throw XCTSkip("headless host refused to form a tab group")
@@ -479,7 +483,7 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         }
         let settle3 = expectation(description: "settle after synthetic click")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle3.fulfill() }
-        wait(for: [settle3], timeout: 2.0)
+        wait(for: [settle3], timeout: Self.settleTimeout)
 
         XCTAssertEqual(
             w1.tabGroup?.selectedWindow?.title, selectedBeforeTitle,

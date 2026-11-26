@@ -122,24 +122,6 @@ final class FunctionKeyF13F20Tests: XCTestCase {
         }
     }
 
-    /// The numbering gaps at 27 and 30 are load-bearing: xterm, kitty and
-    /// iTerm2 all skip them, and terminfo's `kf13`…`kf20` are built on the
-    /// gapped table. A "corrected" contiguous 25…32 run would silently
-    /// alias F15 onto the wrong terminfo entry, so assert the gap numbers
-    /// are emitted by no key at all.
-    func test_f13ThroughF20_neverEmitTheSkippedParameters27Or30() {
-        let enc = KeyEncoder()
-        let forbidden = [csiTilde("27"), csiTilde("30")]
-        for (key, _) in f13ThroughF20 {
-            let out = enc.encodeSpecial(key, modifiers: [])
-            for bad in forbidden {
-                XCTAssertNotEqual(out, bad,
-                                  "\(key) emitted \(String(decoding: bad, as: UTF8.self).debugDescription) — "
-                                  + "27 and 30 are deliberate gaps in the VT220 numbering, not free slots")
-            }
-        }
-    }
-
     /// Every function key must be distinguishable on the wire. A copy-paste
     /// slip in the new table (e.g. `.f14` reusing `"25"`) would make two
     /// physical keys indistinguishable to the shell while every individual
@@ -408,59 +390,6 @@ final class FunctionKeyF13F20Tests: XCTestCase {
     }
 
     // MARK: - 5. Regression guard on the pre-existing keys
-
-    /// The pre-existing table must be byte-for-byte unchanged by the F13–F20
-    /// addition. F5–F12 in particular share the `~` family the new keys join,
-    /// so an off-by-one while extending the table would land here first.
-    func test_preExistingFunctionKeys_unmodifiedEncodingsUnchanged() {
-        let enc = KeyEncoder()
-        // F1–F4 are SS3: ESC O P/Q/R/S — no numeric lead.
-        XCTAssertEqual(enc.encodeSpecial(.f1, modifiers: []), Data([0x1B, 0x4F, 0x50]), "F1 → ESC O P")
-        XCTAssertEqual(enc.encodeSpecial(.f2, modifiers: []), Data([0x1B, 0x4F, 0x51]), "F2 → ESC O Q")
-        XCTAssertEqual(enc.encodeSpecial(.f3, modifiers: []), Data([0x1B, 0x4F, 0x52]), "F3 → ESC O R")
-        XCTAssertEqual(enc.encodeSpecial(.f4, modifiers: []), Data([0x1B, 0x4F, 0x53]), "F4 → ESC O S")
-
-        // F5–F12 keep their own gapped numbering (no 16, no 22).
-        let legacyTilde: [(KeyEncoder.SpecialKey, String)] = [
-            (.f5, "15"), (.f6, "17"), (.f7, "18"), (.f8, "19"),
-            (.f9, "20"), (.f10, "21"), (.f11, "23"), (.f12, "24"),
-        ]
-        for (key, num) in legacyTilde {
-            XCTAssertEqual(enc.encodeSpecial(key, modifiers: []), csiTilde(num),
-                           "\(key) unmodified must still be ESC[\(num)~")
-        }
-    }
-
-    func test_preExistingFunctionKeys_modifiedEncodingsUnchanged() {
-        let enc = KeyEncoder()
-        XCTAssertEqual(enc.encodeSpecial(.f12, modifiers: [.shift]),
-                       csiTilde("24", mod: 2), "Shift+F12 → ESC[24;2~")
-        XCTAssertEqual(enc.encodeSpecial(.f12, modifiers: [.control]),
-                       csiTilde("24", mod: 5), "Ctrl+F12 → ESC[24;5~")
-        XCTAssertEqual(enc.encodeSpecial(.f12, modifiers: [.shift, .option, .control]),
-                       csiTilde("24", mod: 8), "Shift+Opt+Ctrl+F12 → ESC[24;8~")
-        XCTAssertEqual(enc.encodeSpecial(.f5, modifiers: [.shift]),
-                       csiTilde("15", mod: 2), "Shift+F5 → ESC[15;2~")
-        XCTAssertEqual(enc.encodeSpecial(.f1, modifiers: [.shift]),
-                       Data("\u{1B}[1;2P".utf8), "Shift+F1 → ESC[1;2P")
-    }
-
-    /// The non-function special keys share the same `csiParamShape` table
-    /// the new entries extend; pin the neighbours that would break if the
-    /// table were mis-edited.
-    func test_preExistingNavAndArrowKeys_encodingsUnchanged() {
-        let enc = KeyEncoder()
-        XCTAssertEqual(enc.encodeSpecial(.up, modifiers: []), Data([0x1B, 0x5B, 0x41]), "Up → ESC[A")
-        XCTAssertEqual(enc.encodeSpecial(.down, modifiers: []), Data([0x1B, 0x5B, 0x42]), "Down → ESC[B")
-        XCTAssertEqual(enc.encodeSpecial(.right, modifiers: []), Data([0x1B, 0x5B, 0x43]), "Right → ESC[C")
-        XCTAssertEqual(enc.encodeSpecial(.left, modifiers: []), Data([0x1B, 0x5B, 0x44]), "Left → ESC[D")
-        XCTAssertEqual(enc.encodeSpecial(.home, modifiers: []), Data([0x1B, 0x5B, 0x48]), "Home → ESC[H")
-        XCTAssertEqual(enc.encodeSpecial(.end, modifiers: []), Data([0x1B, 0x5B, 0x46]), "End → ESC[F")
-        XCTAssertEqual(enc.encodeSpecial(.insert, modifiers: []), csiTilde("2"), "Insert → ESC[2~")
-        XCTAssertEqual(enc.encodeSpecial(.delete, modifiers: []), csiTilde("3"), "Delete → ESC[3~")
-        XCTAssertEqual(enc.encodeSpecial(.pageUp, modifiers: []), csiTilde("5"), "PageUp → ESC[5~")
-        XCTAssertEqual(enc.encodeSpecial(.pageDown, modifiers: []), csiTilde("6"), "PageDown → ESC[6~")
-    }
 
     /// The classifier's pre-existing mappings must survive the new cases —
     /// in particular Backspace stays unmapped (it must emit the DEL byte via

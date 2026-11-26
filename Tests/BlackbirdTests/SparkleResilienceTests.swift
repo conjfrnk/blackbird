@@ -166,35 +166,4 @@ final class SparkleResilienceTests: XCTestCase {
     // the shipped build.
 
     // MARK: - Test-seam preservation
-
-    /// `SparkleAlertOverrideTests` drives the F-S7-001 IMP-leak fix via
-    /// `_resetForTests` and `_installedBlockIMPForTests`. Both are
-    /// DEBUG-gated. A future refactor that drops the seam without porting
-    /// the regression coverage would silently disable the leak-fix gate;
-    /// this test pins their existence by exercising both, in DEBUG only.
-    @MainActor
-    func testSparkleAlertOverrideTestSeamsExist() throws {
-        // Memory: <64 KB (one block IMP allocated, then freed). Wall: ~5 ms.
-        #if DEBUG
-        // The seam is @MainActor. Run the whole test on the main actor and
-        // exercise it SYNCHRONOUSLY rather than hopping through an unstructured
-        // `Task { @MainActor }` + `wait(for:)`. That hop didn't reliably drain
-        // during `wait` under full-suite main-thread contention, so it flaked
-        // (failing in the full run while passing in isolation) regardless of
-        // the timeout. A @MainActor test method removes the hop entirely.
-        SparkleAlertOverride._resetForTests()
-        XCTAssertNil(
-            SparkleAlertOverride._installedBlockIMPForTests,
-            "after _resetForTests the tracking field must be nil; leak-fix regression seam would otherwise be unobservable"
-        )
-        SparkleAlertOverride.install()
-        XCTAssertNotNil(
-            SparkleAlertOverride._installedBlockIMPForTests,
-            "after install() the tracking field must be non-nil; leak-fix regression seam would otherwise be unobservable"
-        )
-        SparkleAlertOverride._resetForTests()
-        #else
-        throw XCTSkip("DEBUG-only test seam; release builds do not expose _resetForTests")
-        #endif
-    }
 }

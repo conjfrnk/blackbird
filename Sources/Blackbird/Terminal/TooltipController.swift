@@ -1,24 +1,11 @@
 import AppKit
 
-/// The borderless, non-activating hover-tooltip panel for `TerminalView`'s
-/// link-hover preview. Lifted off the view (REFACTOR.md Area 3: hover concerns →
-/// `TooltipController`) so the panel + label lifecycle is owned here rather than
-/// being two more `internal` view fields, and so the panel layout is no longer
-/// tangled with the URL scrubbing.
-///
-/// SECURITY: `show(text:near:)` takes an ALREADY-scrubbed, length-clamped
-/// string. The credential redaction (H3) + C0/bidi display scrub + 512-char
-/// clamp run at the call site, BEFORE this — a tooltip must never render a raw
-/// OSC 8 href, which could carry a U+202E that visually flips the rest of the
-/// line and defeats the hover-to-verify gesture.
+/// SECURITY: `show(text:near:)` takes an already credential-redacted, C0/bidi-scrubbed,
+/// length-clamped string; the caller scrubs. A raw OSC 8 href must never be rendered here.
 final class TooltipController {
     private var panel: NSPanel?
     private var label: NSTextField?
 
-    /// Show `text` (pre-scrubbed + clamped by the caller) just below-right of
-    /// `screenPoint`, a screen-space anchor. The panel + label are reused across
-    /// shows. `.nonactivatingPanel` keeps the terminal key + first responder so
-    /// a hover-peek doesn't disrupt typing.
     func show(text: String, near screenPoint: NSPoint) {
         let (panel, label) = ensurePanel()
         label.stringValue = text
@@ -35,16 +22,11 @@ final class TooltipController {
             height: labelFrame.height + padY * 2
         )
         panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
-        // Anchor just below-right of the pointer.
         var origin = NSPoint(
             x: screenPoint.x + 12,
             y: screenPoint.y - panelSize.height - 12
         )
-        // A borderless panel is never nudged back on-screen by AppKit, and this
-        // tooltip is the only place the user can verify an OSC 8 href, so a link
-        // on the last row or right-hand columns must not hide it off the edge.
-        // Flip above the pointer when it won't fit below, then slide inside the
-        // visible frame. No screen (headless host) leaves the origin untouched.
+        // AppKit never nudges a borderless panel back on-screen: flip above the pointer, then clamp.
         let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) }) ?? NSScreen.main
         if let bounds = screen?.visibleFrame {
             if origin.y < bounds.minY {
@@ -57,7 +39,6 @@ final class TooltipController {
         panel.orderFront(nil)
     }
 
-    /// Hide the tooltip. Keeps the panel allocated for the next show.
     func dismiss() {
         panel?.orderOut(nil)
     }

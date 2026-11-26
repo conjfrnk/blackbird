@@ -3,20 +3,19 @@ using namespace metal;
 
 struct CellInstance {
     float2 cellPosPx;
-    float2 quadSizePx;    // per-cell quad size: cellSizePx for narrow, 2x for wide (CJK, emoji)
+    float2 quadSizePx;    // cellSizePx for narrow, 2x for wide (CJK, emoji)
     float2 uvOrigin;
     float2 uvSize;
     float4 fgColor;
     float4 bgColor;
-    uint4  attrs;         // .x = attribute bitmask (bit 0 = link hover underline); rest reserved/padding
+    uint4  attrs;         // .x = attribute bitmask
 };
 
 struct FrameUniforms {
     float2 viewportPx;
     float2 cellSizePx;
-    float4 accentColor;   // sRGB RGBA underline colour for accent attributes
-    float4 decorationPx;  // x: underline centre from bottom, y: thickness,
-                          // z: strike centre from bottom, w: unused (pt)
+    float4 accentColor;   // sRGB RGBA
+    float4 decorationPx;  // pt from bottom: x underline centre, z strike centre; y thickness
 };
 
 struct VertexOut {
@@ -24,19 +23,17 @@ struct VertexOut {
     float2 uv;
     float4 fgColor;
     float4 bgColor;
-    float4 accentColor;   // plumbed in via uniform, stamped per-vertex for the fragment
+    float4 accentColor;
     uint   flags;
     uint   underlineColorPacked;  // 0x00RRGGBB or 0xFFFFFFFF sentinel (use fg)
     float2 localPx;       // position within the cell's quad, in points
-    float2 quadSizePx;    // cell quad size (same for all 6 verts per instance)
-    float  cellOriginX;   // quad's left edge in points — makes undercurl /
-                          // dotted / dashed phase continuous across cells
-    float4 decorationPx;  // see FrameUniforms.decorationPx
+    float2 quadSizePx;
+    float  cellOriginX;   // quad's left edge in points
+    float4 decorationPx;
 };
 
-// Shader-internal marker (NOT a CellAttributeMask bit — the CPU never sets
-// it): vertex_cell ORs it into `flags` for instances whose UV rect is empty.
-// Bit 31 keeps the Swift side's reserved bits 8-30 free.
+// Shader-internal, NOT a CellAttributeMask bit: vertex_cell sets it for instances whose UV rect
+// is empty. Bit 31 keeps the Swift side's reserved bits 8-30 free.
 constant uint BB_ATTR_NO_GLYPH           = 1u << 31;
 
 vertex VertexOut vertex_cell(
@@ -45,7 +42,6 @@ vertex VertexOut vertex_cell(
     const device CellInstance* instances [[buffer(0)]],
     constant FrameUniforms& u [[buffer(1)]]
 ) {
-    // Two-triangle quad corners, CCW order.
     float2 corners[6] = {
         float2(0, 0), float2(1, 0), float2(0, 1),
         float2(1, 0), float2(1, 1), float2(0, 1)
@@ -58,7 +54,6 @@ vertex VertexOut vertex_cell(
     CellInstance inst = instances[iid];
     float2 cornerPx = inst.cellPosPx + corners[vid] * inst.quadSizePx;
 
-    // Convert pixel space -> clip space: top-left (0,0), bottom-right (viewport).
     float2 ndc;
     ndc.x = (cornerPx.x / u.viewportPx.x) * 2.0 - 1.0;
     ndc.y = 1.0 - (cornerPx.y / u.viewportPx.y) * 2.0;
@@ -69,11 +64,8 @@ vertex VertexOut vertex_cell(
     out.fgColor = inst.fgColor;
     out.bgColor = inst.bgColor;
     out.accentColor = u.accentColor;
-    // Glyph-less quads (bg / selection / decoration-only cells, wide-char
-    // spacers) are emitted with a zero UV rect. Mark them so the fragment
-    // stage skips the atlas fetch: without this they sample texel (0,0) of
-    // slot 0, which is blank only until the first atlas saturation flush
-    // rewinds to slot 0 and rasterises a (possibly full-block) glyph there.
+    // Glyph-less quads carry a zero UV rect and must skip the atlas fetch: texel (0,0) of slot 0
+    // holds a real glyph once an atlas saturation flush rewinds to slot 0.
     out.flags = inst.attrs.x
               | ((inst.uvSize.x == 0.0 && inst.uvSize.y == 0.0) ? BB_ATTR_NO_GLYPH : 0u);
     out.underlineColorPacked = inst.attrs.z;
@@ -85,8 +77,6 @@ vertex VertexOut vertex_cell(
 }
 
 // CellAttributeMask bits — must stay in lockstep with Sources/Renderer/CellInstance.swift.
-// (BB_ATTR_NO_GLYPH, bit 31, is declared above vertex_cell and is shader-internal.)
-// Lifted to named constants so the shader branches read like the Swift side.
 constant uint BB_ATTR_LINK_HOVER         = 1u << 0;
 constant uint BB_ATTR_STRIKE             = 1u << 1;
 constant uint BB_ATTR_UNDERLINE          = 1u << 2;
@@ -94,8 +84,7 @@ constant uint BB_ATTR_UNDERLINE_DOUBLE   = 1u << 3;
 constant uint BB_ATTR_UNDERCURL          = 1u << 4;
 constant uint BB_ATTR_UNDERLINE_DOTTED   = 1u << 5;
 constant uint BB_ATTR_UNDERLINE_DASHED   = 1u << 6;
-// Cell's glyph lives in the color atlas (BGRA premultiplied) rather than
-// the coverage-mono atlas. See `GlyphAtlas.colorTexture`.
+// The glyph lives in the color atlas (BGRA premultiplied), not the coverage-mono atlas.
 constant uint BB_ATTR_IS_COLOR_GLYPH     = 1u << 7;
 constant uint BB_ATTR_ANY_UNDERLINE      = BB_ATTR_UNDERLINE
                                          | BB_ATTR_UNDERLINE_DOUBLE
@@ -103,9 +92,6 @@ constant uint BB_ATTR_ANY_UNDERLINE      = BB_ATTR_UNDERLINE
                                          | BB_ATTR_UNDERLINE_DOTTED
                                          | BB_ATTR_UNDERLINE_DASHED;
 
-/// Straight-alpha → premultiplied. Decoration colours (underline, strike,
-/// accent) are opaque today, so this is the identity; kept so every return
-/// from `fragment_cell` speaks the pipeline's premultiplied contract.
 static inline float4 premul(float4 c) {
     return float4(c.rgb * c.a, c.a);
 }
@@ -115,61 +101,20 @@ fragment float4 fragment_cell(
     texture2d<float> atlas [[texture(0)]],
     texture2d<float> colorAtlas [[texture(1)]]
 ) {
-    // Colour-space note (audit shaders F1 / metal-renderer F9 / glyph-atlas F10):
-    // every colour flowing into this shader — fg, bg, accent, the
-    // selection tint, and underline unpacks below — is sRGB-encoded as
-    // a normalised float ∈ [0,1]. The render target is `.bgra8Unorm`
-    // (NOT `_srgb`) so `mix()` and the output-merger blend op run in
-    // sRGB-encoded numeric space rather than linear light. That is a
-    // deliberate choice matching Terminal.app / Alacritty / iTerm2's
-    // historical behaviour; the CAMetalLayer colorspace is pinned to
-    // sRGB on the window side so Display P3 panels don't reinterpret
-    // the bytes in wider primaries. Gamma-correct blending would
-    // require switching to `.bgra8Unorm_srgb` and uploading linear
-    // floats — deferred as a future user toggle.
+    // sRGB-encoded colours into a `.bgra8Unorm` (NOT `_srgb`) target: blending is not linear-light.
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     uint flags = in.flags;
 
-    // ---- Compositing model: PREMULTIPLIED output, blend ONE / ONE_MINUS_SRC_ALPHA.
-    //
-    // `base` is the cell's colour with the glyph composited over its own
-    // background, expressed premultiplied: rgb already scaled by alpha.
-    // The pipeline blends `out = src + dst * (1 - src.a)`, so a default-bg
-    // cell (bg.a == 0) contributes exactly `fg * coverage` over the clear
-    // colour, an explicit opaque bg contributes the fully-resolved pixel,
-    // and a translucent bg (backgroundOpacity < 1) lets the framebuffer
-    // show through by (1 - coverage) * (1 - bg.a).
-    //
-    // History: the previous formula returned `mix(bg, fg, c)` as a STRAIGHT
-    // colour with alpha `c` for default-bg cells and blended with
-    // SRC_ALPHA / ONE_MINUS_SRC_ALPHA. That squares the coverage:
-    // `c * (c * fg) + (1 - c) * dst` = `c² fg + …` — every anti-aliased edge
-    // pixel of ordinary text was thinner than CoreText rasterised it, while
-    // explicit-bg cells (alpha 1) got the correct `c`, so text visibly
-    // changed weight under the block cursor, in selections, and on status
-    // lines. Premultiplied output makes both cell classes identical.
+    // PREMULTIPLIED output, blend ONE / ONE_MINUS_SRC_ALPHA. Straight alpha with SRC_ALPHA
+    // squares the glyph coverage on default-bg cells (bg.a == 0).
     float4 bg = in.bgColor;
     float3 bgPre = bg.rgb * bg.a;
     float4 base;
     if ((flags & BB_ATTR_IS_COLOR_GLYPH) != 0u) {
-        // Color emoji path. The color atlas stores premultiplied BGRA
-        // bytes written by a CGBitmapContext with
-        // `premultipliedFirst | byteOrder32Little` + transparent-cleared
-        // background (see GlyphAtlas.rasterizeColor). Metal samples the
-        // texture as `bgra8Unorm`, which maps the memory bytes to the
-        // float4's color components in natural RGBA order — already
-        // premultiplied, so composite it straight over the cell bg.
-        // A flushed slot / rasterization failure / outside-ink texel
-        // samples as 0 and yields the bare bg, same as the mono path at
-        // zero coverage.
         float4 sample = colorAtlas.sample(s, in.uv);
         base = float4(sample.rgb + bgPre * (1.0 - sample.a),
                       sample.a + bg.a * (1.0 - sample.a));
     } else {
-        // `fgColor.a` is 1 today; honouring it keeps the formula correct if
-        // DIM ever moves to an alpha encoding.
-        // Glyph-less quad: coverage is 0 by construction; the flag is flat
-        // across the quad so the skipped fetch costs no divergence.
         float coverage = 0.0;
         if ((flags & BB_ATTR_NO_GLYPH) == 0u) {
             coverage = atlas.sample(s, in.uv).r * in.fgColor.a;
@@ -178,19 +123,11 @@ fragment float4 fragment_cell(
                       coverage + bg.a * (1.0 - coverage));
     }
 
-    // The rest of the function overlays strike/underline/undercurl on top of
-    // `base`, same code path for both mono and color glyphs (you can still
-    // underline an emoji).
     float distFromBottom = in.quadSizePx.y - in.localPx.y;
-    // Phase input for undercurl / dotted / dashed: the ABSOLUTE x in points,
-    // not the quad-local x. `localPx.x` restarts at 0 in every cell, and
-    // 8 pt × 1.4 rad is not a multiple of 2π, so the wave (and the dot /
-    // dash parity for odd cell widths) broke at every cell seam.
+    // Undercurl / dotted / dashed phase uses the ABSOLUTE x in points: `localPx.x` restarts at 0
+    // in every cell, which breaks the pattern at each cell seam.
     float x = in.cellOriginX + in.localPx.x;
 
-    // Unpack CSI 58 underline colour. 0xFFFFFFFF sentinel → use fg; any
-    // other value is 0x00RRGGBB. Keeping this in a local avoids five
-    // duplicate unpacks in the underline branches below.
     float4 ulColor = in.fgColor;
     if (in.underlineColorPacked != 0xFFFFFFFFu) {
         float r = float((in.underlineColorPacked >> 16) & 0xFFu) / 255.0;
@@ -199,11 +136,7 @@ fragment float4 fragment_cell(
         ulColor = float4(r, g, b, 1.0);
     }
 
-    // Decoration geometry comes from the font (FrameUniforms.decorationPx):
-    // underline centre / thickness from CTFontGetUnderlinePosition /
-    // Thickness, strike at half the x-height. The old fixed 1.5 pt band at
-    // 0.55·cellHeight was a hairline at 32 pt and sat above the x-height.
-    float ulCenter = in.decorationPx.x;          // pt above the quad bottom
+    float ulCenter = in.decorationPx.x;
     float ulHalf   = max(0.5, in.decorationPx.y * 0.5);
     float strikeC  = in.decorationPx.z;
     if ((flags & BB_ATTR_STRIKE) != 0u) {
@@ -221,7 +154,6 @@ fragment float4 fragment_cell(
             return premul(ulColor);
         }
         if ((flags & BB_ATTR_UNDERLINE_DOUBLE) != 0u) {
-            // Two bands of the underline thickness, one thickness apart.
             float gap = max(1.0, in.decorationPx.y);
             if (abs(distFromBottom - (ulCenter - gap)) <= ulHalf) return premul(ulColor);
             if (abs(distFromBottom - (ulCenter + gap)) <= ulHalf) return premul(ulColor);
@@ -287,19 +219,15 @@ fragment float4 fragment_cursor(
 ) {
     float2 p = in.localPx;
     float2 s = u.cellSizePx;
-    // DECSCUSR shape dispatch. Shape 3 (hidden) never reaches the shader —
-    // the CPU path skips the draw entirely.
-    // Bar: 2-pixel vertical column on the left edge of the cell.
+    // Shape 3 (hidden) never reaches the shader: the CPU path skips the draw entirely.
     if (u.shape == 1u) {
         if (p.x >= 2.0) discard_fragment();
         return u.color;
     }
-    // Underline: 2-pixel horizontal band at the bottom of the cell.
     if (u.shape == 2u) {
         if ((s.y - p.y) >= 2.0) discard_fragment();
         return u.color;
     }
-    // Block (shape == 0). Focused = solid; unfocused = outline stroke.
     if (u.filled > 0.5) {
         return u.color;
     }

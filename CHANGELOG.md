@@ -7,6 +7,10 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+### Fixed
+- **perf:** Parser throughput lost in 0.9.4 is back: plain text and coloured logs parse about 12% faster than 0.9.4 and binary output about 33% faster.
+- **prompts:** A prompt mark inside a synchronized update keeps its row when the update's end marker is split across two reads.
+
 ## [0.9.4] - 2026-11-03
 
 A bug-hunt release: about 170 fixes, each one commit with a regression test written without sight of the fix.

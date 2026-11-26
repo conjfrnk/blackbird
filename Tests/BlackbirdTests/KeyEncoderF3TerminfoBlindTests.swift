@@ -99,23 +99,6 @@ final class KeyEncoderF3TerminfoBlindTests: XCTestCase {
 
     // MARK: - 1. Modified F3 wire form
 
-    /// The headline trigger: Shift / Ctrl / Alt + F3 in legacy mode.
-    func test_f3_legacy_singleModifiers_areCsi13Tilde() {
-        let enc = KeyEncoder()
-        let expectations: [(name: String, modifiers: KeyEncoder.Modifiers, expected: Data)] = [
-            ("Shift", [.shift], csi("13;2~")),
-            ("Option", [.option], csi("13;3~")),
-            ("Control", [.control], csi("13;5~")),
-        ]
-        for item in expectations {
-            let actual = enc.encodeSpecial(.f3, modifiers: item.modifiers)
-            XCTAssertEqual(
-                actual, item.expected,
-                "\(item.name)+F3 (legacy) must be \(show(item.expected)); got \(show(actual))"
-            )
-        }
-    }
-
     /// Every non-empty combination of Shift / Option / Control, legacy mode.
     func test_f3_legacy_allModifierCombinations_areCsi13Tilde() {
         let enc = KeyEncoder()

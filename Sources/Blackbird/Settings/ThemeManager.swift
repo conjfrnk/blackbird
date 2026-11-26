@@ -1,18 +1,6 @@
 import Combine
 import AppKit
 
-/// Single object that observes `Preferences` + `NSApp.effectiveAppearance`
-/// (for Auto mode) and pushes the resolved palette into every registered
-/// session + view.
-///
-/// Threading: annotated `@MainActor`. All palette mutations, registration
-/// bookkeeping, and Preferences reads must happen on the main runloop. Every
-/// fire-path (`objectWillChange` sink, `effectiveAppearance` KVO, first-show
-/// `refresh`, `register`) already hops via `DispatchQueue.main.async` or is
-/// called directly from AppKit main-thread callbacks, so this annotation
-/// is descriptive — it just nails the invariant down so a future background-
-/// queue caller (or Swift Concurrency migration) gets a compile-time warning
-/// instead of a silently-corrupt `registrations` array. (settings F4)
 @MainActor
 public final class ThemeManager {
     public static let shared = ThemeManager()
@@ -21,40 +9,18 @@ public final class ThemeManager {
     private var appearanceObs: NSKeyValueObservation?
     private weak var currentApp: NSApplication?
 
-    /// One registration per live window controller. `owner` is held weakly
-    /// and keyed by `ObjectIdentifier(owner)` so a window teardown auto-
-    /// evicts the entry — no explicit unregister() needed from the caller.
-    /// (main-window F1)
     private struct Registration {
         weak var owner: AnyObject?
         let sessionProvider: () -> TerminalSession?
         let viewProvider: () -> TerminalView?
-        /// The palette last pushed into this registration's session. The
-        /// session push overwrites palette slots 0-15 + fg/bg/cursor, wiping
-        /// whatever a program set via OSC 4/10/11/12, so it is gated on this
-        /// (the RESOLVED palette), not on `PaletteInputs`: translucency /
-        /// cursor / OS-appearance churn that resolves to the same palette
-        /// re-themes the view but must leave the program's colours alone.
+        /// The session push overwrites palette slots 0-15 + fg/bg/cursor, wiping a program's OSC 4/10/11/12
+        /// colours, so it is gated on this resolved palette, not on `PaletteInputs`.
         var lastSessionPalette: ThemePalette?
     }
     private var registrations: [ObjectIdentifier: Registration] = [:]
 
-    /// Cache of the inputs `applyTheme(_:)` actually consumes.
-    /// `objectWillChange` fires on every `@AppStorage` write (font-size
-    /// slider, OSC 52 toggle, …), but most of those don't change what
-    /// `applyTheme` pushes. Compare the tuple on every would-be apply and
-    /// skip the 19× `bbterm.setColor` + renderer push when nothing
-    /// relevant changed.
-    ///
-    /// Why each field is in the tuple:
-    /// - `themeRaw`, `themeModeRaw`, `appearanceIsDark` — drive which
-    ///   palette is resolved (the core palette swap).
-    /// - `translucency` — consumed by `applyTheme` for `clearColor`
-    ///   alpha, renderer bg opacity, and window blur radius. Must be in
-    ///   the tuple or translucency-slider changes wouldn't propagate
-    ///   live (the palette itself doesn't change when the slider moves).
-    /// - `cursorBlink`, `cursorShapeRaw` — also consumed by
-    ///   `applyTheme`; same liveness requirement. (settings F1)
+    /// The inputs `applyTheme(_:)` consumes. `objectWillChange` fires on every `@AppStorage` write, so an
+    /// apply is skipped unless one of these changed.
     private struct PaletteInputs: Equatable {
         let themeRaw: String
         let themeModeRaw: String
@@ -66,28 +32,12 @@ public final class ThemeManager {
     private var lastPaletteInputs: PaletteInputs?
 
     private init() {
-        // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE.
-        //
-        // Subscribers to `Preferences.shared.objectWillChange` must NOT perform
-        // a `UserDefaults.standard.set(…)` or any call that transitively writes
-        // UserDefaults (e.g. Sparkle's `automaticallyChecksForUpdates =`).
-        // Every UserDefaults write fires `NSUserDefaultsDidChangeNotification`,
-        // which SwiftUI's global `UserDefaultObserver` bridges back into
-        // `objectWillChange` on every ObservableObject holding an @AppStorage —
-        // including `Preferences.shared`. That re-fires this sink, which
-        // writes again, and the main queue piles up `main.async` blocks until
-        // the process OOMs (see commit 982b719 / AppDelegate.autoUpdateObserver
-        // for the fix pattern). If a UserDefaults write is unavoidable, add a
-        // same-value guard before the write so the self-re-entry short-circuits.
-        //
-        // This closure is safe: it only pushes palette/state into TerminalSession
-        // (Rust) and TerminalView (Metal/AppKit). No UserDefaults writes.
+        // Sinks on `Preferences.shared.objectWillChange` must not write UserDefaults, even transitively:
+        // SwiftUI bridges every UserDefaults write back into `objectWillChange`, re-firing the sink without bound.
         observers.append(
             Preferences.shared.objectWillChange
                 .sink { [weak self] _ in
-                    // objectWillChange fires before the update; re-apply on
-                    // the next runloop tick once the @AppStorage value has
-                    // actually settled.
+                    // objectWillChange fires before the update; apply on the next runloop tick.
                     DispatchQueue.main.async { self?.applyToAllIfPaletteChanged() }
                 }
         )
@@ -100,11 +50,6 @@ public final class ThemeManager {
         }
     }
 
-    /// Register a (session, view) pair keyed by a long-lived owner object
-    /// (typically the `MainWindowController`). The owner is captured weakly,
-    /// so when the controller deinits the entry auto-evicts on the next
-    /// apply pass — callers don't need to pair this with an unregister.
-    /// Re-registering with the same owner replaces the prior entry.
     public func register(owner: AnyObject,
                          sessionProvider: @escaping () -> TerminalSession?,
                          viewProvider:    @escaping () -> TerminalView?) {
@@ -118,9 +63,6 @@ public final class ThemeManager {
         apply(key, registration, palette: resolvedPalette, pushSession: true)
     }
 
-    /// Whether the app is currently rendering in a dark appearance. The ONE
-    /// resolution, shared by `resolvedPalette` and `currentPaletteInputs` so
-    /// the two can't disagree about light/dark.
     private func systemIsDark() -> Bool {
         let app = currentApp ?? NSApp
         return app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -137,46 +79,24 @@ public final class ThemeManager {
         return p.theme.palette(dark: dark)
     }
 
-    /// Re-apply the resolved palette to every registration. Use from any
-    /// "the window just became ready for a palette" hook (e.g. first show),
-    /// so quantities that need a live windowNumber — like the CGS blur
-    /// radius — actually take effect.
     public func refresh() {
-        // Unconditional apply — first-show blur wiring needs this even when
-        // the palette itself hasn't changed since the last apply (the window
-        // number wasn't live last time). Bypass the equality gate.
+        // Unconditional: first-show blur wiring needs a live windowNumber even when the palette is unchanged.
         applyToAll(inputs: currentPaletteInputs(), forceSession: true)
     }
 
-    /// Re-apply the theme to ONE registration's view only. For the per-window
-    /// "just became ready" hooks (first show / first key), where the only
-    /// thing missing is the live windowNumber the CGS blur call needs:
-    /// `register()` already pushed the session palette, so re-pushing it
-    /// (24 `setColor` + a full snapshot) is redundant for the owner and, for
-    /// every OTHER tab, pointless work that also wipes any OSC 4/10/11
-    /// palette a program set. Unconditional (no dedup), silent no-op for an
-    /// unregistered owner, and deliberately leaves `lastPaletteInputs` and
-    /// the registration table alone — the all-registrations path owns both.
+    /// View only: `register()` already pushed the session palette, and re-pushing it wipes any OSC
+    /// 4/10/11 palette a program set.
     public func refresh(owner: AnyObject) {
         guard let reg = registrations[ObjectIdentifier(owner)], reg.owner === owner else { return }
         reg.viewProvider()?.applyTheme(resolvedPalette)
     }
 
-    /// Called from the Preferences-change sink and the effectiveAppearance
-    /// KVO. Short-circuits when no palette-relevant input changed — prevents
-    /// font-size slider drags from re-applying the palette at per-frame
-    /// rates. (settings F1)
     private func applyToAllIfPaletteChanged() {
         let inputs = currentPaletteInputs()
         if let last = lastPaletteInputs, last == inputs {
-            // Still reap dead owners even on the fast path so the dictionary
-            // doesn't grow when palette-irrelevant prefs churn.
             reapDeadRegistrations()
             return
         }
-        // Hand the already-computed inputs straight to the apply so the cache
-        // is computed once and assigned once per change (not re-derived inside
-        // applyToAll). settings F1.
         applyToAll(inputs: inputs)
     }
 
@@ -199,22 +119,9 @@ public final class ThemeManager {
         }
     }
 
-    /// Push the resolved palette to every (live) registration and stamp the
-    /// dedup cache with `inputs` — the snapshot the caller already computed, so
-    /// the inputs are derived once per apply, not twice. The view always
-    /// re-themes (it consumes translucency / cursor / blur); the session only
-    /// gets the palette when it differs from the one it last received, or when
-    /// `forceSession` is set. `PaletteInputs` also changes on inputs that leave
-    /// the resolved palette untouched, and re-pushing it then would clobber the
-    /// program's OSC 4/10/11/12 colours for nothing.
     private func applyToAll(inputs: PaletteInputs, forceSession: Bool = false) {
-        // Reap registrations whose owner (MainWindowController) has been
-        // deallocated. Weak-owner keying means dead windows self-evict
-        // here — no explicit unregister call is required from the caller
-        // side. (main-window F1)
         reapDeadRegistrations()
         lastPaletteInputs = inputs
-        // Resolve once, not per registration — N tabs share one palette.
         let palette = resolvedPalette
         for (key, reg) in registrations {
             apply(key, reg, palette: palette,
@@ -224,8 +131,8 @@ public final class ThemeManager {
 
     private func apply(_ key: ObjectIdentifier, _ reg: Registration,
                        palette: ThemePalette, pushSession: Bool) {
-        // Stamp only when a session actually received the palette, so a
-        // registration whose session isn't up yet is still pushed later.
+        // Stamp only when a session actually received the palette, so a registration whose session isn't
+        // up yet is still pushed later.
         if pushSession, let session = reg.sessionProvider() {
             session.applyPalette(palette)
             registrations[key]?.lastSessionPalette = palette

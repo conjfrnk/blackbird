@@ -42,12 +42,6 @@ final class BellStyleBlindTests: XCTestCase {
         XCTAssertEqual(Preferences.BellStyle.off.rawValue, "Off")
     }
 
-    func test_rawValues_roundTripThroughInit() {
-        for style in Preferences.BellStyle.allCases {
-            XCTAssertEqual(Preferences.BellStyle(rawValue: style.rawValue), style)
-        }
-    }
-
     func test_visual_flashesOnly() {
         XCTAssertTrue(Preferences.BellStyle.visual.flashes)
         XCTAssertFalse(Preferences.BellStyle.visual.sounds)

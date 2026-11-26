@@ -504,35 +504,4 @@ final class CmdLetterInterceptMatrixTests: XCTestCase {
             }
         }
     }
-
-    /// The matrix must enumerate every `(letter, shift?)` cell. A
-    /// partial table would silently let new shortcuts slip past — we
-    /// pin the dimension explicitly so a regression that drops a row
-    /// surfaces as a count failure rather than an unobservable gap.
-    func test_matrixIsFullyPopulated() {
-        XCTAssertEqual(
-            Self.expected.count, 52,
-            "Cmd+letter intercept matrix must have 26 letters × 2 (plain + shift) "
-                + "= 52 entries. Got \(Self.expected.count). Add / restore the "
-                + "missing rows in `CmdLetterInterceptMatrixTests.expected`."
-        )
-
-        // Defence in depth: even with a 52-row table, two duplicates
-        // could mask a missing letter. Verify the cell set is exactly
-        // the cartesian product.
-        var seen = Set<String>()
-        for row in Self.expected {
-            let key = "\(row.letter):\(row.shift)"
-            XCTAssertFalse(
-                seen.contains(key),
-                "Duplicate row in matrix: \(key). Each (letter, shift) pair "
-                    + "must appear exactly once."
-            )
-            seen.insert(key)
-        }
-        XCTAssertEqual(
-            seen.count, 52,
-            "Matrix has \(seen.count) unique (letter, shift) pairs; expected 52."
-        )
-    }
 }

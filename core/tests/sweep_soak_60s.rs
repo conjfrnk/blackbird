@@ -272,12 +272,3 @@ mod macos {
         }
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-#[test]
-#[ignore]
-fn soak_60s_macos_only() {
-    // mach_task_basic_info is macOS-only. Blackbird itself is macOS-
-    // only, so the gate is fine. Stub keeps the test harness
-    // buildable on Linux (fuzz CI) without compile-time errors.
-}

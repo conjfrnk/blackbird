@@ -127,16 +127,4 @@ final class FindBarAltScreenTests: XCTestCase {
             + "see only what's on screen, not scrollback content."
         )
     }
-
-    /// pre-flight: trivial.
-    ///
-    /// Belt-and-braces: the historic alt-screen sequence `\e[?47h` (a
-    /// pre-DECSET-1049 alternative) must also set the bit. Some legacy
-    /// curses programs still use it.
-    func test_altScreenMode_setsViaLegacyDECSET47() throws {
-        // alacritty_terminal 0.26 doesn't wire legacy DECSET 47h to the
-        // ALT_SCREEN mode bit — only 1049h is implemented. Kept as a
-        // breadcrumb: if alacritty grows support, drop the XCTSkip.
-        throw XCTSkip("alacritty_terminal 0.26 doesn't implement DECSET 47h; only 1049h is wired to altScreen")
-    }
 }

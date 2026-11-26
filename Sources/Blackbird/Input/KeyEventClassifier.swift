@@ -1,25 +1,10 @@
 import AppKit
 
-/// Pure classification of AppKit `NSEvent`s into the input encoder's vocabulary:
-/// the Option-as-Meta chord decision and the NSEvent → `KeyEncoder.SpecialKey`
-/// mapping (arrows / nav / function / keypad keys). Extracted verbatim from
-/// `TerminalView` (REFACTOR.md Part IV Wave-2) so the keyDown decision tree's
-/// building blocks are testable without a live `NSView`/input context.
 enum KeyEventClassifier {
     private static let returnKeyCode: UInt16 = 36       // kVK_Return
     private static let keypadEnterKeyCode: UInt16 = 76  // kVK_ANSI_KeypadEnter
     private static let tabKeyCode: UInt16 = 48          // kVK_Tab
 
-    /// True when an Option+key event should bypass the IME and be encoded as a
-    /// Meta chord (ESC + base char) rather than composed as a dead-key / accent.
-    /// In "Use Option as Meta" mode, Option becomes the Meta modifier, so
-    /// Option+e must emit ESC 'e' rather than start a "´" dead-key composition
-    /// (and Option+a must emit ESC 'a' rather than insert "å"). Excludes
-    /// Ctrl/⌘ chords (Ctrl+Option is handled by the encoder's Meta-prefix path;
-    /// ⌘ is a menu/app shortcut). Native-Option mode (`optionIsMeta == false`)
-    /// always returns false so dead-key composition is preserved. Pure so the
-    /// decision is unit-testable without a live input context (the `keyDown` IME
-    /// path can't be driven headlessly).
     static func isOptionMetaChord(
         optionIsMeta: Bool,
         modifierFlags: NSEvent.ModifierFlags
@@ -30,14 +15,8 @@ enum KeyEventClassifier {
             && !modifierFlags.contains(.command)
     }
 
-    /// True for the Return chords `NSApplication.sendEvent` consumes itself —
-    /// AppKit's "show the contextual menu" keyboard gesture (Ctrl+Return, with
-    /// or without Shift). The event never reaches the window or the view's
-    /// `keyDown`, so the program (Claude Code's Ctrl+Enter send) never sees it
-    /// and the right-click menu pops instead; `ContextMenuKeyInterceptor`
-    /// re-routes it. Measured with real HID events: Ctrl+Option+Return and
-    /// Ctrl+keypad-Enter are NOT consumed (they reach `keyDown`), and ⌘ chords
-    /// stay app shortcuts, so neither qualifies.
+    /// The Return chords `NSApplication.sendEvent` consumes itself ("show the contextual menu").
+    /// Ctrl+Option+Return and Ctrl+keypad-Enter are not consumed; they reach `keyDown`.
     static func isContextMenuKeyChord(
         keyCode: UInt16,
         modifierFlags: NSEvent.ModifierFlags
@@ -48,56 +27,25 @@ enum KeyEventClassifier {
             && !modifierFlags.contains(.command)
     }
 
-    /// True for a numeric-keypad digit / operator key (0-9 + - * / . =) while
-    /// the program has application-keypad mode (DECPAM) on. AppKit reports
-    /// these as plain printable text, so the input context commits them via
-    /// `insertText` — which encodes the bare character and never consults
-    /// DECPAM — and `encodeSpecial`'s SS3 sequences (ESC O p..y / k m j o n X)
-    /// are never reached. The caller bypasses the IME for these keys, as for
-    /// the Option-Meta chord. Keypad Enter is excluded: it arrives as
-    /// `doCommand(insertNewline:)`, so it already reaches the encoder.
+    /// AppKit commits keypad digits / operators via `insertText`, which never consults DECPAM; callers bypass the IME.
     static func isApplicationKeypadKey(_ event: NSEvent, applicationKeypad: Bool) -> Bool {
         applicationKeypad && isKeypadCharacterKey(event)
     }
 
-    /// True for a numeric-keypad digit / operator key (0-9 + - * / . =),
-    /// whatever the keypad mode. Keypad Enter is excluded (it arrives as
-    /// `doCommand(insertNewline:)`, never as committed text).
+    /// Keypad Enter is excluded: it arrives as `doCommand(insertNewline:)`, never as committed text.
     static func isKeypadCharacterKey(_ event: NSEvent) -> Bool {
         guard event.modifierFlags.contains(.numericPad),
               let key = keypadKey(for: event) else { return false }
         return key != .kpEnter
     }
 
-    /// Return and keypad Enter. Under Ctrl their raw `characters` are not an
-    /// Enter byte (keypad Enter reports ETX, which the legacy control fast path
-    /// would send as 0x03 = SIGINT), so the encoder must decide, not that path.
+    /// Under Ctrl, keypad Enter's raw `characters` is ETX (0x03 = SIGINT), so the encoder must decide.
     static func isEnterKey(keyCode: UInt16) -> Bool {
         keyCode == Self.returnKeyCode || keyCode == Self.keypadEnterKeyCode
     }
 
-    /// True for a chord the input context would commit through `insertText`
-    /// (which carries no modifiers) instead of routing to a command, so the
-    /// caller skips the IME and lets the encoder frame the key:
-    ///
-    /// - Ctrl+Option + ANY key. AppKit commits the key's raw control character
-    ///   (Ctrl+Option+Return/Tab/Esc -> CR / TAB / ESC, Ctrl+Option+letter ->
-    ///   its C0 byte, `charactersIgnoringModifiers` still the letter) or a
-    ///   bare space for Space, with Ctrl and Meta dropped: M-C-k degrades to
-    ///   C-k, Ctrl+Option+c writes a bare 0x03, kitty flag 1 gets the plain
-    ///   key instead of `CSI <cp>;7u`. Only f / b reach `doCommand`
-    ///   (moveWordForward: / moveWordBackward:). A dead-key composition uses
-    ///   Option without Ctrl, so a Ctrl+Option chord never composes.
-    /// - Return / keypad Enter with Shift (alone, or with Ctrl / Option).
-    ///   Keypad Enter reports ETX (U+0003) as its characters, which `insertText`
-    ///   writes as a literal Ctrl+C / SIGINT. Shift+Return does reach
-    ///   `doCommand(insertNewline:)`, so skipping the IME is harmless there.
-    ///   Plain, Ctrl-only and Option-only Enter keep their IME path (they
-    ///   arrive as `doCommand`).
-    ///
-    /// Never true with ⌘ held (an app shortcut that never reaches the IME hop).
-    /// Keyed on the physical key, like `isBackTab`; the caller still lets a
-    /// live composition own the key.
+    /// Chords the input context commits through `insertText` with the modifiers dropped: Ctrl+Option + any key,
+    /// and Shift + Return / keypad Enter (keypad Enter reports ETX). Keyed on the physical key.
     static func isNonComposableControlChord(
         keyCode: UInt16,
         modifierFlags: NSEvent.ModifierFlags
@@ -107,28 +55,17 @@ enum KeyEventClassifier {
         return isEnterKey(keyCode: keyCode) && modifierFlags.contains(.shift)
     }
 
-    /// The Return key is always Enter (`"\r"`) to the encoder, whatever
-    /// character Cocoa derives for it under Ctrl (Ctrl+Return can surface as
-    /// LF), so the kitty Enter mapping (`CSI 13 ; <mod> u`) always applies.
-    /// Every other key, keypad Enter included, keeps its characters.
+    /// Ctrl+Return can surface as LF; Return is always "\r" so the kitty Enter mapping (`CSI 13 ; <mod> u`) applies.
     static func normalizedReturnChars(keyCode: UInt16, chars: String) -> String {
         keyCode == Self.returnKeyCode ? "\r" : chars
     }
 
-    /// True for the Tab key when AppKit reports its Shift form: with Shift held
-    /// (alone or with Ctrl / Option) it delivers U+0019 (`NSBackTabCharacter`)
-    /// as both `characters` and `charactersIgnoringModifiers`, never `"\t"`.
-    /// U+0019 is also the C0 byte for Ctrl+Y, so left alone it is sent as ^Y
-    /// (VDSUSP in a cooked-mode job, yank in readline) instead of back-tab.
-    /// Keyed on the physical Tab key so a genuine Ctrl+Y (key code 16) is
-    /// never reinterpreted.
+    /// AppKit reports Shift+Tab as U+0019 (`NSBackTabCharacter`), which is also the C0 byte for Ctrl+Y;
+    /// keyed on the physical Tab key so a genuine Ctrl+Y is never reinterpreted.
     static func isBackTab(keyCode: UInt16, chars: String) -> Bool {
         keyCode == Self.tabKeyCode && chars == "\u{19}"
     }
 
-    /// Shift+Tab is a Tab (`"\t"` + Shift in the modifiers) to the encoder, so
-    /// it emits `CSI Z` (legacy) or reports codepoint 9 (kitty / modifyOtherKeys).
-    /// Every other key keeps its characters.
     static func normalizedTabChars(keyCode: UInt16, chars: String) -> String {
         isBackTab(keyCode: keyCode, chars: chars) ? "\t" : chars
     }
@@ -144,14 +81,9 @@ enum KeyEventClassifier {
         case NSEvent.SpecialKey.end:        return .end
         case NSEvent.SpecialKey.pageUp:     return .pageUp
         case NSEvent.SpecialKey.pageDown:   return .pageDown
-        // NSEvent.SpecialKey.delete is the Backspace key. We intentionally do
-        // NOT map it to SpecialKey.delete (CSI 3 ~) — Backspace must send the
-        // DEL byte (0x7F), which the char-based path produces naturally from
-        // event.charactersIgnoringModifiers. Only forward-delete maps here.
+        // NSEvent.SpecialKey.delete is Backspace: it must send DEL (0x7F) through the char path, not CSI 3 ~.
         case NSEvent.SpecialKey.deleteForward: return .delete
-        // A PC keyboard's Insert key reaches macOS as kVK_Help (keyCode 114)
-        // carrying NSHelpFunctionKey (U+F746); some drivers report
-        // NSInsertFunctionKey (U+F727) instead. Both are Insert (CSI 2 ~).
+        // A PC Insert key arrives as NSHelpFunctionKey (U+F746) or, on some drivers, NSInsertFunctionKey (U+F727).
         case NSEvent.SpecialKey.insert, NSEvent.SpecialKey.help: return .insert
         case NSEvent.SpecialKey.f1:  return .f1
         case NSEvent.SpecialKey.f2:  return .f2
@@ -174,13 +106,7 @@ enum KeyEventClassifier {
         case NSEvent.SpecialKey.f19: return .f19
         case NSEvent.SpecialKey.f20: return .f20
         default:
-            // Keypad keys aren't exposed via NSEvent.specialKey.
-            // NSEvent.modifierFlags.numericPad fires for external
-            // numeric-keypad keys (and for the arrow-cluster on some
-            // layouts — hence the explicit keyCode check). Only detect
-            // the digit / operator keypad keys, never the arrows
-            // (arrows route through the existing specialKey mapping
-            // above via NSEvent.SpecialKey.*Arrow).
+            // Arrows also carry .numericPad on some layouts; keypadKey matches digit / operator key codes only.
             if event.modifierFlags.contains(.numericPad) {
                 return keypadKey(for: event)
             }
@@ -188,18 +114,7 @@ enum KeyEventClassifier {
         }
     }
 
-    /// True when every scalar in `s` sits in a Unicode Private Use Area.
-    ///
-    /// AppKit encodes function and editing keys that have no printable form
-    /// as PUA scalars (the U+F700 block). Such a string must never reach the
-    /// PTY: `KeyEncoder.encode(chars:)` ends in a `Data(chars.utf8)` fallback,
-    /// so an unmapped special key used to type its raw PUA bytes into the
-    /// shell as mojibake. Suppressing here restores the intent of the audit-M3
-    /// `super.keyDown` forward — with no bytes produced, the event continues
-    /// down the responder chain so system keys (brightness, media) still work.
-    ///
-    /// Mixed content is NOT suppressed; only wholly-private-use strings are.
-    /// An empty string is not private-use — there is nothing to suppress.
+    /// AppKit encodes keys with no printable form as PUA scalars (the U+F700 block); they must never reach the PTY.
     static func isPrivateUseOnly(_ s: String) -> Bool {
         guard !s.isEmpty else { return false }
         return s.unicodeScalars.allSatisfy { scalar in
@@ -210,15 +125,8 @@ enum KeyEventClassifier {
         }
     }
 
-    /// Map a numeric-keypad NSEvent to the matching SpecialKey. Returns
-    /// nil for anything outside the explicit keypad scan-code set so
-    /// the caller's default path can handle arrows (which also carry
-    /// `.numericPad` on some keyboards).
     private static func keypadKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {
-        // Virtual key codes from Carbon/HIToolbox are stable across
-        // keyboard layouts. Hard-coded here rather than via
-        // kVK_ANSI_Keypad0 constants because those live in Carbon, and
-        // Blackbird doesn't otherwise link that umbrella.
+        // Carbon/HIToolbox virtual key codes, stable across keyboard layouts.
         switch event.keyCode {
         case 82: return .kp0
         case 83: return .kp1

@@ -1,57 +1,25 @@
 import AppKit
 import os
 
-/// Minimal right-edge scroll indicator — a translucent pill whose size
-/// reflects the viewport-to-buffer ratio and whose position reflects
-/// `displayOffset` within the total scrollback.
-///
-/// Visibility is driven entirely by the snapshot:
-///   - `historySize == 0`         → never shown (no content to scroll).
-///   - `displayOffset == 0`       → fades out after a 1.2 s delay (a 0.25 s
-///                                  cross-fade), since you are at the bottom.
-///   - `displayOffset > 0`        → visible full opacity.
-///
-/// Not interactive in v1 — it's a read-only hint. Drag-to-scroll is a
-/// natural future extension but omitted to keep scope tight.
 final class ScrollIndicator: NSView {
-    /// Diagnostic channel for the M-15 clamp. One-shot warning when the
-    /// `displayOffset / historySize` ratio escapes `[0, 1]` — that
-    /// signals an upstream regression in the Rust scroll math (or, on
-    /// the negative branch, a future ABI sign change). The clamp
-    /// silently corrects the visual; the log makes it discoverable via
-    /// `log stream --predicate 'category == "scrollIndicator"'` in a
-    /// release build. NO `#if DEBUG` gate — Release diagnosability
-    /// matters more than the one-time line cost.
     nonisolated private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "scrollIndicator")
     private static let didLogOutOfRange = OSAllocatedUnfairLock(initialState: false)
 
     private let thumbLayer = CALayer()
-    /// Parent layer for every prompt-mark tick so we can animate / fade the
-    /// marks as a group without touching the thumb. Sits under the thumb so
-    /// the thumb always paints on top of a mark at the current offset.
+    /// Sits under the thumb so the thumb always paints on top of a mark at the current offset.
     private let marksContainer = CALayer()
-    /// Pool of mark sublayers. Grown on demand, excess layers hidden rather
-    /// than removed so rapid prompt emission doesn't thrash CALayer alloc.
     private var markLayers: [CALayer] = []
     private var fadeOutWorkItem: DispatchWorkItem?
 
-    // MARK: - Geometry & timing (single source of truth)
+    // MARK: - Geometry & timing
 
-    /// Horizontal inset of the thumb / ticks from the right edge.
     private static let edgePad: CGFloat = 3
-    /// Minimum thumb height so the pill stays visible on a short window.
     private static let minThumbHeight: CGFloat = 24
-    /// Delay before the thumb auto-hides after the viewport returns to the
-    /// live grid.
     private static let autoHideDelay: TimeInterval = 1.2
-    /// Opacity cross-fade duration for show/hide.
     private static let fadeAnimationDuration: CFTimeInterval = 0.25
 
-    /// Map a `[0, 1]` fraction (0 = bottom, 1 = top) to the y-origin for an
-    /// element of `elementHeight` within a `track`-tall column. The ONE
-    /// fraction→y mapping, shared by the thumb and the prompt-mark ticks so the
-    /// two stay in lockstep.
+    /// `fraction`: 0 = bottom, 1 = top. Shared by the thumb and the prompt-mark ticks so the two stay in lockstep.
     private static func yForFraction(
         _ fraction: CGFloat, elementHeight: CGFloat, track: CGFloat
     ) -> CGFloat {
@@ -72,11 +40,8 @@ final class ScrollIndicator: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }  // pass-through
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    /// Re-tint when the window's appearance flips (the theme pins it) or the
-    /// indicator is added under a window whose appearance differs from the
-    /// app's.
     override func viewDidChangeEffectiveAppearance() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -84,36 +49,19 @@ final class ScrollIndicator: NSView {
         CATransaction.commit()
     }
 
-    /// Update the thumb geometry and visibility from the current snapshot.
-    /// Safe to call from the main thread at any cadence.
     func update(displayOffset: Int, historySize: Int, rows: Int) {
         guard historySize > 0, rows > 0 else {
             setVisible(false, animated: false)
             return
         }
 
-        // The buffer model: top = most ancient scrollback, bottom = live row.
-        // Total buffer lines = historySize + rows. The viewport covers `rows`.
-        // displayOffset is how many lines the viewport is scrolled ABOVE the
-        // live grid — so displayOffset == historySize means "at the very top".
+        // `displayOffset` is how many lines the viewport is scrolled above the live grid; `historySize` is the very top.
         let totalLines = CGFloat(historySize + rows)
         let viewportFraction = CGFloat(rows) / totalLines
 
-        // Fraction scrolled from bottom (0.0) to top (1.0).
-        // M-15 / EC-2: clamp to [0, 1]. Sibling of L-3's thumb-height
-        // clamp — if `displayOffset > historySize` (regression in the
-        // Rust scroll math, or a transient mis-snap), an unclamped
-        // ratio paints the thumb above the track. The 0 floor guards
-        // a hypothetical negative `displayOffset` (today bb_term_*
-        // returns u32, but the Swift Int could carry a sign through a
-        // future ABI change) — defense-in-depth, mirrors L-3 shape.
+        // Clamp: `displayOffset > historySize` would paint the thumb above the track.
         let rawFromBottom = CGFloat(displayOffset) / CGFloat(max(historySize, 1))
         let scrollFromBottom = min(1, max(0, rawFromBottom))
-        // Defense-in-depth observability. The clamp above hides a bad
-        // upstream value; without a log, a regression in the Rust
-        // scroll math would manifest only as a thumb that pins to the
-        // edge with no breadcrumb. One-shot so a sustained regression
-        // doesn't flood the unified log.
         if rawFromBottom > 1 || rawFromBottom < 0 {
             Self.didLogOutOfRange.withLock { didLog in
                 if !didLog {
@@ -124,21 +72,12 @@ final class ScrollIndicator: NSView {
         }
 
         let track = bounds.height
-        // L-3 / RW-05: clamp the thumb height to the track so a very
-        // small window can't make `thumbHeight > track`, which gives
-        // `maxThumbY < 0` and renders the thumb above its parent's
-        // origin. The 24pt floor still applies when the track is at
-        // least that tall.
+        // Clamp to the track: `thumbHeight > track` gives a negative max y and a thumb above its parent's origin.
         let thumbHeight = min(track, max(Self.minThumbHeight, track * viewportFraction))
-        // Thumb y: at displayOffset == 0 (bottom) → thumb at bottom.
-        //          at displayOffset == historySize (top) → thumb at top.
         let thumbY = Self.yForFraction(scrollFromBottom, elementHeight: thumbHeight, track: track)
 
         let thumbWidth: CGFloat = 4
         let pad = Self.edgePad
-        // Disable implicit Core Animation to avoid smearing during rapid
-        // scroll — the geometry catches up every frame, so animating the
-        // change would look behind.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         thumbLayer.frame = NSRect(
@@ -150,16 +89,12 @@ final class ScrollIndicator: NSView {
         CATransaction.commit()
 
         if displayOffset > 0 {
-            // In scrollback — keep the thumb visible and cancel any
-            // pending fade so rapid output doesn't cause a fade blink.
             fadeOutWorkItem?.cancel()
             fadeOutWorkItem = nil
             setVisible(true, animated: false)
         } else if thumbLayer.opacity > 0, fadeOutWorkItem == nil {
-            // Just returned to the live grid while still visible — start a
-            // fade. Don't reschedule if one's already pending, otherwise
-            // every new snapshot pushes the hide further out and the thumb
-            // never disappears during active output.
+            // Never reschedule a pending fade: every new snapshot would push the hide further out
+            // and the thumb would never disappear during active output.
             scheduleAutoHide()
         }
     }
@@ -179,16 +114,6 @@ final class ScrollIndicator: NSView {
         }
     }
 
-    /// Render prompt-mark ticks along the track. Each mark's position is
-    /// derived from its (linesScrolled, gridRow) anchor (audit S5-004) so
-    /// marks slide upward as new content scrolls them into history — and
-    /// keep sliding correctly after scrollback saturates, where the old
-    /// history_size anchor froze.
-    ///
-    /// Call from the main thread whenever `TerminalSession.promptMarks`
-    /// changes OR the displayOffset changes (so marks stay visually anchored
-    /// during scroll). No-op while historySize == 0 (no buffer to position
-    /// against).
     func updatePromptMarks(
         _ marks: [TerminalSession.PromptMark],
         linesScrolled: UInt64,
@@ -202,12 +127,9 @@ final class ScrollIndicator: NSView {
             return
         }
         let track = bounds.height
-        // Tick geometry: 8 pt tall × 2 pt wide, painted in the accent
-        // colour at ~60 % alpha so the thumb over it still reads clearly.
         let tickHeight: CGFloat = 8
         let tickWidth: CGFloat = 2
         let pad = Self.edgePad
-        // Re-use or create one layer per mark. Excess hidden.
         while markLayers.count < marks.count {
             let l = CALayer()
             l.cornerRadius = 1
@@ -224,11 +146,8 @@ final class ScrollIndicator: NSView {
                 continue
             }
             let m = marks[i]
-            // Distance in lines from the bottom-most (live) row: the
-            // marked row started at gridRow (so rows-1-gridRow above
-            // the bottom) and every line scrolled since pushes it one
-            // further up (audit S5-004 anchor algebra). Marks pushed
-            // past retention land outside [0, total) and hide.
+            // Lines above the live bottom row: the mark started rows-1-gridRow above it and every line
+            // scrolled since pushes it one further up. Marks past retention land outside [0, total).
             let scrolledSince = linesScrolled >= m.linesScrolled
                 ? Int(clamping: linesScrolled - m.linesScrolled)
                 : 0
@@ -249,7 +168,6 @@ final class ScrollIndicator: NSView {
             )
         }
         CATransaction.commit()
-        // Fade container up when we have marks to show.
         marksContainer.opacity = 1
     }
 
@@ -265,13 +183,8 @@ final class ScrollIndicator: NSView {
 }
 
 extension NSView {
-    /// Tint for the translucent overlays drawn over the grid (the visual-bell
-    /// flash and the scroll thumb): white on a dark appearance, black on a
-    /// light one. White at 25 % over a near-white light-theme background moves
-    /// each channel by 0-4 levels, i.e. invisible.
-    /// `TerminalView.setWindowAppearance` pins the window's appearance to the
-    /// theme's lightness, so `effectiveAppearance` tracks the theme background,
-    /// not the OS.
+    /// `TerminalView.setWindowAppearance` pins the window's appearance to the theme's lightness,
+    /// so `effectiveAppearance` tracks the theme background, not the OS.
     var gridOverlayTint: CGColor {
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         return (isDark ? NSColor.white : NSColor.black).withAlphaComponent(0.25).cgColor
