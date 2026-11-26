@@ -93,10 +93,13 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // drain. Run whole-chunk, the wire order is tap, processor, colour
     // whatever order the queries were written in, so a DA1 / CPR sentinel
     // overtakes the answers it trails. Advance both parsers in lock-step
-    // instead, cutting before every ESC (each sequence starts at one, so a
-    // segment holds at most one query sequence) and drain after each
-    // segment. An ESC that finds a string open also ends it, which is what
-    // dispatches an unterminated OSC colour query, so that ESC is cut off
+    // instead, cutting before every ESC that can start a query or a tap
+    // sequence (`next_cut`; each sequence starts at an ESC, so a segment
+    // holds at most one query sequence) and drain after each segment. While
+    // a DEC 2026 synchronized update is open or the tap holds prompt marks
+    // the cut is before every ESC, so a replay is followed by as little of
+    // the stream as possible. An ESC that finds a string open also ends it,
+    // which is what dispatches an unterminated OSC colour query, so it is cut off
     // alone: the sequence it begins (a CPR, or an XTVERSION the tap answers
     // on sight) must not run before the colour reply is queued and drained.
     // Both parsers are streaming, so a cut anywhere, even between the ESC and
@@ -113,11 +116,15 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // `advance_grid` stamps them once the update has been replayed.
     let mut start = 0;
     while start < slice.len() {
+        let synchronized = bb.processor.sync_timeout().sync_timeout().is_some()
+            || !bb.osc_tap.held_prompt_marks.is_empty();
         let end = if slice[start] == 0x1B && bb.processor.in_string() {
             start + 1
-        } else {
+        } else if synchronized {
             memchr::memchr(0x1B, &slice[start + 1..])
                 .map_or(slice.len(), |next_esc| start + 1 + next_esc)
+        } else {
+            next_cut(slice, start + 1)
         };
         let segment = &slice[start..end];
         {
@@ -130,6 +137,46 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
         start = end;
     }
     finish_advance(bb);
+}
+
+/// Offset of the next ESC at or after `from` that `process_input` must cut
+/// before, or `slice.len()`.
+///
+/// Cutting before every ESC cost a coloured log a tenth of its throughput, so
+/// an ESC that starts an inert CSI is skipped: the segment runs on through it.
+/// That changes nothing observable. Whatever state either parser is in, the
+/// ESC moves it to the same one, the tap acts only on CSIs with a `>`
+/// intermediate, and the grid answers none of the finals `is_inert_csi`
+/// admits, so the skipped bytes add no reply and no tap event to the segment.
+fn next_cut(slice: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while let Some(offset) = memchr::memchr(0x1B, &slice[at..]) {
+        let esc = at + offset;
+        if !is_inert_csi(&slice[esc..]) {
+            return esc;
+        }
+        at = esc + 1;
+    }
+    slice.len()
+}
+
+/// SGR, cursor movement, erase, insert / delete, scroll and DECSTBM.
+const INERT_CSI_FINALS: &[u8] = b"mHfABCDEFGdJKLMPX@STr";
+
+/// Whether `bytes` opens with a CSI that is complete within
+/// `bytes`, carries only digit / `;` / `:` parameters, and ends in a final byte
+/// that styles, moves the cursor, erases or edits. `c` (DA), `n` (DSR) and `t`
+/// (window reports, title stack) are answered or fire events, and anything with
+/// a private marker or an intermediate may be a query (`CSI ? u`, `CSI > q`,
+/// `CSI ? 2026 h`), so none of those qualify.
+fn is_inert_csi(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"\x1b[") {
+        return false;
+    }
+    bytes[2..]
+        .iter()
+        .find(|byte| !matches!(byte, b'0'..=b'9' | b';' | b':'))
+        .is_some_and(|last| INERT_CSI_FINALS.contains(last))
 }
 
 /// The tail every parser-advance path owes: resolve deferred OSC 10/11/12
