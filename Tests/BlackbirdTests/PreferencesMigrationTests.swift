@@ -650,16 +650,17 @@ final class PreferencesMigrationTests: XCTestCase {
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
         let elapsed = Date().timeIntervalSince(start)
 
-        // Wallclock budget: 500 toggles + drain in < 2 s. A regression
+        // Wallclock budget: 500 toggles + drain in < 30 s. A regression
         // to unbounded re-entry would blow this by orders of magnitude
-        // (the original beachball hit minutes before OOM). 2 s is
-        // intentionally generous — under sanitisers + xctest overhead,
-        // a single toggle can take ~1 ms.
+        // (the original beachball hit minutes before OOM). The cost of a
+        // toggle depends on what else in the test host is subscribed: with
+        // a live TerminalView left by an earlier suite each toggle redraws,
+        // and CI measured 2.4 s and 3.0 s for a healthy run.
         XCTAssertLessThan(
-            elapsed, 2.0,
+            elapsed, 30.0,
             """
             F-S7-002: \(toggleCount) cursorBlink toggles + 0.5 s drain
-            took \(elapsed) s — exceeds the 2 s budget. This is the
+            took \(elapsed) s — exceeds the 30 s budget. This is the
             wallclock signature of the @AppStorage feedback loop fixed
             in 982b719; investigate the same-value-guard sink for
             unbounded re-entry.
